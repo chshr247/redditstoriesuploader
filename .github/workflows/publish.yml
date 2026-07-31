@@ -98,15 +98,26 @@ jobs:
 
       - name: Make one video and publish it
         run: |
-          if python main.py 1; then
-            if [ "${{ inputs.dry_run }}" = "true" ]; then
-              echo "dry run - skipping upload"
-              python youtube.py --text
-            else
-              python youtube.py --next --public
-            fi
-          else
+          # Ask the schedule BEFORE generating. The rendered file dies with the
+          # runner, so a video made now and refused now is a story burned for
+          # nothing - seen.db would still mark it used.
+          if [ "${{ inputs.dry_run }}" != "true" ] && ! python youtube.py --due; then
+            echo "not due yet, skipping this run"
+            exit 0
+          fi
+
+          if ! python main.py 1; then
             echo "::warning::no video produced this run (story pool dry or all skipped)"
+            exit 0
+          fi
+
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "dry run - rendered but not uploaded"
+            python youtube.py --text
+          else
+            # --due passed a moment ago; --force stops the same check from
+            # rejecting us a second time over a few seconds of drift
+            python youtube.py --next --public --force
           fi
 
       - name: Keep the state file

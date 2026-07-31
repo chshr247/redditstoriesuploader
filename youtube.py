@@ -243,6 +243,22 @@ def mark_done(mp4: Path, yt_id: str = "manual") -> None:
     print(f"{mp4.name} marked as uploaded")
 
 
+def due() -> str:
+    """Empty string if an upload is allowed right now, else the reason it is not.
+
+    Split out so a caller can ask before doing the expensive part. On a CI
+    runner the rendered file dies with the job, so generating first and finding
+    out afterwards that the schedule says no burns a story for nothing.
+    """
+    s = status()
+    if s["today"] >= s["allowed"]:
+        return f"daily allowance reached ({s['today']}/{s['allowed']})"
+    if s["since_last_h"] < YT_MIN_GAP_HOURS:
+        return (f"only {s['since_last_h']:.1f}h since the last upload, "
+                f"minimum is {YT_MIN_GAP_HOURS:.1f}h")
+    return ""
+
+
 def upload_next(private: bool = True, force: bool = False) -> str | None:
     """Upload at most one video, if the schedule allows it right now."""
     s = status()
@@ -253,14 +269,9 @@ def upload_next(private: bool = True, force: bool = False) -> str | None:
     if not queue:
         log.info("nothing to upload - run main.py first")
         return None
-    if not force:
-        if s["today"] >= s["allowed"]:
-            log.info("daily allowance reached, try tomorrow")
-            return None
-        if s["since_last_h"] < YT_MIN_GAP_HOURS:
-            log.info("only %.1fh since the last upload, minimum is %.1fh",
-                     s["since_last_h"], YT_MIN_GAP_HOURS)
-            return None
+    if not force and (reason := due()):
+        log.info("%s", reason)
+        return None
 
     mp4 = queue[0]
     meta_path = mp4.with_suffix(".meta.json")
@@ -364,6 +375,11 @@ if __name__ == "__main__":
                   f"{s['total']} uploaded, {len(pending())} queued")
             for p in pending()[:10]:
                 print("  ", p.name)
+        elif "--due" in sys.argv:
+            # exit code is the point: lets a scheduler check before it spends
+            reason = due()
+            print(reason or "due")
+            sys.exit(1 if reason else 0)
         elif "--text" in sys.argv:
             arg = next((a for a in sys.argv if a.endswith(".mp4")), None)
             show_text(Path(arg) if arg else None)
@@ -380,8 +396,9 @@ if __name__ == "__main__":
             mp4 = Path(sys.argv[1])
             print(upload(mp4, mp4.stem, private="--public" not in sys.argv))
         else:
-            print("usage: python youtube.py --auth | --status | --text [file] "
-                  "| --done <file> | --next [--public] | out/<id>.mp4 | --selftest")
+            print("usage: python youtube.py --auth | --status | --due | "
+                  "--text [file] | --done <file> | --next [--public] "
+                  "| out/<id>.mp4 | --selftest")
     except RuntimeError as e:
         print(f"\n{e}")
         sys.exit(1)
