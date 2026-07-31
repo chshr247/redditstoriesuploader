@@ -186,6 +186,15 @@ def speak(text: str, name: str, voice: str = TTS_VOICE, rate: str = RATE,
     if not words or mp3.stat().st_size == 0:
         raise RuntimeError(f"{TTS_BACKEND} returned nothing for {name!r}")
 
+    # Who says each word is known only here, where the cues are still attached;
+    # the aligner works on the stripped text and produces the same word order.
+    who = script.speakers(text)
+    if len(who) == len(words):
+        for w, label in zip(words, who):
+            w["speaker"] = label
+    else:
+        log.warning("speaker map %d vs %d words, colouring skipped", len(who), len(words))
+
     (OUT_DIR / f"{name}.json").write_text(json.dumps(words, ensure_ascii=False), "utf-8")
     dur = duration(mp3)
     log.info("%s: %.1f sec, %d words, real pace %.0f wpm",

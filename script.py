@@ -78,7 +78,9 @@ Rules:
   Mark only genuinely ambiguous words, never ordinary ones.
 - Mark delivery with cues in square brackets, in English, placed immediately before the words they change: "[nervous] Я открыл письмо. [shocked] Она знала всё это время." Free-form descriptions work too: [voice dropping], [barely holding it together].
 - Use between three and six cues in the whole narration, and only where the story actually turns - the reveal, the punchline, the moment it goes wrong. A cue on every sentence sounds like a bad audiobook. Never put one in the TITLE line.
-- Every line of direct speech gets its own cue, placed immediately before it, describing how that person said it. Reported anger read in a calm voice is the single most artificial thing the narration can do: "Он спустился и заорал: [shouting, furious] Почему ты не сказала, что ужин готов?" Give the narrator a contrasting one when they answer - [cold], [flatly], [not even looking up].
+- Put every line of direct speech inside «angle quotes», always, with no exception - they are what tells the renderer to colour that line differently on screen. Reported speech without quotes stays uncoloured and reads as the narrator's own voice.
+- Every line of direct speech gets its own cue, placed immediately before it. The cue starts with ONE English word naming who is speaking, then a comma, then how they said it: [husband, shouting and furious] «Почему ты не сказала, что ужин готов?» Use the same label for the same person every time - husband, wife, sister, boss, neighbour, mother. That label is what gives each speaker their own subtitle colour, so it must never be skipped or renamed halfway through.
+- Reported anger read in a calm voice is the single most artificial thing the narration can do. Give the narrator a contrasting cue when they answer: [me, cold] «Ужин на столе».
 - Let sentences breathe at their natural length. Do not chop the story into short fragments to force pauses: the engine puts a real gap at every full stop, and a wall of three-word sentences comes out sounding stilted. Enumerations of three or more items are the exception - split those, since a comma list is read as one flat run.
 - The TITLE is a hook, not a summary. It sits on screen for the two or three seconds in which the viewer decides to stay, so it has to leave a question open. Never state the outcome, never describe the whole plot, never write a calm report of events.
   Build it from the sharpest concrete fact, or from the collision between two people. Two short sentences are fine when the first sets up and the second lands:
@@ -109,6 +111,36 @@ ACCENTS = re.compile("[̀́]")
 def strip_tags(s: str) -> str:
     """Drop Fish delivery cues, keeping stress marks for the voice engine."""
     return re.sub(r"\s+", " ", TAG.sub(" ", s)).strip()
+
+
+def speakers(s: str) -> list[str | None]:
+    """One label per word of plain(s): who says it, or None for the narrator.
+
+    The label is lifted from the delivery cue that already precedes every line
+    of direct speech, so the model writes "[husband, shouting] «...»" and gets
+    both jobs done at once - no second syntax to remember and nothing extra to
+    strip. The list lines up with plain(s).split() one for one, which is the
+    same list the aligner produces.
+    """
+    out: list[str | None] = []
+    pending = None          # speaker named by the most recent cue
+    current = None          # speaker of the quote we are inside of
+    for token in re.split(r"(\[[^\]\n]{1,60}\])", s):
+        if not token:
+            continue
+        if token.startswith("[") and token.endswith("]"):
+            label = re.split(r"[,\s]", token[1:-1].strip(), 1)[0].lower()
+            pending = re.sub(r"\W", "", label) or None
+            continue
+        for word in token.split():
+            opens = any(c in word for c in "«„“")
+            closes = any(c in word for c in "»”")
+            if opens:
+                current = pending or "other"
+            out.append(current)
+            if closes:
+                current = pending = None
+    return out
 
 
 def plain(s: str) -> str:

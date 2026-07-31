@@ -25,6 +25,20 @@ HOLD_MAX = 0.18            # how long a card may outlive its own audio
 log = logging.getLogger(__name__)
 
 CARD_FONT_SIZE = 62
+
+# ASS stores colour as &HAABBGGRR - byte order reversed from RGB. Narrator stays
+# white; each speaker takes the next colour the first time they say anything.
+SPEAKER_COLOURS = ["&H0000FFFF",   # yellow
+                   "&H00FFFF00",   # cyan
+                   "&H0055FF55",   # light green
+                   "&H008888FF"]   # salmon
+# Values, not placeholders: this string is interpolated INTO the header, so a
+# {FONT} left here would reach libass verbatim and silently drop the style back
+# to a default font at a default size.
+SPEECH_STYLES = "\n".join(
+    f"Style: Speech{i},{FONT},{FONT_SIZE},{c},&H000000FF,&H00000000,"
+    "&H80000000,-1,0,0,0,100,100,0,0,1,8,3,5,80,80,0,1"
+    for i, c in enumerate(SPEAKER_COLOURS))
 # BorderStyle 3 paints an opaque box in OutlineColour - a title card with no
 # image files and no PIL. Outline doubles as the box padding.
 ASS_HEADER = f"""[Script Info]
@@ -37,7 +51,7 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Main,{FONT},{FONT_SIZE},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,8,3,5,80,80,0,1
-Style: Speech,{FONT},{FONT_SIZE},&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,8,3,5,80,80,0,1
+{SPEECH_STYLES}
 Style: Card,{FONT},{CARD_FONT_SIZE},&H00101010,&H000000FF,&H00F2F2F2,&H00F2F2F2,-1,0,0,0,100,100,0,0,3,24,0,5,120,120,0,1
 
 [Events]
@@ -54,28 +68,20 @@ def _ts(sec: float) -> str:
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
-QUOTE_OPEN = "«„“"
-QUOTE_CLOSE = "»”"
+def _styles(words: list[dict]) -> dict:
+    """Map each speaker to a style name, in order of first appearance.
 
-
-def _mark_speech(words: list[dict]) -> list[dict]:
-    """Flag the words that fall inside quotation marks.
-
-    Someone else's line coloured differently is readable with the sound off,
-    which is how most of these videos are first watched. Detection rides on the
-    quotes the narration already carries - no extra syntax for the model to
-    forget, and the marks themselves are stripped before anything is drawn.
+    A line in someone else's colour is readable with the sound off, which is
+    how most of these are first watched. Speakers past the palette wrap around
+    rather than fall back to white - two sharing a colour is a smaller lie than
+    a speaker looking like the narrator.
     """
-    out, inside = [], False
+    names = []
     for w in words:
-        opens = any(c in w["word"] for c in QUOTE_OPEN)
-        closes = any(c in w["word"] for c in QUOTE_CLOSE)
-        out.append({**w, "speech": inside or opens})
-        if opens:
-            inside = True
-        if closes:
-            inside = False
-    return out
+        s = w.get("speaker")
+        if s and s not in names:
+            names.append(s)
+    return {s: f"Speech{i % len(SPEAKER_COLOURS)}" for i, s in enumerate(names)}
 
 
 def _group(words: list[dict], min_chars: int = 3, max_words: int = 2,
@@ -94,7 +100,9 @@ def _group(words: list[dict], min_chars: int = 3, max_words: int = 2,
         prev = out[-1] if out else None
         if (prev and len(prev["word"].split()[-1]) < min_chars
                 and len(prev["word"].split()) < max_words
-                and len(prev["word"]) + 1 + len(w["word"]) <= max_chars):
+                and len(prev["word"]) + 1 + len(w["word"]) <= max_chars
+                # never let one card mix two voices
+                and prev.get("speaker") == w.get("speaker")):
             prev["word"] += " " + w["word"]
             prev["end"] = w["end"]
         else:
@@ -110,6 +118,7 @@ def build_ass(words: list[dict], path, title: str = "", title_end: float = 0) ->
         safe = safety.mask(script.plain(re.sub(r"[{}\\]", "", title)))
         lines.append(f"Dialogue: 0,{_ts(0)},{_ts(title_end)},Card,,0,0,0,,"
                      r"{\fscx85\fscy85\t(0,180,\fscx100\fscy100)}" + safe)
+    styles = _styles(words)
     words = _group(words)
     for i, w in enumerate(words):
         # A card follows the voice: it goes when the words stop. Holding it to
@@ -124,7 +133,8 @@ def build_ass(words: list[dict], path, title: str = "", title_end: float = 0) ->
         if not text or end <= w["start"]:
             continue
         pop = r"{\fscx70\fscy70\t(0,%d,\fscx100\fscy100)}" % POP_MS
-        lines.append(f"Dialogue: 0,{_ts(w['start'])},{_ts(end)},Main,,0,0,0,,{pop}{text}")
+        style = styles.get(w.get("speaker"), "Main")
+        lines.append(f"Dialogue: 0,{_ts(w['start'])},{_ts(end)},{style},,0,0,0,,{pop}{text}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -189,6 +199,18 @@ if __name__ == "__main__":
     wide = _group([_w("через", 0, 1), _w("двадцать", 1, 2), _w("минут", 2, 3)])
     assert all(len(c["word"]) <= 14 for c in wide), wide
     assert all(len(c["word"].split()) <= 2 for c in wide), wide
+
+    import script
+    body = ("Он вошёл. [husband, shouting] «Где ужин» Я не встала. "
+            "[me, cold] «На столе» Он ушёл.")
+    who = script.speakers(body)
+    assert len(who) == len(script.plain(body).split()), (who, script.plain(body))
+    tagged = [{**_w(t, i, i + 1), "speaker": s}
+              for i, (t, s) in enumerate(zip(script.plain(body).split(), who))]
+    st = _styles(tagged)
+    assert st == {"husband": "Speech0", "me": "Speech1"}, st
+    # a card must never mix two voices
+    assert all(len({c["speaker"]}) == 1 for c in _group(tagged))
 
     cards = _group(words)
     assert sum(len(c["word"].split()) for c in cards) == len(words), "lost a word"
