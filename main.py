@@ -40,7 +40,7 @@ def make_video(post: dict):
     out = render.render(mp3, words, post["id"], title=title, title_end=title_end)
     # publishing runs separately and later, so the text has to survive on disk
     (out.with_suffix(".meta.json")).write_text(json.dumps(
-        {"title": title, "body": script.strip_tags(body), "sub": post["sub"]},
+        {"title": script.plain(title), "body": script.plain(body), "sub": post["sub"]},
         ensure_ascii=False), "utf-8")
     source.mark_used(post["id"], post["score"], post["sub"])
     return out

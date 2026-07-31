@@ -29,9 +29,8 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from config import (DB_PATH, OUT_DIR, YT_AUDITED, YT_CLIENT_ID,
-                    YT_CLIENT_SECRET, YT_HASHTAGS, YT_MIN_GAP_HOURS,
-                    YT_REFRESH_TOKEN)
+from config import (DB_PATH, OUT_DIR, YT_CLIENT_ID, YT_CLIENT_SECRET,
+                    YT_HASHTAGS, YT_MIN_GAP_HOURS, YT_REFRESH_TOKEN)
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -107,17 +106,12 @@ def description_for(title: str, body: str = "", hashtags=None) -> str:
     return (("\n\n".join(parts)) + "\n\n" + tags)[:DESC_MAX]
 
 
-def upload(mp4, title: str, private: bool = True, body: str = "",
-           allow_unaudited: bool = False) -> str:
+def upload(mp4, title: str, private: bool = True, body: str = "") -> str:
     """Resumable upload in one PUT. Returns the video id."""
-    if not YT_AUDITED and not allow_unaudited:
-        raise RuntimeError(
-            "The API project has not passed its compliance audit, so anything "
-            "uploaded now is locked private permanently - Studio cannot undo it, "
-            "only a re-upload can. Upload through the YouTube site meanwhile.\n"
-            "Set YT_AUDITED=true in .env once approved, or pass --i-know to "
-            "override deliberately.")
-
+    # Google's docs say an unaudited project can only produce private videos.
+    # Measured 2026-07-31 on this project: privacyStatus=public went straight
+    # to public, confirmed via the oEmbed endpoint. If that ever changes, the
+    # symptom is a video that uploads fine but stays private in Studio.
     mp4 = Path(mp4)
     size = mp4.stat().st_size
     token = access_token()
@@ -249,8 +243,7 @@ def mark_done(mp4: Path, yt_id: str = "manual") -> None:
     print(f"{mp4.name} marked as uploaded")
 
 
-def upload_next(private: bool = True, force: bool = False,
-                allow_unaudited: bool = False) -> str | None:
+def upload_next(private: bool = True, force: bool = False) -> str | None:
     """Upload at most one video, if the schedule allows it right now."""
     s = status()
     queue = pending()
@@ -274,8 +267,7 @@ def upload_next(private: bool = True, force: bool = False,
     meta = json.loads(meta_path.read_text("utf-8")) if meta_path.exists() else {}
     title = meta.get("title") or mp4.stem
 
-    yt_id = upload(mp4, title, private=private, body=meta.get("body", ""),
-                   allow_unaudited=allow_unaudited)
+    yt_id = upload(mp4, title, private=private, body=meta.get("body", ""))
     with _db() as db:
         db.execute("INSERT OR REPLACE INTO uploaded VALUES (?,?,?)",
                    (mp4.name, yt_id, time.time()))
@@ -369,8 +361,7 @@ if __name__ == "__main__":
         elif "--status" in sys.argv:
             s = status()
             print(f"day {s['day']}, {s['today']}/{s['allowed']} today, "
-                  f"{s['total']} uploaded, {len(pending())} queued, "
-                  f"audited={YT_AUDITED}")
+                  f"{s['total']} uploaded, {len(pending())} queued")
             for p in pending()[:10]:
                 print("  ", p.name)
         elif "--text" in sys.argv:
@@ -384,12 +375,10 @@ if __name__ == "__main__":
                 mark_done(Path(arg))
         elif "--next" in sys.argv:
             print(upload_next(private="--public" not in sys.argv,
-                              force="--force" in sys.argv,
-                              allow_unaudited="--i-know" in sys.argv))
+                              force="--force" in sys.argv))
         elif len(sys.argv) > 1 and sys.argv[1].endswith(".mp4"):
             mp4 = Path(sys.argv[1])
-            print(upload(mp4, mp4.stem, private="--public" not in sys.argv,
-                         allow_unaudited="--i-know" in sys.argv))
+            print(upload(mp4, mp4.stem, private="--public" not in sys.argv))
         else:
             print("usage: python youtube.py --auth | --status | --text [file] "
                   "| --done <file> | --next [--public] | out/<id>.mp4 | --selftest")

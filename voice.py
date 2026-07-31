@@ -22,9 +22,9 @@ import urllib.request
 import edge_tts
 
 import script
-from config import (FISH_API_KEY, FISH_MODEL, FISH_SPEED, FISH_VOICES_FEMALE,
-                    FISH_VOICES_MALE, OUT_DIR, OUTPUT_LANG, TTS_BACKEND,
-                    TTS_VOICE, WHISPER_SIZE)
+from config import (FISH_API_KEY, FISH_MODEL, FISH_SPEED, FISH_TITLE_CUE,
+                    FISH_VOICES_FEMALE, FISH_VOICES_MALE, OUT_DIR, OUTPUT_LANG,
+                    TTS_BACKEND, TTS_VOICE, WHISPER_SIZE)
 
 TICKS_PER_SEC = 10_000_000
 FISH_URL = "https://api.fish.audio/v1/tts"
@@ -172,16 +172,16 @@ def speak(text: str, name: str, voice: str = TTS_VOICE, rate: str = RATE,
     """Synthesize into out/<name>.mp3 and out/<name>.json. Returns (mp3, words)."""
     mp3 = OUT_DIR / f"{name}.mp3"
 
-    # cues drive the delivery but are not spoken, so subtitles and alignment
-    # must only ever see the stripped text
-    spoken = script.strip_tags(text)
+    # cues and stress marks steer the engine but are never seen or heard as
+    # such, so subtitles and alignment only ever get the plain text
+    readable = script.plain(text)
 
     if TTS_BACKEND == "fish":
         _fish_synth(text, mp3, speed, pick_voice() if fish_voice is None else fish_voice)
-        words = _align(spoken, mp3)
+        words = _align(readable, mp3)
     else:
         # edge has no cue syntax and would read the brackets out loud
-        words = asyncio.run(_edge_stream(spoken, mp3, voice, rate))
+        words = asyncio.run(_edge_stream(readable, mp3, voice, rate))
 
     if not words or mp3.stat().st_size == 0:
         raise RuntimeError(f"{TTS_BACKEND} returned nothing for {name!r}")
@@ -205,7 +205,15 @@ def speak_parts(title: str, body: str, name: str, gap: float = 0.4,
     """
     # one voice for the whole video - title and body must not swap narrators
     fish_voice = pick_voice(gender)
-    t_mp3, _ = speak(title, f"{name}_title", rate=rate, speed=speed, fish_voice=fish_voice)
+
+    # The cue rides along to the engine and is stripped before anything is
+    # displayed, so the card and the description stay clean either way.
+    spoken_title = title
+    if TTS_BACKEND == "fish" and FISH_TITLE_CUE and "[" not in title:
+        spoken_title = f"{FISH_TITLE_CUE} {title}"
+
+    t_mp3, _ = speak(spoken_title, f"{name}_title", rate=rate, speed=speed,
+                     fish_voice=fish_voice)
     b_mp3, b_words = speak(body, f"{name}_body", rate=rate, speed=speed, fish_voice=fish_voice)
     if fish_voice:
         log.info("%s: %s voice %s", name, gender, fish_voice[:8])

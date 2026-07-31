@@ -67,6 +67,15 @@ Rules:
 - Keep it TikTok-safe: no profanity, no slurs, no graphic detail. Say "умер", not how.
 - Imagine a stranger scrolling who knows nothing about Reddit. Everything they need is in your text.
 - Write for the ear, not the eye: short sentences, plain words, natural spoken rhythm. Punctuate where a person would actually pause - the voice engine reads commas and full stops as breath.
+- Always write ё where the word has it: всё, ещё, её, свёкор, объём. Writing "все" for "всё" makes the voice say the wrong word.
+- Mark the stress on homographs - words spelled alike but stressed differently - by putting the combining acute U+0301 straight after the stressed vowel. Use U+0301 only, never the grave U+0300. Always decide from the meaning in the sentence:
+    сто́ит = is worth, costs   |   стои́т = is standing
+    за́мок = castle            |   замо́к = a lock
+    бо́льшая = the greater     |   больша́я = a big one
+    по́том = with sweat        |   пото́м = afterwards
+    пла́чу = I cry             |   плачу́ = I pay
+    у́же = narrower            |   уже́ = already
+  Mark only genuinely ambiguous words, never ordinary ones.
 - Mark delivery with cues in square brackets, in English, placed immediately before the words they change: "[nervous] Я открыл письмо. [shocked] Она знала всё это время." Free-form descriptions work too: [voice dropping], [barely holding it together].
 - Use between three and six cues in the whole narration, and only where the story actually turns - the reveal, the punchline, the moment it goes wrong. A cue on every sentence sounds like a bad audiobook. Never put one in the TITLE line.
 - The title states what happened without giving away the ending. It is read aloud, so no abbreviations, no brackets, no "(20F)" - write ages and genders as words if they matter at all.
@@ -83,11 +92,24 @@ def _wpm() -> int:
 
 
 TAG = re.compile(r"\[[^\]\n]{1,60}\]")
+ACCENT = "́"                      # combining acute: за́мок vs замо́к
+# The model occasionally reaches for the grave instead. Strip both on the way
+# to the screen rather than trust it to pick the right codepoint every time.
+ACCENTS = re.compile("[̀́]")
 
 
 def strip_tags(s: str) -> str:
-    """Drop Fish delivery cues. Anything the viewer reads goes through this."""
+    """Drop Fish delivery cues, keeping stress marks for the voice engine."""
     return re.sub(r"\s+", " ", TAG.sub(" ", s)).strip()
+
+
+def plain(s: str) -> str:
+    """Everything the engine needs and the viewer must not see.
+
+    Stress marks steer pronunciation but render as specks over letters, and
+    whisper never emits them - so alignment has to compare without them too.
+    """
+    return ACCENTS.sub("", strip_tags(s))
 
 
 def _clean(s: str) -> str:
@@ -98,7 +120,7 @@ def _clean(s: str) -> str:
 
 
 def _words(s: str) -> int:
-    return len(strip_tags(s).split())
+    return len(plain(s).split())
 
 
 def _target_words() -> int:
@@ -213,6 +235,18 @@ if __name__ == "__main__":
     gt, tt, bt = _split("NARRATOR: male\nTITLE: [sad] Мой заголовок\n\n[calm] Тело истории.")
     assert tt == "Мой заголовок", tt
     assert "[calm]" in bt, "body must keep its cues"
+
+    # stress marks reach the engine but never the screen
+    marked = f"Он сорвал замо{ACCENT}к с двери."
+    assert strip_tags(marked) == marked, "the voice must still get the mark"
+    assert plain(marked) == "Он сорвал замок с двери.", plain(marked)
+    assert plain(f"[sad] За{ACCENT}мок на холме") == "Замок на холме"
+    assert _words(f"замо{ACCENT}к и за{ACCENT}мок") == 3
+    assert "ё" in plain("Всё ещё её"), "ё is a real letter, keep it"
+    # a grave slipping in must not survive to the screen either
+    assert plain("сто̀ит") == "стоит" and plain("сто́ит") == "стоит"
+    _, t_acc, _ = _split(f"NARRATOR: male\nTITLE: За{ACCENT}мок\n\nТело.")
+    assert ACCENT in t_acc, "the title is spoken too - it keeps its marks"
     tw = _target_words()
     assert _fits(tw, tw) and not _fits(tw * 2, tw) and not _fits(3, tw)
     print(f"logic ok: {OUTPUT_LANG}, {_wpm()} wpm, target {tw} words for {TARGET_SEC} sec")

@@ -25,6 +25,11 @@ FISH_MODEL = os.getenv("FISH_MODEL", "s2.1-pro-free")
 FISH_VOICES_MALE = [v.strip() for v in os.getenv("FISH_VOICES_MALE", "").split(",") if v.strip()]
 FISH_VOICES_FEMALE = [v.strip() for v in os.getenv("FISH_VOICES_FEMALE", "").split(",") if v.strip()]
 FISH_SPEED = float(os.getenv("FISH_SPEED", 1.0))
+# Delivery cue applied to the title card only. The hook is the three seconds
+# that decide whether anyone watches, so it gets read harder than the story.
+# Applied at synthesis, never shown on screen. Empty string disables it.
+FISH_TITLE_CUE = os.getenv("FISH_TITLE_CUE",
+                           "[speaking with urgency, hooking the listener]")
 # Fish returns audio only, so word timings come from local whisper alignment.
 # base is enough - we use its timings, never its text.
 WHISPER_SIZE = os.getenv("WHISPER_SIZE", "base")
@@ -54,10 +59,6 @@ YT_REFRESH_TOKEN = os.getenv("YT_REFRESH_TOKEN", "")
 # pool to draw a different set from per upload, so descriptions are not clones
 YT_HASHTAGS = [h.strip() for h in os.getenv("YT_HASHTAGS", HASHTAGS).split() if h.strip()]
 YT_MIN_GAP_HOURS = float(os.getenv("YT_MIN_GAP_HOURS", 3))
-# Until the API project passes its compliance audit, every upload it makes is
-# locked to private FOREVER - Studio cannot unlock it, only a re-upload can.
-# So uploading before the audit burns the video. Flip this only once approved.
-YT_AUDITED = os.getenv("YT_AUDITED", "").lower() in ("1", "true", "yes")
 
 BG_DIR = ROOT / "assets" / "bg"      # background clips, 1080x1920
 OUT_DIR = ROOT / "out"               # audio, .ass, finished mp4
