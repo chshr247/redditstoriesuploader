@@ -36,7 +36,10 @@ BANNED = {
 # Russian mat, masked on screen. The prompt tells the model to avoid it;
 # this only catches what slips through.
 PROFANITY = re.compile(
-    r"\b(бл[яа]\w*|ху[йёея]\w*|пизд\w*|[её]б\w*|еба\w*|муда\w*|сук[аи]|"
+    # "бля" only - "бла" swept up благотворительный, благодарность and every
+    # other благо- word. Narrow beats clever: a missed swear is a smaller
+    # failure than a masked ordinary noun in the middle of a sentence.
+    r"\b(бля\w*|ху[йёея]\w*|пизд\w*|[её]б\w*|муда[кч]\w*|сука|суки|"
     r"fuck\w*|shit\w*|bitch\w*|cunt\w*)", re.IGNORECASE)
 
 _COMPILED = {k: re.compile(v, re.IGNORECASE) for k, v in BANNED.items()}
@@ -82,4 +85,11 @@ if __name__ == "__main__":
     assert mask("бляха") == "б****"
     assert mask("Что за хуйня") == "Что за х****"
     assert mask("обычное слово") == "обычное слово"
+
+    # ordinary words the mask must leave alone - every one of these was, or
+    # nearly was, mangled by a pattern that reached one letter too far
+    for ok in ["благотворительный фонд", "благодарность", "благо", "бланк",
+               "мудрость", "художник", "хуже некуда", "сукно", "обед",
+               "требую", "суконный"]:
+        assert mask(ok) == ok, f"false positive: {ok!r} -> {mask(ok)!r}"
     print(f"safety ok: {len(BANNED)} categories")
