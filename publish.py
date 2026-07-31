@@ -205,7 +205,19 @@ def upload(mp4, title: str, direct: bool = False, private: bool = True) -> str:
         body = {"source_info": source}
         url = f"{API}/post/publish/inbox/video/init/"
 
-    r = _post(url, body, token)
+    try:
+        r = _post(url, body, token)
+    except RuntimeError as e:
+        # The code names the client, but the fix is on the account: until the
+        # app is audited, a direct post only lands on an account set to private.
+        if "unaudited_client_can_only_post_to_private_accounts" in str(e):
+            raise RuntimeError(
+                "TikTok refuses a direct post from an unaudited app to a public "
+                "account. Either switch the account to private for the duration, "
+                "or drop --direct and let the video land in the app inbox as a "
+                "draft.") from None
+        raise
+
     data = r.get("data") or {}
     if not data.get("publish_id"):
         raise RuntimeError(f"init failed: {r}")
