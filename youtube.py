@@ -286,8 +286,21 @@ def authorize() -> None:
         raise RuntimeError(f"no refresh_token: {r}\n"
                            "revoke the app's access and retry - Google only "
                            "sends it on a fresh consent")
-    print("\nAdd this to .env:\n")
-    print(f"YT_REFRESH_TOKEN={r['refresh_token']}")
+    _save_refresh_token(r["refresh_token"])
+
+
+def _save_refresh_token(token: str) -> None:
+    """Write it into .env instead of asking the operator to copy it by hand."""
+    env = Path(__file__).parent / ".env"
+    line = f"YT_REFRESH_TOKEN={token}"
+    if env.exists():
+        kept = [l for l in env.read_text("utf-8").splitlines()
+                if not l.startswith("YT_REFRESH_TOKEN=")]
+        env.write_text("\n".join(kept + [line]) + "\n", "utf-8")
+    else:
+        env.write_text(line + "\n", "utf-8")
+    print(f"\nrefresh token saved to {env}")
+    print("it is valid for a year, and only while the consent screen is out of Testing")
 
 
 if __name__ == "__main__":
