@@ -92,9 +92,12 @@ def build_ass(words: list[dict], path, title: str = "", title_end: float = 0) ->
 
 
 def _pick_bg() -> "Path":
-    clips = [p for p in BG_DIR.iterdir() if p.suffix.lower() in (".mp4", ".mov", ".webm")]
+    # recursive on purpose: an archive that carries its own top folder unpacks
+    # to assets/bg/bg/*.mp4, and a flat search would silently find nothing
+    clips = [p for p in BG_DIR.rglob("*")
+             if p.suffix.lower() in (".mp4", ".mov", ".webm")]
     if not clips:
-        raise RuntimeError(f"no background clips in {BG_DIR} - drop a vertical mp4 there")
+        raise RuntimeError(f"no background clips under {BG_DIR} - drop a vertical mp4 there")
     return random.choice(clips)
 
 
@@ -152,7 +155,10 @@ if __name__ == "__main__":
     events = [l for l in body if l.startswith("Dialogue:")]
     assert len(events) == len(cards), f"{len(events)} lines for {len(cards)} cards"
 
-    bg = _pick_bg() if any(BG_DIR.iterdir()) else None
+    try:
+        bg = _pick_bg()
+    except RuntimeError:
+        bg = None
     if bg is None:
         bg = OUT_DIR / "_testbg.mp4"
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
