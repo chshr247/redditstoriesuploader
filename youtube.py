@@ -293,23 +293,26 @@ def authorize() -> None:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-    assert title_for("Короткий заголовок").endswith(" #Shorts")
-    assert len(title_for("я" * 200)) <= TITLE_MAX
-    assert title_for("я" * 200).endswith(" #Shorts"), "the tag must survive trimming"
-    assert len(description_for("t", "x" * 9000)) <= DESC_MAX
-    assert "#Shorts" in description_for("Заголовок", "Первое. Второе. Третье.")
+    # kept behind a flag so normal runs print only what the operator needs
+    if "--selftest" in sys.argv:
+        assert title_for("Короткий заголовок").endswith(" #Shorts")
+        assert len(title_for("я" * 200)) <= TITLE_MAX
+        assert title_for("я" * 200).endswith(" #Shorts"), "the tag must survive trimming"
+        assert len(description_for("t", "x" * 9000)) <= DESC_MAX
+        assert "#Shorts" in description_for("Заголовок", "Первое. Второе. Третье.")
 
-    # the teaser must stop at two sentences, not dump the whole story
-    d = description_for("Заголовок", "Первое. Второе. Третье. Четвёртое.")
-    assert "Второе." in d and "Третье." not in d, d
+        # the teaser must stop at two sentences, not dump the whole story
+        d = description_for("Заголовок", "Первое. Второе. Третье. Четвёртое.")
+        assert "Второе." in d and "Третье." not in d, d
 
-    # consecutive descriptions must not be clones
-    variants = {description_for("Один и тот же", "Одно и то же.") for _ in range(30)}
-    assert len(variants) > 5, "descriptions are not varying"
+        # consecutive descriptions must not be clones
+        variants = {description_for("Один и тот же", "Одно и то же.") for _ in range(30)}
+        assert len(variants) > 5, "descriptions are not varying"
 
-    assert daily_allowance(0) == 3 and daily_allowance(2) == 3
-    assert daily_allowance(3) == 4 and daily_allowance(30) == 8
-    print("title, description and schedule logic ok")
+        assert daily_allowance(0) == 3 and daily_allowance(2) == 3
+        assert daily_allowance(3) == 4 and daily_allowance(30) == 8
+        print("title, description and schedule logic ok")
+        sys.exit(0)
 
     try:
         if "--auth" in sys.argv:
@@ -331,7 +334,7 @@ if __name__ == "__main__":
                          allow_unaudited="--i-know" in sys.argv))
         else:
             print("usage: python youtube.py --auth | --status | --next [--public] "
-                  "| out/<id>.mp4")
+                  "| out/<id>.mp4 | --selftest")
     except RuntimeError as e:
         print(f"\n{e}")
         sys.exit(1)
