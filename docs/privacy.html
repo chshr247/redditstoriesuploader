@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy — Reddit Stories to Shorts</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif;
+         max-width: 46rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+  header { border-bottom: 1px solid #8883; padding-bottom: 1rem; margin-bottom: 2rem; }
+  nav a { margin-right: 1.25rem; }
+  h1 { font-size: 1.6rem; margin: .2rem 0; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; }
+  .meta { color: #7a7a7a; font-size: .9rem; }
+  ul { padding-left: 1.2rem; }
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #8883;
+           font-size: .9rem; color: #7a7a7a; }
+  code { font-size: .9em; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Privacy Policy</h1>
+  <p class="meta">Reddit Stories to Shorts &middot; last updated 31 July 2026</p>
+  <nav>
+    <a href="index.html">Home</a>
+    <a href="terms.html">Terms of Use</a>
+  </nav>
+</header>
+
+<h2>Summary</h2>
+<p>This application is a personal command-line tool, run locally by one person,
+   which uploads videos to that person's own YouTube channel. It has no users
+   other than its operator, no website, no server and no account system. It
+   collects no personal information from anyone.</p>
+
+<h2>Use of YouTube API Services</h2>
+<p>This application uses <strong>YouTube API Services</strong>. By using it you
+   are agreeing to be bound by the
+   <a href="https://www.youtube.com/t/terms">YouTube Terms of Service</a>.</p>
+<p>Google's own handling of data is described in the
+   <a href="https://policies.google.com/privacy">Google Privacy Policy</a>.</p>
+
+<h2>What the application accesses</h2>
+<p>It authorises exactly one Google account — the operator's own — using the
+   single OAuth scope
+   <code>https://www.googleapis.com/auth/youtube.upload</code>, which permits
+   uploading a video and nothing else.</p>
+<p>The application does <strong>not</strong> request, read, collect, store,
+   process, aggregate, display, sell or share:</p>
+<ul>
+  <li>YouTube user data of any kind, including data about viewers, subscribers
+      or commenters;</li>
+  <li>channel analytics, watch history, or engagement data;</li>
+  <li>any personal information belonging to any third party.</li>
+</ul>
+
+<h2>What is stored, and where</h2>
+<p>Everything stays on the operator's own machine. Nothing is stored on any
+   server, because there is no server.</p>
+<ul>
+  <li><strong>Authorisation credentials</strong> — the OAuth client id, client
+      secret and refresh token, in a local configuration file excluded from
+      version control.</li>
+  <li><strong>An upload log</strong> — a local database holding the id and
+      timestamp of each video the tool uploaded, so that the same file is never
+      uploaded twice.</li>
+  <li><strong>Generated media</strong> — the rendered videos and their
+      intermediate audio and subtitle files.</li>
+</ul>
+
+<h2>Revoking access</h2>
+<p>The operator can revoke this application's access to their Google account at
+   any time from the
+   <a href="https://myaccount.google.com/permissions">Google account permissions
+   page</a>. Revocation immediately and permanently invalidates the stored
+   refresh token, after which the application cannot upload anything.</p>
+
+<h2>Deleting stored data</h2>
+<p>All stored data is local. Deleting the application's working directory
+   removes every file it has written, including credentials, the upload log and
+   all generated media. There is no remote copy to request the deletion of, and
+   no retention period beyond the operator's own choice to keep the files.</p>
+<p>Any data obtained from YouTube API Services — which for this application is
+   limited to the identifiers of its own uploads — is deleted at the same time.</p>
+
+<h2>Source material</h2>
+<p>Stories originate from publicly visible Reddit submissions. They are rewritten
+   and translated rather than reproduced verbatim, and author usernames are not
+   carried into the finished videos.</p>
+
+<h2>Third-party services</h2>
+<p>The application communicates with a public Reddit archive to read public post
+   text, with a language-model provider to rewrite and translate it, with a
+   text-to-speech provider to generate narration, and with the YouTube Data API
+   to upload the result. None of them receive personal information about any
+   third party from this application.</p>
+
+<h2>Changes</h2>
+<p>Any change to this policy will be published on this page with an updated date.</p>
+
+<h2>Contact</h2>
+<p>Questions can be raised as an issue in the application's public repository.</p>
+
+<footer>
+  <p><a href="index.html">Home</a> &middot;
+     <a href="terms.html">Terms of Use</a> &middot;
+     <a href="https://www.youtube.com/t/terms">YouTube Terms of Service</a> &middot;
+     <a href="https://policies.google.com/privacy">Google Privacy Policy</a></p>
+  <p>This application uses YouTube API Services.</p>
+</footer>
+
+</body>
+</html>

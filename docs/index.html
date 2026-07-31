@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reddit Stories to Shorts</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif;
+         max-width: 46rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+  header { border-bottom: 1px solid #8883; padding-bottom: 1rem; margin-bottom: 2rem; }
+  nav a { margin-right: 1.25rem; }
+  h1 { font-size: 1.7rem; margin: .2rem 0; }
+  .lede { color: #7a7a7a; margin-top: .3rem; }
+  .badge { display: inline-block; border: 1px solid #8886; border-radius: 4px;
+           padding: .3rem .6rem; font-size: .85rem; margin: 1rem 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid #8883;
+           vertical-align: top; font-size: .95rem; }
+  th { width: 34%; font-weight: 600; }
+  ol { padding-left: 1.2rem; }
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #8883;
+           font-size: .9rem; color: #7a7a7a; }
+  code { font-size: .9em; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Reddit Stories to Shorts</h1>
+  <p class="lede">A personal command-line tool that turns public Reddit posts
+     into short vertical videos and uploads them to its operator's own channel.</p>
+  <nav>
+    <a href="privacy.html">Privacy Policy</a>
+    <a href="terms.html">Terms of Use</a>
+  </nav>
+</header>
+
+<p class="badge">This application uses <strong>YouTube API Services</strong>.</p>
+
+<h2>What it is</h2>
+<p>A script run locally, by hand, on one machine. It is not a hosted service.
+   There are no user accounts, no web application, no server component and no
+   users other than the person running it.</p>
+
+<h2>What it does</h2>
+<ol>
+  <li>Reads publicly visible Reddit submissions from a public archive.</li>
+  <li>Rewrites and translates a post into roughly seventy-five seconds of narration.</li>
+  <li>Generates that narration with text-to-speech and recovers word timings locally.</li>
+  <li>Renders a vertical 1080&times;1920 video with a title card and subtitles.</li>
+  <li>Uploads the finished file to the operator's own YouTube channel.</li>
+</ol>
+
+<h2>How it uses the YouTube Data API</h2>
+<table>
+  <tr><th>Endpoint used</th><td><code>videos.insert</code>, and nothing else</td></tr>
+  <tr><th>OAuth scope requested</th><td><code>https://www.googleapis.com/auth/youtube.upload</code></td></tr>
+  <tr><th>Accounts authorised</th><td>One — the operator's own channel</td></tr>
+  <tr><th>YouTube data read</th><td>None. The client never reads channel, viewer,
+      subscriber, comment or analytics data.</td></tr>
+  <tr><th>YouTube data stored</th><td>The id and timestamp of each upload it made,
+      in a local file, so the same video is not uploaded twice.</td></tr>
+  <tr><th>YouTube data shared</th><td>None, with anyone.</td></tr>
+  <tr><th>Upload volume</th><td>A few per day, rate-limited in the code itself.</td></tr>
+</table>
+
+<h2>Synthetic media</h2>
+<p>The narration is produced by text-to-speech. Every upload declares this by
+   setting <code>status.containsSyntheticMedia</code> to true.</p>
+
+<footer>
+  <p><a href="privacy.html">Privacy Policy</a> &middot;
+     <a href="terms.html">Terms of Use</a> &middot;
+     <a href="https://www.youtube.com/t/terms">YouTube Terms of Service</a> &middot;
+     <a href="https://policies.google.com/privacy">Google Privacy Policy</a></p>
+  <p>This application uses YouTube API Services.</p>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,5 @@
+openai==2.9.0        # обработка текста
+edge-tts==7.0.2      # TTS бесплатно + word-level таймкоды (WordBoundary)
+python-dotenv==1.1.1 # .env
+# reddit: не нужен — pullpush.io тянем stdlib'ом (urllib), см. source.py
+faster-whisper==1.2.1  # word timings for the fish backend (edge needs none)
