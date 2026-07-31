@@ -56,8 +56,11 @@ HASHTAGS = os.getenv("HASHTAGS", "#reddit #redditstories #storytime #fyp")
 YT_CLIENT_ID = os.getenv("YT_CLIENT_ID", "")
 YT_CLIENT_SECRET = os.getenv("YT_CLIENT_SECRET", "")
 YT_REFRESH_TOKEN = os.getenv("YT_REFRESH_TOKEN", "")
-# pool to draw a different set from per upload, so descriptions are not clones
-YT_HASHTAGS = [h.strip() for h in os.getenv("YT_HASHTAGS", HASHTAGS).split() if h.strip()]
+# Pool to draw a different set from per upload, so descriptions are not clones.
+# The quotes .env needs around a "#..." value are literal in a CI variable, so
+# strip them here rather than publish a hashtag that starts with a quote mark.
+YT_HASHTAGS = [t for t in (h.strip().strip('"\'')
+                           for h in os.getenv("YT_HASHTAGS", HASHTAGS).split()) if t]
 YT_MIN_GAP_HOURS = float(os.getenv("YT_MIN_GAP_HOURS", 3))
 
 # Subtitle font. Present on Windows; a Linux runner needs it installed, or
