@@ -5,7 +5,21 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).parent
-load_dotenv(ROOT / ".env")
+ENV_FILE = ROOT / ".env"
+load_dotenv(ENV_FILE)
+
+
+def save_env(key: str, value: str) -> None:
+    """Rewrite one key in .env, leaving everything else alone.
+
+    Both platforms hand back a fresh refresh token and expect the old one to be
+    dropped; printing it and hoping someone copies it by hand is how a pipeline
+    silently dies a month later.
+    """
+    line = f"{key}={value}"
+    kept = [l for l in ENV_FILE.read_text("utf-8").splitlines()
+            if not l.startswith(f"{key}=")] if ENV_FILE.exists() else []
+    ENV_FILE.write_text("\n".join(kept + [line]) + "\n", "utf-8")
 
 # empty key is fine: step 1 (source.py) runs without an LLM; script.py checks it
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")

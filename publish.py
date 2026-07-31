@@ -24,7 +24,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from config import (HASHTAGS, TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET,
-                    TIKTOK_REFRESH_TOKEN)
+                    TIKTOK_REFRESH_TOKEN, save_env)
 
 API = "https://open.tiktokapis.com/v2"
 AUTH_URL = "https://www.tiktok.com/v2/auth/authorize/"
@@ -74,8 +74,8 @@ def access_token() -> str:
         raise RuntimeError(f"no access_token in response: {r}")
     # TikTok rotates the refresh token; keep the new one or the next run fails
     if r.get("refresh_token") and r["refresh_token"] != TIKTOK_REFRESH_TOKEN:
-        log.warning("refresh token rotated - update TIKTOK_REFRESH_TOKEN in .env:\n%s",
-                    r["refresh_token"])
+        save_env("TIKTOK_REFRESH_TOKEN", r["refresh_token"])
+        log.info("refresh token rotated, saved to .env")
     return r["access_token"]
 
 
@@ -143,12 +143,8 @@ def authorize() -> None:
     if "refresh_token" not in r:
         raise RuntimeError(f"no refresh_token in the response: {r}")
 
-    env = Path(__file__).parent / ".env"
-    line = f"TIKTOK_REFRESH_TOKEN={r['refresh_token']}"
-    kept = [l for l in env.read_text("utf-8").splitlines()
-            if not l.startswith("TIKTOK_REFRESH_TOKEN=")] if env.exists() else []
-    env.write_text("\n".join(kept + [line]) + "\n", "utf-8")
-    print(f"\nrefresh token saved to {env}")
+    save_env("TIKTOK_REFRESH_TOKEN", r["refresh_token"])
+    print("\nrefresh token saved to .env")
     print(f"scopes granted: {r.get('scope')}")
 
 

@@ -42,20 +42,35 @@
    <a href="https://www.youtube.com/t/terms">YouTube Terms of Service</a>.</p>
 <p>Google's own handling of data is described in the
    <a href="https://policies.google.com/privacy">Google Privacy Policy</a>.</p>
-
-<h2>What the application accesses</h2>
 <p>It authorises exactly one Google account — the operator's own — using the
    single OAuth scope
    <code>https://www.googleapis.com/auth/youtube.upload</code>, which permits
    uploading a video and nothing else.</p>
-<p>The application does <strong>not</strong> request, read, collect, store,
-   process, aggregate, display, sell or share:</p>
+
+<h2>Use of the TikTok Content Posting API</h2>
+<p>This application uses the <strong>TikTok Content Posting API</strong>. By
+   using it you are agreeing to be bound by the
+   <a href="https://www.tiktok.com/legal/page/global/terms-of-service/en">TikTok
+   Terms of Service</a>, and TikTok's handling of data is described in the
+   <a href="https://www.tiktok.com/legal/page/row/privacy-policy/en">TikTok
+   Privacy Policy</a>.</p>
+<p>It authorises exactly one TikTok account — the operator's own — with two
+   scopes: <code>video.publish</code>, to post the finished video, and
+   <code>video.upload</code>, to place it in the account's inbox as a draft
+   instead when the operator wants to review it first. The video file is
+   uploaded from the operator's own machine using <code>FILE_UPLOAD</code>.</p>
+
+<h2>What the application does not access</h2>
+<p>On either platform, the application does <strong>not</strong> request, read,
+   collect, store, process, aggregate, display, sell or share:</p>
 <ul>
-  <li>YouTube user data of any kind, including data about viewers, subscribers
-      or commenters;</li>
-  <li>channel analytics, watch history, or engagement data;</li>
+  <li>user data of any kind, including data about viewers, subscribers,
+      followers or commenters;</li>
+  <li>profile information, analytics, watch history, or engagement data;</li>
   <li>any personal information belonging to any third party.</li>
 </ul>
+<p>Note that TikTok always shows basic profile information on its consent
+   screen. The application does not request that scope and never reads it.</p>
 
 <h2>What is stored, and where</h2>
 <p>Everything stays on the operator's own machine. Nothing is stored on any
@@ -65,26 +80,32 @@
       secret and refresh token, in a local configuration file excluded from
       version control.</li>
   <li><strong>An upload log</strong> — a local database holding the id and
-      timestamp of each video the tool uploaded, so that the same file is never
-      uploaded twice.</li>
+      timestamp of each video the tool uploaded, on either platform, so that the
+      same file is never uploaded twice.</li>
   <li><strong>Generated media</strong> — the rendered videos and their
       intermediate audio and subtitle files.</li>
 </ul>
 
 <h2>Revoking access</h2>
-<p>The operator can revoke this application's access to their Google account at
-   any time from the
-   <a href="https://myaccount.google.com/permissions">Google account permissions
-   page</a>. Revocation immediately and permanently invalidates the stored
-   refresh token, after which the application cannot upload anything.</p>
+<p>The operator can revoke this application's access at any time, on either
+   platform, and revocation immediately invalidates the stored refresh token so
+   that nothing further can be uploaded.</p>
+<ul>
+  <li><strong>Google</strong> — from the
+      <a href="https://myaccount.google.com/permissions">Google account
+      permissions page</a>.</li>
+  <li><strong>TikTok</strong> — in the TikTok app, under Settings and privacy →
+      Security and permissions → Manage app permissions.</li>
+</ul>
 
 <h2>Deleting stored data</h2>
 <p>All stored data is local. Deleting the application's working directory
    removes every file it has written, including credentials, the upload log and
    all generated media. There is no remote copy to request the deletion of, and
    no retention period beyond the operator's own choice to keep the files.</p>
-<p>Any data obtained from YouTube API Services — which for this application is
-   limited to the identifiers of its own uploads — is deleted at the same time.</p>
+<p>Any data obtained from YouTube API Services or the TikTok Content Posting
+   API — which for this application is limited to the identifiers of its own
+   uploads — is deleted at the same time.</p>
 
 <h2>Source material</h2>
 <p>Stories originate from publicly visible Reddit submissions. They are rewritten
@@ -95,8 +116,8 @@
 <p>The application communicates with a public Reddit archive to read public post
    text, with a language-model provider to rewrite and translate it, with a
    text-to-speech provider to generate narration, and with the YouTube Data API
-   to upload the result. None of them receive personal information about any
-   third party from this application.</p>
+   and the TikTok Content Posting API to upload the result. None of them receive
+   personal information about any third party from this application.</p>
 
 <h2>Changes</h2>
 <p>Any change to this policy will be published on this page with an updated date.</p>
@@ -108,8 +129,9 @@
   <p><a href="index.html">Home</a> &middot;
      <a href="terms.html">Terms of Use</a> &middot;
      <a href="https://www.youtube.com/t/terms">YouTube Terms of Service</a> &middot;
-     <a href="https://policies.google.com/privacy">Google Privacy Policy</a></p>
-  <p>This application uses YouTube API Services.</p>
+     <a href="https://policies.google.com/privacy">Google Privacy Policy</a> &middot;
+     <a href="https://www.tiktok.com/legal/page/global/terms-of-service/en">TikTok Terms of Service</a></p>
+  <p>This application uses YouTube API Services and the TikTok Content Posting API.</p>
 </footer>
 
 </body>

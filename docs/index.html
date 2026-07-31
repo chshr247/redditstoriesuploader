@@ -36,7 +36,8 @@
   </nav>
 </header>
 
-<p class="badge">This application uses <strong>YouTube API Services</strong>.</p>
+<p class="badge">This application uses <strong>YouTube API Services</strong>
+   and the <strong>TikTok Content Posting API</strong>.</p>
 
 <h2>What it is</h2>
 <p>A script run locally, by hand, on one machine. It is not a hosted service.
@@ -49,7 +50,7 @@
   <li>Rewrites and translates a post into roughly seventy-five seconds of narration.</li>
   <li>Generates that narration with text-to-speech and recovers word timings locally.</li>
   <li>Renders a vertical 1080&times;1920 video with a title card and subtitles.</li>
-  <li>Uploads the finished file to the operator's own YouTube channel.</li>
+  <li>Uploads the finished file to the operator's own channel or account.</li>
 </ol>
 
 <h2>How it uses the YouTube Data API</h2>
@@ -65,16 +66,39 @@
   <tr><th>Upload volume</th><td>A few per day, rate-limited in the code itself.</td></tr>
 </table>
 
+<h2>How it uses the TikTok Content Posting API</h2>
+<table>
+  <tr><th>Product used</th><td>Content Posting API. Login Kit provides the
+      authorisation only.</td></tr>
+  <tr><th>Endpoints used</th><td><code>/v2/post/publish/video/init/</code> for a
+      direct post, or <code>/v2/post/publish/inbox/video/init/</code> to leave a
+      draft in the app; then the returned upload URL, and
+      <code>/v2/post/publish/status/fetch/</code> to read back the result.</td></tr>
+  <tr><th>Scopes requested</th><td><code>video.publish</code> — post the finished
+      file. <code>video.upload</code> — send it to the inbox as a draft instead,
+      when the operator wants to review it before it goes out.</td></tr>
+  <tr><th>Source of the video</th><td><code>FILE_UPLOAD</code>. The file is
+      rendered on the operator's own machine and uploaded from it.</td></tr>
+  <tr><th>Accounts authorised</th><td>One — the operator's own account</td></tr>
+  <tr><th>TikTok data read</th><td>None. The client never reads profile,
+      follower, analytics or content data.</td></tr>
+  <tr><th>TikTok data stored</th><td>The publish id of each upload it made, so
+      its status can be checked.</td></tr>
+  <tr><th>TikTok data shared</th><td>None, with anyone.</td></tr>
+</table>
+
 <h2>Synthetic media</h2>
-<p>The narration is produced by text-to-speech. Every upload declares this by
-   setting <code>status.containsSyntheticMedia</code> to true.</p>
+<p>The narration is produced by text-to-speech, and every upload says so:
+   <code>status.containsSyntheticMedia</code> on YouTube,
+   <code>post_info.is_aigc</code> on TikTok.</p>
 
 <footer>
   <p><a href="privacy.html">Privacy Policy</a> &middot;
      <a href="terms.html">Terms of Use</a> &middot;
      <a href="https://www.youtube.com/t/terms">YouTube Terms of Service</a> &middot;
-     <a href="https://policies.google.com/privacy">Google Privacy Policy</a></p>
-  <p>This application uses YouTube API Services.</p>
+     <a href="https://policies.google.com/privacy">Google Privacy Policy</a> &middot;
+     <a href="https://www.tiktok.com/legal/page/global/terms-of-service/en">TikTok Terms of Service</a></p>
+  <p>This application uses YouTube API Services and the TikTok Content Posting API.</p>
 </footer>
 
 </body>

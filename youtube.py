@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from config import (DB_PATH, OUT_DIR, YT_CLIENT_ID, YT_CLIENT_SECRET,
-                    YT_HASHTAGS, YT_MIN_GAP_HOURS, YT_REFRESH_TOKEN)
+                    YT_HASHTAGS, YT_MIN_GAP_HOURS, YT_REFRESH_TOKEN, save_env)
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -330,15 +330,8 @@ def authorize() -> None:
 
 def _save_refresh_token(token: str) -> None:
     """Write it into .env instead of asking the operator to copy it by hand."""
-    env = Path(__file__).parent / ".env"
-    line = f"YT_REFRESH_TOKEN={token}"
-    if env.exists():
-        kept = [l for l in env.read_text("utf-8").splitlines()
-                if not l.startswith("YT_REFRESH_TOKEN=")]
-        env.write_text("\n".join(kept + [line]) + "\n", "utf-8")
-    else:
-        env.write_text(line + "\n", "utf-8")
-    print(f"\nrefresh token saved to {env}")
+    save_env("YT_REFRESH_TOKEN", token)
+    print("\nrefresh token saved to .env")
     print("it is valid for a year, and only while the consent screen is out of Testing")
 
 
