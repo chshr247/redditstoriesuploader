@@ -1,0 +1,122 @@
+name: publish
+
+# One run makes and publishes exactly one video. Nothing needs to survive
+# between runs except the state file, so out/ is thrown away with the runner.
+on:
+  schedule:
+    - cron: "0 6,9,12,15,18 * * *"   # UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Render only, do not upload"
+        type: boolean
+        default: false
+
+# Two runs writing seen.db at once would lose one of them.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write        # needed to push seen.db back
+
+    env:
+      OPENAI_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+      LLM_MODEL: ${{ vars.LLM_MODEL }}
+      FISH_API_KEY: ${{ secrets.FISH_API_KEY }}
+      FISH_MODEL: ${{ vars.FISH_MODEL }}
+      FISH_VOICES_MALE: ${{ vars.FISH_VOICES_MALE }}
+      FISH_VOICES_FEMALE: ${{ vars.FISH_VOICES_FEMALE }}
+      YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+      YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+      YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+      YT_HASHTAGS: ${{ vars.YT_HASHTAGS }}
+      SUBREDDITS: ${{ vars.SUBREDDITS }}
+      OUTPUT_LANG: ru
+      TTS_BACKEND: fish
+      SUBTITLE_FONT: Arial Black
+      # cron already paces the uploads; the in-code gap only needs to stop a
+      # manual re-run from stacking a second video on top of a scheduled one
+      YT_MIN_GAP_HOURS: "2"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install ffmpeg and the subtitle font
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core
+          # Arial Black keeps the look identical to local renders; its installer
+          # wants an EULA answer and occasionally 404s, so it must not be fatal
+          echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true \
+            | sudo debconf-set-selections
+          sudo apt-get install -y -qq ttf-mscorefonts-installer || {
+            echo "::warning::Arial Black unavailable, falling back to DejaVu Sans"
+            echo "SUBTITLE_FONT=DejaVu Sans" >> "$GITHUB_ENV"
+          }
+          fc-cache -f > /dev/null
+          fc-list | grep -ci "arial black" || true
+
+      - name: Cache the whisper model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: whisper-base-v1
+
+      - name: Cache background clips
+        id: bg
+        uses: actions/cache@v4
+        with:
+          path: assets/bg
+          key: bg-${{ vars.BG_VERSION || 'v1' }}
+
+      - name: Fetch background clips
+        if: steps.bg.outputs.cache-hit != 'true'
+        run: |
+          if [ -z "${{ secrets.BG_URL }}" ]; then
+            echo "::error::BG_URL secret is not set - it must point to a zip of vertical-friendly clips"
+            exit 1
+          fi
+          mkdir -p assets/bg
+          curl -fsSL "${{ secrets.BG_URL }}" -o /tmp/bg.zip
+          unzip -oq /tmp/bg.zip -d assets/bg
+          find assets/bg -name '*.mp4' | head -20
+
+      - name: Install dependencies
+        run: pip install -q -r requirements.txt
+
+      - name: Make one video and publish it
+        run: |
+          if python main.py 1; then
+            if [ "${{ inputs.dry_run }}" = "true" ]; then
+              echo "dry run - skipping upload"
+              python youtube.py --text
+            else
+              python youtube.py --next --public
+            fi
+          else
+            echo "::warning::no video produced this run (story pool dry or all skipped)"
+          fi
+
+      - name: Keep the state file
+        if: always()
+        run: |
+          if [ -n "$(git status --porcelain seen.db)" ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add seen.db
+            git commit -m "state: used stories and uploads [skip ci]"
+            git push
+          else
+            echo "seen.db unchanged"
+          fi

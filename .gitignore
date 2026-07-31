@@ -1,7 +1,8 @@
 .env
 .venv/
 __pycache__/
-seen.db
+# seen.db is tracked on purpose: it is the only state a GitHub Actions run
+# must carry over, and it holds no secrets - just post ids and upload ids.
 out/
 assets/bg/
 .env.*

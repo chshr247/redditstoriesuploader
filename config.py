@@ -60,6 +60,10 @@ YT_REFRESH_TOKEN = os.getenv("YT_REFRESH_TOKEN", "")
 YT_HASHTAGS = [h.strip() for h in os.getenv("YT_HASHTAGS", HASHTAGS).split() if h.strip()]
 YT_MIN_GAP_HOURS = float(os.getenv("YT_MIN_GAP_HOURS", 3))
 
+# Subtitle font. Present on Windows; a Linux runner needs it installed, or
+# swap it for something that ships there and carries Cyrillic.
+SUBTITLE_FONT = os.getenv("SUBTITLE_FONT", "Arial Black")
+
 BG_DIR = ROOT / "assets" / "bg"      # background clips, 1080x1920
 OUT_DIR = ROOT / "out"               # audio, .ass, finished mp4
 DB_PATH = ROOT / "seen.db"           # sqlite: post_ids already turned into videos

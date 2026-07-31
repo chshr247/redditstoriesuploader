@@ -12,12 +12,12 @@ import subprocess
 
 import safety
 import script
-from config import BG_DIR, OUT_DIR
+from config import BG_DIR, OUT_DIR, SUBTITLE_FONT
 from voice import duration as _dur
 
 W, H = 1080, 1920
 FPS = 30          # source clips run 30 or 60; 60 doubles encode time for nothing here
-FONT = "Arial Black"       # present on Windows; libass falls back if missing
+FONT = SUBTITLE_FONT       # libass silently falls back if it is missing
 FONT_SIZE = 110
 POP_MS = 120               # scale-up duration of a word appearing
 
