@@ -213,6 +213,42 @@ def pending() -> list:
                   key=lambda p: p.stat().st_mtime)
 
 
+def _meta_for(mp4: Path) -> dict:
+    p = mp4.with_suffix(".meta.json")
+    return json.loads(p.read_text("utf-8")) if p.exists() else {}
+
+
+def show_text(mp4: Path | None = None) -> None:
+    """Print title and description ready to paste into the upload form.
+
+    Uploading by hand is the only way to publish while the API project is
+    unaudited, so the text has to be obtainable without touching the API.
+    """
+    targets = [mp4] if mp4 else pending()
+    if not targets:
+        print("nothing pending - run main.py first")
+        return
+    for p in targets:
+        meta = _meta_for(p)
+        title = meta.get("title") or p.stem
+        print("=" * 70)
+        print(p.name)
+        print("=" * 70)
+        print("\nTITLE:")
+        print(title_for(title))
+        print("\nDESCRIPTION:")
+        print(description_for(title, meta.get("body", "")))
+        print()
+
+
+def mark_done(mp4: Path, yt_id: str = "manual") -> None:
+    """Record a hand-made upload so the queue stops offering it."""
+    with _db() as db:
+        db.execute("INSERT OR REPLACE INTO uploaded VALUES (?,?,?)",
+                   (mp4.name, yt_id, time.time()))
+    print(f"{mp4.name} marked as uploaded")
+
+
 def upload_next(private: bool = True, force: bool = False,
                 allow_unaudited: bool = False) -> str | None:
     """Upload at most one video, if the schedule allows it right now."""
@@ -337,6 +373,15 @@ if __name__ == "__main__":
                   f"audited={YT_AUDITED}")
             for p in pending()[:10]:
                 print("  ", p.name)
+        elif "--text" in sys.argv:
+            arg = next((a for a in sys.argv if a.endswith(".mp4")), None)
+            show_text(Path(arg) if arg else None)
+        elif "--done" in sys.argv:
+            arg = next((a for a in sys.argv if a.endswith(".mp4")), None)
+            if not arg:
+                print("usage: python youtube.py --done out/<id>.mp4")
+            else:
+                mark_done(Path(arg))
         elif "--next" in sys.argv:
             print(upload_next(private="--public" not in sys.argv,
                               force="--force" in sys.argv,
@@ -346,8 +391,8 @@ if __name__ == "__main__":
             print(upload(mp4, mp4.stem, private="--public" not in sys.argv,
                          allow_unaudited="--i-know" in sys.argv))
         else:
-            print("usage: python youtube.py --auth | --status | --next [--public] "
-                  "| out/<id>.mp4 | --selftest")
+            print("usage: python youtube.py --auth | --status | --text [file] "
+                  "| --done <file> | --next [--public] | out/<id>.mp4 | --selftest")
     except RuntimeError as e:
         print(f"\n{e}")
         sys.exit(1)
