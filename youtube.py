@@ -84,12 +84,14 @@ def title_for(text: str) -> str:
 # the description is the story's own opening, which differs by construction -
 # that is where the real variation comes from, not from shuffling boilerplate.
 OPENERS = [
-    "История с Reddit.",
-    "Реальный случай с Reddit.",
-    "Из обсуждения на Reddit.",
     "Кто здесь неправ?",
     "А вы бы как поступили?",
-    "Рассказ от первого лица.",
+    "Смотрите, что произошло.",
+    "Вот так вот.",
+    "Смотрите, что я нашёл.",
+    "Вот это поворот.",
+    "Вот так вот бывает.",
+    "Вот так вот бывает, друзья.",
 ]
 
 
