@@ -1,4 +1,4 @@
-# Reddit Stories → Shorts
+# RedditPublications
 
 A personal command-line tool that turns public Reddit posts into short vertical
 videos and uploads them to **the operator's own YouTube channel**.
