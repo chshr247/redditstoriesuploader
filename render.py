@@ -20,6 +20,7 @@ FPS = 30          # source clips run 30 or 60; 60 doubles encode time for nothin
 FONT = SUBTITLE_FONT       # libass silently falls back if it is missing
 FONT_SIZE = 110
 POP_MS = 120               # scale-up duration of a word appearing
+HOLD_MAX = 0.18            # how long a card may outlive its own audio
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Main,{FONT},{FONT_SIZE},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,8,3,5,80,80,0,1
+Style: Speech,{FONT},{FONT_SIZE},&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,8,3,5,80,80,0,1
 Style: Card,{FONT},{CARD_FONT_SIZE},&H00101010,&H000000FF,&H00F2F2F2,&H00F2F2F2,-1,0,0,0,100,100,0,0,3,24,0,5,120,120,0,1
 
 [Events]
@@ -52,18 +54,47 @@ def _ts(sec: float) -> str:
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
-def _group(words: list[dict], min_chars: int = 3, max_words: int = 3) -> list[dict]:
-    """Glue filler words onto the next one.
+QUOTE_OPEN = "«„“"
+QUOTE_CLOSE = "»”"
+
+
+def _mark_speech(words: list[dict]) -> list[dict]:
+    """Flag the words that fall inside quotation marks.
+
+    Someone else's line coloured differently is readable with the sound off,
+    which is how most of these videos are first watched. Detection rides on the
+    quotes the narration already carries - no extra syntax for the model to
+    forget, and the marks themselves are stripped before anything is drawn.
+    """
+    out, inside = [], False
+    for w in words:
+        opens = any(c in w["word"] for c in QUOTE_OPEN)
+        closes = any(c in w["word"] for c in QUOTE_CLOSE)
+        out.append({**w, "speech": inside or opens})
+        if opens:
+            inside = True
+        if closes:
+            inside = False
+    return out
+
+
+def _group(words: list[dict], min_chars: int = 3, max_words: int = 2,
+           max_chars: int = 14) -> list[dict]:
+    """Glue filler words onto the next one, without overflowing the line.
 
     Straight one-word-per-card gives "a" and "I" a full beat of full-screen
     time, which reads as a stutter. A card keeps absorbing words while it
     still ends on a stub, so it never trails off on an article either.
+
+    max_chars is the width limit: past roughly fourteen characters the card
+    wraps onto a second line, which looks like a mistake at this font size.
     """
     out = []
     for w in words:
         prev = out[-1] if out else None
         if (prev and len(prev["word"].split()[-1]) < min_chars
-                and len(prev["word"].split()) < max_words):
+                and len(prev["word"].split()) < max_words
+                and len(prev["word"]) + 1 + len(w["word"]) <= max_chars):
             prev["word"] += " " + w["word"]
             prev["end"] = w["end"]
         else:
@@ -81,9 +112,15 @@ def build_ass(words: list[dict], path, title: str = "", title_end: float = 0) ->
                      r"{\fscx85\fscy85\t(0,180,\fscx100\fscy100)}" + safe)
     words = _group(words)
     for i, w in enumerate(words):
-        # stretch to the next word so pauses don't blank the screen
-        end = words[i + 1]["start"] if i + 1 < len(words) else w["end"]
-        text = safety.mask(re.sub(r"[{}\\]", "", w["word"]).strip())
+        # A card follows the voice: it goes when the words stop. Holding it to
+        # the next card would leave text standing over silence. The small hold
+        # only bridges the gaps between words inside a phrase, which are too
+        # short to blank out without making the screen flicker.
+        nxt = words[i + 1]["start"] if i + 1 < len(words) else w["end"]
+        end = min(nxt, w["end"] + HOLD_MAX)
+        # Punctuation earns nothing on a one-word card and costs width; commas
+        # and dashes in particular read as specks. Words and digits only.
+        text = safety.mask(re.sub(r"[^\w\s]", "", w["word"]).strip())
         if not text or end <= w["start"]:
             continue
         pop = r"{\fscx70\fscy70\t(0,%d,\fscx100\fscy100)}" % POP_MS
@@ -145,6 +182,13 @@ if __name__ == "__main__":
     mp3 = OUT_DIR / "_selftest.mp3"
     assert mp3.exists(), "run `python voice.py` first"
     words = json.loads((OUT_DIR / "_selftest.json").read_text("utf-8"))
+
+    def _w(t, s, e):
+        return {"word": t, "start": s, "end": e}
+
+    wide = _group([_w("через", 0, 1), _w("двадцать", 1, 2), _w("минут", 2, 3)])
+    assert all(len(c["word"]) <= 14 for c in wide), wide
+    assert all(len(c["word"].split()) <= 2 for c in wide), wide
 
     cards = _group(words)
     assert sum(len(c["word"].split()) for c in cards) == len(words), "lost a word"

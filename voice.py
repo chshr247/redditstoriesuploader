@@ -193,13 +193,18 @@ def speak(text: str, name: str, voice: str = TTS_VOICE, rate: str = RATE,
     return mp3, words
 
 
-def speak_parts(title: str, body: str, name: str, gap: float = 0.4,
+def speak_parts(title: str, body: str, name: str, gap: float = 0.0,
                 rate: str = RATE, speed: float = FISH_SPEED,
                 gender: str = "male") -> tuple:
     """Narrate the title card, then the story, as one track.
 
     Synthesized separately on purpose: it gives an exact title length to hand
     the renderer, instead of guessing where the title ends inside one track.
+
+    `gap` inserts DIGITAL silence, which is not the same as a pause: the voice
+    carries a faint room tone throughout, so a padded gap drops the noise floor
+    to zero and the join is heard as a cut. Default is none - the title's own
+    trailing decay and the full stop it ends on supply the beat.
 
     Returns (mp3, body_words_offset_to_the_track, title_end_sec).
     """
@@ -208,9 +213,12 @@ def speak_parts(title: str, body: str, name: str, gap: float = 0.4,
 
     # The cue rides along to the engine and is stripped before anything is
     # displayed, so the card and the description stay clean either way.
-    spoken_title = title
+    # A title with no terminal punctuation gets read as if the sentence carries
+    # on, and the story then sounds like one unbroken take. The full stop is
+    # what tells the engine to land it.
+    spoken_title = title if title.rstrip()[-1:] in ".!?" else title.rstrip() + "."
     if TTS_BACKEND == "fish" and FISH_TITLE_CUE and "[" not in title:
-        spoken_title = f"{FISH_TITLE_CUE} {title}"
+        spoken_title = f"{FISH_TITLE_CUE} {spoken_title}"
 
     t_mp3, _ = speak(spoken_title, f"{name}_title", rate=rate, speed=speed,
                      fish_voice=fish_voice)
@@ -220,9 +228,10 @@ def speak_parts(title: str, body: str, name: str, gap: float = 0.4,
 
     title_end = duration(t_mp3) + gap
     merged = OUT_DIR / f"{name}.mp3"
+    pad = f"[0:a]apad=pad_dur={gap}[t];[t]" if gap else "[0:a]"
     subprocess.run(
         ["ffmpeg", "-y", "-loglevel", "error", "-i", str(t_mp3), "-i", str(b_mp3),
-         "-filter_complex", f"[0:a]apad=pad_dur={gap}[t];[t][1:a]concat=n=2:v=0:a=1",
+         "-filter_complex", f"{pad}[1:a]concat=n=2:v=0:a=1",
          str(merged)], check=True)
 
     words = [{**w, "start": round(w["start"] + title_end, 3),

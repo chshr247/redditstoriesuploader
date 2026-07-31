@@ -57,7 +57,7 @@ Softening a story is not your job. If it needs sanitising to be postable, SKIP i
 Otherwise answer in exactly this shape:
 
 NARRATOR: male or female
-TITLE: <one line, max 12 words - the hook that goes on the title card>
+TITLE: <one line, max 8 words - the hook that goes on the title card>
 <blank line>
 <the narration, one paragraph>
 
@@ -78,7 +78,15 @@ Rules:
   Mark only genuinely ambiguous words, never ordinary ones.
 - Mark delivery with cues in square brackets, in English, placed immediately before the words they change: "[nervous] Я открыл письмо. [shocked] Она знала всё это время." Free-form descriptions work too: [voice dropping], [barely holding it together].
 - Use between three and six cues in the whole narration, and only where the story actually turns - the reveal, the punchline, the moment it goes wrong. A cue on every sentence sounds like a bad audiobook. Never put one in the TITLE line.
-- The title states what happened without giving away the ending. It is read aloud, so no abbreviations, no brackets, no "(20F)" - write ages and genders as words if they matter at all.
+- Every line of direct speech gets its own cue, placed immediately before it, describing how that person said it. Reported anger read in a calm voice is the single most artificial thing the narration can do: "Он спустился и заорал: [shouting, furious] Почему ты не сказала, что ужин готов?" Give the narrator a contrasting one when they answer - [cold], [flatly], [not even looking up].
+- Let sentences breathe at their natural length. Do not chop the story into short fragments to force pauses: the engine puts a real gap at every full stop, and a wall of three-word sentences comes out sounding stilted. Enumerations of three or more items are the exception - split those, since a comma list is read as one flat run.
+- The TITLE is a hook, not a summary. It sits on screen for the two or three seconds in which the viewer decides to stay, so it has to leave a question open. Never state the outcome, never describe the whole plot, never write a calm report of events.
+  Build it from the sharpest concrete fact, or from the collision between two people. Two short sentences are fine when the first sets up and the second lands:
+    "Соседка орала на моих детей. Наказала я своих." — works, it contradicts itself and demands an explanation
+    "Я наказала сыновей, а не соседку." — does not, it just reports
+    "Мужа похоронили в четверг. В пятницу она спросила про деньги." — works
+    "Она ждала наследство от моего покойного мужа." — does not
+  It is read aloud, so no abbreviations, no brackets, no "(20F)" - write ages and genders as words if they matter at all.
 - The narration opens on the first beat of the story. Never repeat or rephrase the title.
 - First person, past tense, short plain sentences.
 - Cut everything that does not move the plot: greetings, "edit:", "TL;DR", thanks, award mentions.
