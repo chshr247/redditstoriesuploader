@@ -4,11 +4,18 @@ name: publish
 # between runs except the state file, so out/ is thrown away with the runner.
 on:
   schedule:
-    # 07:00, 13:00 and 18:00 UTC are 10:00, 16:00 and 21:00 MSK - the three
-    # slots we actually want. The hour that follows each is a retry: GitHub
-    # cron is best-effort and drops runs under load, and a retry costs nothing
-    # because the gap check turns it into a no-op when the first one worked.
-    - cron: "0 7,8,13,14,18,19 * * *"
+    # Every hour from 10:00 to 22:00 MSK. Fixed slots plus a retry hour looked
+    # cheaper and were not: the gap check is five hours, which was exactly the
+    # spacing between two of the slots, so any drift - a late cron, a manual
+    # run, a retry firing instead of its primary - pushed the next slot under
+    # the threshold and lost it whole. Asking every hour costs nothing on a
+    # public repo and lets the gap expire whenever it likes; the schedule is
+    # decided by youtube.py --due, not by the shape of this list.
+    #
+    # Not around the clock on purpose: the daily allowance resets at midnight
+    # UTC, which is 03:00 MSK, and a 24-hour grid would spend the day's quota
+    # on uploads nobody is awake for.
+    - cron: "0 7-19 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -45,8 +52,9 @@ jobs:
       OUTPUT_LANG: ru
       TTS_BACKEND: fish
       SUBTITLE_FONT: Arial Black
-      # matches the code default: the retry slot sits one hour after its
-      # primary, so anything shorter than five would let it double-post
+      # matches the code default. With an hourly grid this is the only thing
+      # setting the spacing between uploads, so it is a real knob now: three a
+      # day at five hours apart fills 10:00 to 20:00 MSK.
       YT_MIN_GAP_HOURS: "5"
 
     steps:
@@ -57,7 +65,24 @@ jobs:
           python-version: "3.13"
           cache: pip
 
+      # Deliberately ahead of ffmpeg, the caches and the dependency install.
+      # Most hourly runs are refused, and a refused run has to cost seconds -
+      # otherwise thirteen runs a day each pay for an apt-get first and find
+      # out afterwards that they had nothing to do. Only python-dotenv is
+      # needed here: youtube.py --due reads seen.db and the env, nothing else.
+      - name: Is an upload due?
+        id: gate
+        run: |
+          pip install -q python-dotenv
+          if [ "${{ inputs.dry_run }}" = "true" ] || python youtube.py --due; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            echo "not due yet, skipping this run"
+          fi
+
       - name: Install ffmpeg and the subtitle font
+        if: steps.gate.outputs.go == 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg fonts-dejavu-core
@@ -73,12 +98,14 @@ jobs:
           fc-list | grep -ci "arial black" || true
 
       - name: Cache the whisper model
+        if: steps.gate.outputs.go == 'true'
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
           key: whisper-base-v1
 
       - name: Cache background clips
+        if: steps.gate.outputs.go == 'true'
         id: bg
         uses: actions/cache@v4
         with:
@@ -86,7 +113,7 @@ jobs:
           key: bg-${{ vars.BG_VERSION || 'v1' }}
 
       - name: Fetch background clips
-        if: steps.bg.outputs.cache-hit != 'true'
+        if: steps.gate.outputs.go == 'true' && steps.bg.outputs.cache-hit != 'true'
         run: |
           if [ -z "${{ secrets.BG_URL }}" ]; then
             echo "::error::BG_URL secret is not set - it must point to a zip of vertical-friendly clips"
@@ -98,18 +125,16 @@ jobs:
           find assets/bg -name '*.mp4' | head -20
 
       - name: Install dependencies
+        if: steps.gate.outputs.go == 'true'
         run: pip install -q -r requirements.txt
 
+      # The gate above already asked, and it asked BEFORE anything was
+      # generated on purpose: the rendered file dies with the runner, so a
+      # video made now and refused now is a story burned for nothing -
+      # seen.db would still mark it used.
       - name: Make one video and publish it
+        if: steps.gate.outputs.go == 'true'
         run: |
-          # Ask the schedule BEFORE generating. The rendered file dies with the
-          # runner, so a video made now and refused now is a story burned for
-          # nothing - seen.db would still mark it used.
-          if [ "${{ inputs.dry_run }}" != "true" ] && ! python youtube.py --due; then
-            echo "not due yet, skipping this run"
-            exit 0
-          fi
-
           if ! python main.py 1; then
             echo "::warning::no video produced this run (story pool dry or all skipped)"
             exit 0
@@ -119,13 +144,13 @@ jobs:
             echo "dry run - rendered but not uploaded"
             python youtube.py --text
           else
-            # --due passed a moment ago; --force stops the same check from
-            # rejecting us a second time over a few seconds of drift
+            # the gate passed minutes ago; --force stops the same check from
+            # rejecting us a second time over the time generation took
             python youtube.py --next --public --force
           fi
 
       - name: Keep the state file
-        if: always()
+        if: always() && steps.gate.outputs.go == 'true'
         run: |
           if [ -n "$(git status --porcelain seen.db)" ]; then
             git config user.name  "github-actions[bot]"
