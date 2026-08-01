@@ -4,7 +4,11 @@ name: publish
 # between runs except the state file, so out/ is thrown away with the runner.
 on:
   schedule:
-    - cron: "0 6,9,12,15,18 * * *"   # UTC
+    # 07:00, 13:00 and 18:00 UTC are 10:00, 16:00 and 21:00 MSK - the three
+    # slots we actually want. The hour that follows each is a retry: GitHub
+    # cron is best-effort and drops runs under load, and a retry costs nothing
+    # because the gap check turns it into a no-op when the first one worked.
+    - cron: "0 7,8,13,14,18,19 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -41,9 +45,9 @@ jobs:
       OUTPUT_LANG: ru
       TTS_BACKEND: fish
       SUBTITLE_FONT: Arial Black
-      # cron already paces the uploads; the in-code gap only needs to stop a
-      # manual re-run from stacking a second video on top of a scheduled one
-      YT_MIN_GAP_HOURS: "2"
+      # matches the code default: the retry slot sits one hour after its
+      # primary, so anything shorter than five would let it double-post
+      YT_MIN_GAP_HOURS: "5"
 
     steps:
       - uses: actions/checkout@v4

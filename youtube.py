@@ -178,17 +178,12 @@ def _db():
 def daily_allowance(day: int) -> int:
     """Videos permitted on day N of the channel's life.
 
-    A warm-up, not a documented rule - YouTube publishes no such limit. It costs
-    nothing and keeps a brand-new channel from going from zero to a firehose,
-    which is the pattern that looks automated to a human reviewer.
+    Not a documented rule - YouTube publishes no such limit. Three a day is the
+    working ceiling for Shorts on one channel; more reads as a firehose and each
+    upload competes with the last one for the same audience. A young channel
+    starts at two.
     """
-    if day < 3:
-        return 3
-    if day < 7:
-        return 4
-    if day < 14:
-        return 6
-    return 8
+    return 2 if day < 7 else 3
 
 
 def _utc_date(ts: float):
@@ -370,8 +365,8 @@ if __name__ == "__main__":
         variants = {description_for("Один и тот же", "Одно и то же.") for _ in range(30)}
         assert len(variants) > 5, "descriptions are not varying"
 
-        assert daily_allowance(0) == 3 and daily_allowance(2) == 3
-        assert daily_allowance(3) == 4 and daily_allowance(30) == 8
+        assert daily_allowance(0) == 2 and daily_allowance(6) == 2
+        assert daily_allowance(7) == 3 and daily_allowance(365) == 3, "3 is the ceiling"
 
         # The case that broke it: two uploads two hours apart, either side of
         # midnight. A trailing 24h window counts both as "today"; calendar days

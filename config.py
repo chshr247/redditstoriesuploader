@@ -75,7 +75,9 @@ YT_REFRESH_TOKEN = os.getenv("YT_REFRESH_TOKEN", "")
 # strip them here rather than publish a hashtag that starts with a quote mark.
 YT_HASHTAGS = [t for t in (h.strip().strip('"\'')
                            for h in os.getenv("YT_HASHTAGS", HASHTAGS).split()) if t]
-YT_MIN_GAP_HOURS = float(os.getenv("YT_MIN_GAP_HOURS", 3))
+# Five hours apart, so three uploads spread across a waking day instead of
+# landing in one block and competing with each other in the same feed.
+YT_MIN_GAP_HOURS = float(os.getenv("YT_MIN_GAP_HOURS", 5))
 # YouTube requires the synthetic-content flag for realistic material: real
 # people made to say things they did not, altered footage of real events,
 # realistic scenes that never happened, AI-generated music. Voice-over, a
