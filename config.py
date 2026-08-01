@@ -42,8 +42,21 @@ FISH_SPEED = float(os.getenv("FISH_SPEED", 1.0))
 # Delivery cue applied to the title card only. The hook is the three seconds
 # that decide whether anyone watches, so it gets read harder than the story.
 # Applied at synthesis, never shown on screen. Empty string disables it.
-FISH_TITLE_CUE = os.getenv("FISH_TITLE_CUE",
-                           "[speaking with urgency, hooking the listener]")
+# The "even weight" half is not decoration: urgency alone makes the engine
+# punch the final word, which turns every hook into the same rising jab and
+# gives away that the line was written to be a hook.
+# KEEP CUES UNDER 60 CHARACTERS. That is the ceiling on script.py's TAG
+# pattern; a longer one is not recognised as a cue, so it survives into the
+# word count and gets burned into the subtitles instead of steering the voice.
+FISH_TITLE_CUE = os.getenv(
+    "FISH_TITLE_CUE",
+    "[urgent hook, even weight, no stress on the last word]")
+# Same idea for the closing question. It is synthesized apart from the story so
+# it reads as the narrator turning to the viewer, not as one more sentence of
+# the plot - which is the whole reason it is there.
+FISH_CTA_CUE = os.getenv(
+    "FISH_CTA_CUE",
+    "[asking the viewer, calm, no stress on the last word]")
 # Fish returns audio only, so word timings come from local whisper alignment.
 # base is enough - we use its timings, never its text.
 WHISPER_SIZE = os.getenv("WHISPER_SIZE", "base")

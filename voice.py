@@ -22,9 +22,9 @@ import urllib.request
 import edge_tts
 
 import script
-from config import (FISH_API_KEY, FISH_MODEL, FISH_SPEED, FISH_TITLE_CUE,
-                    FISH_VOICES_FEMALE, FISH_VOICES_MALE, OUT_DIR, OUTPUT_LANG,
-                    TTS_BACKEND, TTS_VOICE, WHISPER_SIZE)
+from config import (FISH_API_KEY, FISH_CTA_CUE, FISH_MODEL, FISH_SPEED,
+                    FISH_TITLE_CUE, FISH_VOICES_FEMALE, FISH_VOICES_MALE,
+                    OUT_DIR, OUTPUT_LANG, TTS_BACKEND, TTS_VOICE, WHISPER_SIZE)
 
 TICKS_PER_SEC = 10_000_000
 FISH_URL = "https://api.fish.audio/v1/tts"
@@ -202,52 +202,90 @@ def speak(text: str, name: str, voice: str = TTS_VOICE, rate: str = RATE,
     return mp3, words
 
 
+def _cued(text: str, cue: str) -> str:
+    """Prefix a delivery cue, and make sure the line lands on a full stop.
+
+    Text with no terminal punctuation gets read as if the sentence carries on,
+    and the parts either side then sound like one unbroken take. Terminal
+    punctuation is what tells the engine to land it.
+
+    The cue rides along to the engine and is stripped before anything is
+    displayed, so the card and the description stay clean either way. A text
+    that already carries its own cue keeps it - the model placed it on purpose.
+    """
+    text = text.rstrip()
+    if text[-1:] not in ".!?…»":
+        text += "."
+    if TTS_BACKEND == "fish" and cue and "[" not in text:
+        # A cue longer than script.TAG allows is not recognised as a cue: it
+        # stays in the word count and gets burned into the subtitles. Dropping
+        # it costs delivery, keeping it corrupts the screen - so it goes.
+        if script.plain(cue):
+            log.error("cue %r is too long to be stripped (max %d chars inside "
+                      "the brackets) - narrating without it", cue[:50], 60)
+        else:
+            text = f"{cue} {text}"
+    return text
+
+
 def speak_parts(title: str, body: str, name: str, gap: float = 0.0,
                 rate: str = RATE, speed: float = FISH_SPEED,
                 gender: str = "male") -> tuple:
-    """Narrate the title card, then the story, as one track.
+    """Narrate the title card, the story, then the closing question - one track.
 
-    Synthesized separately on purpose: it gives an exact title length to hand
-    the renderer, instead of guessing where the title ends inside one track.
+    Three takes rather than one, for two different reasons. The title is split
+    off to give the renderer an exact title length instead of guessing where
+    the card ends inside a single track. The closing question is split off
+    because read inline it comes out as one more sentence of the plot; on its
+    own take, with its own cue, it lands as the narrator turning to the viewer.
 
     `gap` inserts DIGITAL silence, which is not the same as a pause: the voice
     carries a faint room tone throughout, so a padded gap drops the noise floor
-    to zero and the join is heard as a cut. Default is none - the title's own
+    to zero and the join is heard as a cut. Default is none - each part's own
     trailing decay and the full stop it ends on supply the beat.
 
-    Returns (mp3, body_words_offset_to_the_track, title_end_sec).
+    Returns (mp3, story_and_question_words_offset_to_the_track, title_end_sec).
     """
-    # one voice for the whole video - title and body must not swap narrators
+    # one voice for the whole video - the parts must not swap narrators
     fish_voice = pick_voice(gender)
+    story, cta = script.split_cta(body)
+    if not cta:
+        log.warning("%s: no closing question found, narrating body as one part", name)
 
-    # The cue rides along to the engine and is stripped before anything is
-    # displayed, so the card and the description stay clean either way.
-    # A title with no terminal punctuation gets read as if the sentence carries
-    # on, and the story then sounds like one unbroken take. The full stop is
-    # what tells the engine to land it.
-    spoken_title = title if title.rstrip()[-1:] in ".!?" else title.rstrip() + "."
-    if TTS_BACKEND == "fish" and FISH_TITLE_CUE and "[" not in title:
-        spoken_title = f"{FISH_TITLE_CUE} {spoken_title}"
+    t_mp3, _ = speak(_cued(title, FISH_TITLE_CUE), f"{name}_title",
+                     rate=rate, speed=speed, fish_voice=fish_voice)
+    b_mp3, b_words = speak(story, f"{name}_body", rate=rate, speed=speed,
+                           fish_voice=fish_voice)
+    parts, words = [t_mp3, b_mp3], list(b_words)
 
-    t_mp3, _ = speak(spoken_title, f"{name}_title", rate=rate, speed=speed,
-                     fish_voice=fish_voice)
-    b_mp3, b_words = speak(body, f"{name}_body", rate=rate, speed=speed, fish_voice=fish_voice)
+    if cta:
+        c_mp3, c_words = speak(_cued(cta, FISH_CTA_CUE), f"{name}_cta",
+                               rate=rate, speed=speed, fish_voice=fish_voice)
+        body_end = duration(b_mp3)
+        words += [{**w, "start": round(w["start"] + body_end, 3),
+                   "end": round(w["end"] + body_end, 3)} for w in c_words]
+        parts.append(c_mp3)
+
     if fish_voice:
         log.info("%s: %s voice %s", name, gender, fish_voice[:8])
 
     title_end = duration(t_mp3) + gap
     merged = OUT_DIR / f"{name}.mp3"
     pad = f"[0:a]apad=pad_dur={gap}[t];[t]" if gap else "[0:a]"
+    chain = pad + "".join(f"[{i}:a]" for i in range(1, len(parts)))
     subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(t_mp3), "-i", str(b_mp3),
-         "-filter_complex", f"{pad}[1:a]concat=n=2:v=0:a=1",
+        ["ffmpeg", "-y", "-loglevel", "error",
+         *[a for p in parts for a in ("-i", str(p))],
+         "-filter_complex", f"{chain}concat=n={len(parts)}:v=0:a=1",
          str(merged)], check=True)
 
     words = [{**w, "start": round(w["start"] + title_end, 3),
-              "end": round(w["end"] + title_end, 3)} for w in b_words]
+              "end": round(w["end"] + title_end, 3)} for w in words]
     (OUT_DIR / f"{name}.json").write_text(json.dumps(words, ensure_ascii=False), "utf-8")
-    log.info("%s: title %.1fs + body %.1fs = %.1fs total",
-             name, title_end, duration(b_mp3), duration(merged))
+    log.info("%s: title %.1fs + story %.1fs%s = %.1fs total", name, title_end,
+             duration(b_mp3),
+             f" + question {duration(parts[-1]):.1f}s" if cta else "",
+             duration(merged))
     return merged, words, title_end
 
 
@@ -262,6 +300,16 @@ if __name__ == "__main__":
     assert filled[1]["start"] == 1.0 and abs(filled[1]["end"] - 3.0) < 0.01
     tail = _fill_gaps([None, None], ["x", "y"], 2.0)
     assert [w["word"] for w in tail] == ["x", "y"] and tail[1]["end"] == 2.0
+
+    # A cue must vanish completely on the way to the screen. Both defaults once
+    # grew past TAG's 60-char ceiling and were narrated as visible text, so the
+    # configured values - not just the shipped ones - get checked here.
+    for cue in (FISH_TITLE_CUE, FISH_CTA_CUE):
+        assert not script.plain(cue), f"cue too long to be stripped: {cue!r}"
+    assert _cued("Заголовок", "[short]").endswith("Заголовок."), "must land on a stop"
+    assert _cued("Вопрос?", "[short]").endswith("Вопрос?"), "a question keeps its mark"
+    assert "[mine]" in _cued("[mine] Своя реплика.", "[short]"), "keep the model's own cue"
+    assert _cued("[mine] Своя реплика.", "[short]").count("[") == 1
 
     # full-length narration on purpose: pace on a two-sentence clip is not
     # representative, and this number is what WPM in script.py must match
