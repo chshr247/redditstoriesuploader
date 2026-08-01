@@ -76,6 +76,13 @@ YT_REFRESH_TOKEN = os.getenv("YT_REFRESH_TOKEN", "")
 YT_HASHTAGS = [t for t in (h.strip().strip('"\'')
                            for h in os.getenv("YT_HASHTAGS", HASHTAGS).split()) if t]
 YT_MIN_GAP_HOURS = float(os.getenv("YT_MIN_GAP_HOURS", 3))
+# YouTube requires the synthetic-content flag for realistic material: real
+# people made to say things they did not, altered footage of real events,
+# realistic scenes that never happened, AI-generated music. Voice-over, a
+# generated script and captions are named as production assistance and are
+# exempt - which is all this pipeline does, so the flag is off by default.
+# Turn it on the moment a video contains any of the four cases above.
+DECLARE_AI = os.getenv("DECLARE_AI", "").lower() in ("1", "true", "yes")
 
 # Subtitle font. Present on Windows; a Linux runner needs it installed, or
 # swap it for something that ships there and carries Cyrillic.

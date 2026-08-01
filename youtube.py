@@ -30,8 +30,9 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from config import (DB_PATH, OUT_DIR, YT_CLIENT_ID, YT_CLIENT_SECRET,
-                    YT_HASHTAGS, YT_MIN_GAP_HOURS, YT_REFRESH_TOKEN, save_env)
+from config import (DB_PATH, DECLARE_AI, OUT_DIR, YT_CLIENT_ID,
+                    YT_CLIENT_SECRET, YT_HASHTAGS, YT_MIN_GAP_HOURS,
+                    YT_REFRESH_TOKEN, save_env)
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -128,8 +129,8 @@ def upload(mp4, title: str, private: bool = True, body: str = "") -> str:
         "status": {
             "privacyStatus": "private" if private else "public",
             "selfDeclaredMadeForKids": False,
-            # the narration is synthetic; YouTube wants that declared
-            "containsSyntheticMedia": True,
+            # see DECLARE_AI in config.py for when this has to be true
+            "containsSyntheticMedia": DECLARE_AI,
         },
     }
 

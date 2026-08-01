@@ -24,7 +24,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from config import (TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET,
+from config import (DECLARE_AI, TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET,
                     TIKTOK_REFRESH_TOKEN, YT_HASHTAGS, save_env)
 
 API = "https://open.tiktokapis.com/v2"
@@ -204,9 +204,8 @@ def upload(mp4, title: str, direct: bool = False, private: bool = True) -> str:
         body = {"source_info": source, "post_info": {
             "title": caption(title),
             "privacy_level": "SELF_ONLY" if private else "PUBLIC_TO_EVERYONE",
-            # the narration is synthetic, so declare it - TikTok penalises
-            # undisclosed AI content harder than disclosed
-            "is_aigc": True,
+            # TikTok's rules are their own - see DECLARE_AI in config.py
+            "is_aigc": DECLARE_AI,
         }}
         url = f"{API}/post/publish/video/init/"
     else:
