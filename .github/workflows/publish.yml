@@ -60,6 +60,9 @@ jobs:
       # setting the spacing between uploads, so it is a real knob now: three a
       # day at five hours apart fills 10:00 to 20:00 MSK.
       YT_MIN_GAP_HOURS: "5"
+      # The parts of one split story ignore the five hours and use this instead:
+      # three parts at five-hour spacing would not fit inside one day's slots.
+      PART_GAP_HOURS: "1.5"
 
     steps:
       - uses: actions/checkout@v4

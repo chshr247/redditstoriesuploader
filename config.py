@@ -94,6 +94,10 @@ YT_HASHTAGS = [t for t in (h.strip().strip('"\'')
 # Five hours apart, so three uploads spread across a waking day instead of
 # landing in one block and competing with each other in the same feed.
 YT_MIN_GAP_HOURS = float(os.getenv("YT_MIN_GAP_HOURS", 5))
+# Parts of one split story run on their own, much tighter clock. Five hours
+# between a cliffhanger and its answer loses the viewer who saw the first half:
+# by then the feed has moved on and part 2 reads as a stranger's video.
+PART_GAP_HOURS = float(os.getenv("PART_GAP_HOURS", 1.5))
 # YouTube requires the synthetic-content flag for realistic material: real
 # people made to say things they did not, altered footage of real events,
 # realistic scenes that never happened, AI-generated music. Voice-over, a

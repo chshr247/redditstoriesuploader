@@ -2,26 +2,34 @@
 
     python main.py        one video
     python main.py 5      five
+
+A long post can become two or three videos instead of one. The whole split is
+written in a single LLM call and parked in seen.db; one part is rendered per
+run, in the run that publishes it, because on a CI runner out/ does not survive
+to the next one.
 """
 import json
 import logging
 import sys
+from pathlib import Path
 
 import render
 import script
 import source
 import voice
-from config import MIN_SEC
+import youtube
+from config import MIN_SEC, OUT_DIR
 
 log = logging.getLogger("main")
 
 MAX_SLOWDOWN = 0.15   # beyond this the voice starts sounding drugged
 
 
-def make_video(post: dict):
-    """One post end to end. Marks the post used only once the mp4 exists."""
-    title, body, gender = script.write_script(post)
-    mp3, words, title_end = voice.speak_parts(title, body, post["id"], gender=gender)
+def _render(title: str, body: str, gender: str, name: str, sub: str,
+            fish_voice: str = "", meta: dict | None = None) -> Path:
+    """Narrate one script and burn it into out/<name>.mp4."""
+    mp3, words, title_end = voice.speak_parts(title, body, name, gender=gender,
+                                              fish_voice=fish_voice)
 
     # Word counts only approximate duration - the voice paced 167-214 wpm across
     # runs. Cheaper to re-synthesize slower than to ask the model for more words.
@@ -31,44 +39,118 @@ def make_video(post: dict):
         log.info("%.1fs is under the %ds floor, re-voicing at -%.0f%%",
                  total, MIN_SEC, slow * 100)
         mp3, words, title_end = voice.speak_parts(
-            title, body, post["id"], rate=f"-{slow * 100:.0f}%",
-            speed=round(1 - slow, 2), gender=gender)
+            title, body, name, rate=f"-{slow * 100:.0f}%",
+            speed=round(1 - slow, 2), gender=gender, fish_voice=fish_voice)
         total = voice.duration(mp3)
         if total < MIN_SEC:
             log.warning("still %.1fs after slowing down - story was too short", total)
 
-    out = render.render(mp3, words, post["id"], title=title, title_end=title_end)
+    out = render.render(mp3, words, name, title=title, title_end=title_end)
     # publishing runs separately and later, so the text has to survive on disk
     (out.with_suffix(".meta.json")).write_text(json.dumps(
-        {"title": script.plain(title), "body": script.plain(body), "sub": post["sub"]},
-        ensure_ascii=False), "utf-8")
+        {"title": script.plain(title), "body": script.plain(body), "sub": sub,
+         **(meta or {})}, ensure_ascii=False), "utf-8")
+    return out
+
+
+def make_video(post: dict) -> Path:
+    """One post, one video. Marks the post used only once the mp4 exists."""
+    gender, written = script.write_script(post)
+    title, body = written[0]
+    out = _render(title, body, gender, post["id"], post["sub"])
     source.mark_used(post["id"], post["score"], post["sub"])
     return out
 
 
-def main(count: int = 1) -> int:
-    # most posts get rejected as unsuitable, so pull a pool rather than exactly count
-    posts = source.fetch(count * 4)
-    if not posts:
-        log.error("no fresh stories - lower MIN_SCORE or add subreddits")
-        return 1
+def make_part(p: dict) -> Path:
+    """Render one already-written part of a split story."""
+    name = f"{p['post_id']}_p{p['n']}"
+    out = OUT_DIR / f"{name}.mp4"
+    if out.exists():
+        # only reachable when out/ outlived the failure, i.e. locally. Re-voicing
+        # a part that is already on disk costs a TTS call for nothing.
+        log.info("%s already rendered, reusing it", out.name)
+        return out
+    return _render(p["title"], p["body"], p["gender"], name, p["sub"],
+                   fish_voice=p["voice"],
+                   meta={"post_id": p["post_id"], "part": p["n"], "total": p["total"]})
 
+
+def make_split(post: dict, n: int) -> Path:
+    """Write the post as n videos, store them all, render the first.
+
+    The post is marked used here rather than when the last part ships: every
+    part's text is already in sqlite by then, so the story is safer stored than
+    it would be left loose in the pool for a second run to pick up again.
+    """
+    gender, written = script.write_script(post, parts=n)
+    if len(written) < 2:
+        log.info("model returned one part, publishing %s as a single video", post["id"])
+        title, body = written[0]
+        out = _render(title, body, gender, post["id"], post["sub"])
+        source.mark_used(post["id"], post["score"], post["sub"])
+        return out
+
+    source.queue_parts(post, written, gender, voice.pick_voice(gender))
+    source.mark_used(post["id"], post["score"], post["sub"])
+    return make_part(source.next_part())
+
+
+def _room() -> int:
+    """Uploads left in today's allowance.
+
+    A split story must not straddle the night: the parts are spaced by hours,
+    and a part 2 landing the next morning is a different video to everyone who
+    saw part 1. So the whole story has to fit in what is left of today.
+    """
+    s = youtube.status()
+    return max(0, s["allowed"] - s["today"])
+
+
+def main(count: int = 1) -> int:
     done, skipped, failed = [], 0, 0
-    for p in posts:
-        if len(done) >= count:
-            break
-        log.info("r/%s [%d] %s", p["sub"], p["score"], p["title"][:70])
+
+    # A story already split owns the next slot: its middle must not queue behind
+    # a fresh video, and in CI the mp4 dies with the runner, so the part is
+    # rendered now and cleared only once youtube.py has actually uploaded it.
+    part = source.next_part()
+    if part:
+        log.info("continuing %s: part %d of %d", part["post_id"], part["n"],
+                 part["total"])
         try:
-            done.append(make_video(p))
-        except script.Unsuitable as e:
-            # burn it so the same dud is not reconsidered next run
-            source.mark_used(p["id"], p["score"], p["sub"])
-            log.info("skipped: %s", e)
-            skipped += 1
+            done.append(make_part(part))
         except Exception:
-            # one bad story must not kill the batch; it stays unmarked for a retry
-            log.exception("failed on %s, moving on", p["id"])
+            log.exception("failed on part %d of %s", part["n"], part["post_id"])
+            source.fail_part(part["post_id"], part["n"])
             failed += 1
+
+    if len(done) < count:
+        # most posts get rejected as unsuitable, so pull a pool rather than exactly count
+        posts = source.fetch(count * 4)
+        if not posts and not done:
+            log.error("no fresh stories - lower MIN_SCORE or add subreddits")
+            return 1
+
+        for p in posts:
+            if len(done) >= count:
+                break
+            # Asked fresh each time rather than tracked in a flag: a split that
+            # queues its parts and then dies on the render has still used up the
+            # day's one story, and a SKIP before any of that has not.
+            may_split = not part and not source.multipart_today()
+            n = max(1, min(script.part_count(p), _room())) if may_split else 1
+            log.info("r/%s [%d] %d parts: %s", p["sub"], p["score"], n, p["title"][:60])
+            try:
+                done.append(make_split(p, n) if n > 1 else make_video(p))
+            except script.Unsuitable as e:
+                # burn it so the same dud is not reconsidered next run
+                source.mark_used(p["id"], p["score"], p["sub"])
+                log.info("skipped: %s", e)
+                skipped += 1
+            except Exception:
+                # one bad story must not kill the batch; it stays unmarked for a retry
+                log.exception("failed on %s, moving on", p["id"])
+                failed += 1
 
     for f in done:
         print(f)
