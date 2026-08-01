@@ -202,30 +202,58 @@ def speak(text: str, name: str, voice: str = TTS_VOICE, rate: str = RATE,
     return mp3, words
 
 
+CUE_MAX = 60                                  # the ceiling on script.TAG
+LEAD_CUE = re.compile(r"^\[([^\]\n]{1,60})\]\s*")
+
+
 def _cued(text: str, cue: str) -> str:
-    """Prefix a delivery cue, and make sure the line lands on a full stop.
+    """Apply a delivery cue, and make sure the line lands on a full stop.
 
     Text with no terminal punctuation gets read as if the sentence carries on,
     and the parts either side then sound like one unbroken take. Terminal
     punctuation is what tells the engine to land it.
 
     The cue rides along to the engine and is stripped before anything is
-    displayed, so the card and the description stay clean either way. A text
-    that already carries its own cue keeps it - the model placed it on purpose.
+    displayed, so the card and the description stay clean either way.
+
+    The closing question arrives with a mood cue of its own, chosen for how the
+    story ended. That wording is the specific one, so it leads - but the
+    delivery constraint in `cue` has to survive, because the take that won the
+    listening test carried BOTH: mood plus "no stress on the last word". Mood
+    alone was a different take, and it lost. So the two are merged into one
+    bracket rather than one replacing the other.
+
+    The test is for a cue at the FRONT rather than a bracket anywhere, so a
+    stray cue mid-line cannot suppress the merge.
     """
     text = text.rstrip()
     if text[-1:] not in ".!?…»":
         text += "."
-    if TTS_BACKEND == "fish" and cue and "[" not in text:
-        # A cue longer than script.TAG allows is not recognised as a cue: it
-        # stays in the word count and gets burned into the subtitles. Dropping
-        # it costs delivery, keeping it corrupts the screen - so it goes.
-        if script.plain(cue):
-            log.error("cue %r is too long to be stripped (max %d chars inside "
-                      "the brackets) - narrating without it", cue[:50], 60)
-        else:
-            text = f"{cue} {text}"
-    return text
+    if TTS_BACKEND != "fish" or not cue:
+        return text
+
+    # A cue longer than script.TAG allows is not recognised as a cue: it stays
+    # in the word count and gets burned into the subtitles. Dropping it costs
+    # delivery, keeping it corrupts the screen - so it goes.
+    if script.plain(cue):
+        log.error("cue %r is too long to be stripped (max %d chars inside the "
+                  "brackets) - narrating without it", cue[:50], CUE_MAX)
+        return text
+
+    lead = LEAD_CUE.match(text)
+    if not lead:
+        return f"{cue} {text}"
+
+    # Two cues back to back get read as one, with the second quietly dropped,
+    # so they have to become a single bracket. If the join outgrows the ceiling
+    # it stops being strippable and would be narrated as visible text, which is
+    # worse than losing the constraint - then the model's cue stands alone.
+    merged = f"[{lead.group(1)}, {cue.strip()[1:-1]}]"
+    if len(merged) - 2 > CUE_MAX:
+        log.warning("merged cue %r exceeds %d chars, keeping the model's",
+                    merged[:50], CUE_MAX)
+        return text
+    return merged + " " + text[lead.end():]
 
 
 def speak_parts(title: str, body: str, name: str, gap: float = 0.0,
@@ -308,8 +336,21 @@ if __name__ == "__main__":
         assert not script.plain(cue), f"cue too long to be stripped: {cue!r}"
     assert _cued("Заголовок", "[short]").endswith("Заголовок."), "must land on a stop"
     assert _cued("Вопрос?", "[short]").endswith("Вопрос?"), "a question keeps its mark"
-    assert "[mine]" in _cued("[mine] Своя реплика.", "[short]"), "keep the model's own cue"
-    assert _cued("[mine] Своя реплика.", "[short]").count("[") == 1
+    assert _cued("Без кью.", "[short]").startswith("[short] "), "no lead cue means prepend"
+
+    # The model's mood leads, our delivery constraint rides along, and the
+    # engine gets ONE bracket - the shape that won the listening test. Mood on
+    # its own is a different delivery, so losing the constraint is a bug.
+    own = _cued("[doubtful] А как бы вы поступили?", "[calm, flat]")
+    assert own.startswith("[doubtful, calm, flat] "), own
+    assert not script.plain("[doubtful, calm, flat]"), "the merge must stay strippable"
+    assert own.count("[") == 1, f"two brackets reach the engine as one: {own}"
+    # a cue mid-line is not a leading cue, so the fallback still applies
+    assert _cued("А как бы [oops] вы поступили?", "[calm]").startswith("[calm] ")
+    # a merge that would outgrow the ceiling leaves the model's cue alone,
+    # because an unstrippable cue gets narrated instead of steering the voice
+    huge = "[" + "x" * 55 + "]"
+    assert _cued(f"{huge} Реплика.", "[calm, flat]").startswith(huge)
 
     # full-length narration on purpose: pace on a two-sentence clip is not
     # representative, and this number is what WPM in script.py must match

@@ -114,6 +114,8 @@ Rules:
 - After the story is closed, and only then, add the LAST line: one short question to the viewer about what they would have done, or whose side they take. It stands alone, it is the final sentence of the narration, and it must end with a question mark. Nothing follows it.
 - That closing question is the only place the viewer may be addressed. Never ask for likes, follows or subscriptions, and never mention the video, the channel or the algorithm.
 - Vary the question so it names what actually happened in this story - "А вы бы простили брата за такое?" beats "А вы бы как поступили?". The same generic line under every video reads as a template.
+- The closing question OPENS with a mood cue - [doubtful], [thoughtful], [curious], [quietly] - written before its first word. Pick the one that fits how the story ended. Shape it exactly like this, and nothing more: "[doubtful] А как бы вы поступили на моём месте?"
+- That opening cue is the ONLY markup the question may carry. Never put a second cue inside the line, and never try to mark a single word for stress - it does nothing to the delivery here and only risks being read out as text. The mood cue alone shapes the whole question, last word included.
 - No headings, markup, quotes, emoji or commentary anywhere."""
 
 
@@ -257,6 +259,29 @@ def _title_fault(title: str) -> str:
     return ""
 
 
+# The mood cue in front of the question. [emphasis] is not a mood, so a
+# question that opens with one still counts as having no opening cue.
+LEAD_CUE = re.compile(r"^\[(?!emphasis\b)[^\]\n]{1,60}\]", re.IGNORECASE)
+
+
+def _cta_fault(cta: str) -> str:
+    """Empty when the closing question is marked up for delivery.
+
+    A leading mood cue and nothing else. Marking one word for stress mid-line
+    was tried and measured: the tagged word came back no longer, and sometimes
+    shorter, than the same word untagged. It changes nothing about how the
+    question is read, so it is not allowed to sit there looking like it does.
+    """
+    m = LEAD_CUE.match(cta.strip())
+    if not m:
+        return ("the closing question must open with a mood cue before its "
+                "first word, like \"[doubtful] А как бы...\"")
+    if TAG.search(cta.strip()[m.end():]):
+        return ("the closing question carries a cue inside the line - the "
+                "opening mood cue is the only markup it may have")
+    return ""
+
+
 def _ending_fault(body: str) -> str:
     """Empty when the narration closes properly.
 
@@ -269,7 +294,10 @@ def _ending_fault(body: str) -> str:
     if not t.endswith("?"):
         return ("the narration must finish the story and then close with one "
                 "short question to the viewer, ending in a question mark")
-    return ""
+    _, cta = split_cta(body)
+    if not cta:
+        return "the closing question must stand as its own final sentence"
+    return _cta_fault(cta)
 
 
 def guess_gender(post: dict) -> str:
@@ -439,12 +467,21 @@ if __name__ == "__main__":
     assert _words(s) + _words(c) == _words(full), (s, c)
 
     # the closing question is what proves the text reached its end
-    assert not _ending_fault("Я собрал вещи и ушёл. А вы бы простили такое?")
+    GOOD_CTA = "[doubtful] А как бы вы поступили на моём месте?"
+    assert not _ending_fault(f"Я собрал вещи и ушёл. {GOOD_CTA}")
     assert _ending_fault("Я собрал вещи и ушёл."), "a story with no CTA is unfinished"
     assert _ending_fault("Он открыл дверь и"), "a cut-off narration must be caught"
     assert _ending_fault("Он крикнул. [angry] «Ты серьёзно?»"), "direct speech is not a CTA"
     assert _ending_fault("")
-    assert not _ending_fault("Всё закончилось. [thoughtful] А вы бы поступили так же?")
+
+    # a leading mood cue, and nothing else on the line
+    assert not _cta_fault(GOOD_CTA)
+    assert not _cta_fault("[thoughtful] А вы бы простили его?")
+    assert _cta_fault("А вы бы простили его?"), "no mood cue"
+    assert _cta_fault("[emphasis]А вы бы простили его?"), "emphasis is not a mood"
+    # marking one word for stress was measured and does nothing - keep it out
+    assert _cta_fault("[doubtful] А вы бы [emphasis]простили его?"), "cue inside the line"
+    assert _cta_fault("[doubtful] А вы бы простили [quietly] его?"), "second cue"
     print(f"logic ok: {OUTPUT_LANG}, {_wpm()} wpm, target {tw} words "
           f"for {TARGET_SEC}+{CTA_SEC} sec")
 
