@@ -7,6 +7,7 @@ instead of the same top posts.
 import html
 import json
 import logging
+import random
 import re
 import sqlite3
 import time
@@ -73,7 +74,11 @@ def fetch(limit: int = 3) -> list[dict]:
     """Return up to `limit` unused stories, highest score first."""
     db = _db()
     out = []
-    for sub in SUBREDDITS:
+    # Shuffled, not in order: the loop stops as soon as it has enough, so a
+    # fixed order means the first subreddit answers every single time and the
+    # rest are never read. Twenty-six of the first twenty-seven stories came
+    # from one sub before this line existed.
+    for sub in random.sample(SUBREDDITS, len(SUBREDDITS)):
         if len(out) >= limit:
             break
         # cursor: drop below the weakest post already used, but never above the

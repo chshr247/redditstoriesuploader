@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import secrets
 import sys
 import urllib.error
@@ -23,8 +24,8 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from config import (HASHTAGS, TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET,
-                    TIKTOK_REFRESH_TOKEN, save_env)
+from config import (TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET,
+                    TIKTOK_REFRESH_TOKEN, YT_HASHTAGS, save_env)
 
 API = "https://open.tiktokapis.com/v2"
 AUTH_URL = "https://www.tiktok.com/v2/auth/authorize/"
@@ -148,11 +149,18 @@ def authorize() -> None:
     print(f"scopes granted: {r.get('scope')}")
 
 
-def caption(title: str, hashtags: str = HASHTAGS) -> str:
-    """Story title plus tags, trimmed to TikTok's limit."""
-    text = f"{title} {hashtags}".strip()
+def caption(title: str, hashtags=None) -> str:
+    """Title plus a rotating slice of tags, trimmed to TikTok's limit.
+
+    Deliberately shorter than the YouTube description: TikTok shows two lines
+    before the fold, so anything past the hook is scrolled past anyway.
+    """
+    pool = list(YT_HASHTAGS if hashtags is None else hashtags)
+    random.shuffle(pool)
+    tags = " ".join(pool[:5])
+    text = f"{title.strip()}\n\n{tags}"
     if len(text) > TITLE_MAX:
-        text = text[:TITLE_MAX - len(hashtags) - 4].rstrip() + "... " + hashtags
+        text = title.strip()[:TITLE_MAX - len(tags) - 6].rstrip() + "...\n\n" + tags
     return text
 
 
@@ -242,8 +250,9 @@ if __name__ == "__main__":
     assert len(p) == 5 and p[0] == (0, 9_999_999) and p[-1] == (40_000_000, 54_099_999)
     assert sum(e - s + 1 for s, e in p) == 54_100_000, "chunks must cover the file"
     assert all(a[1] + 1 == b[0] for a, b in zip(p, p[1:])), "gap between chunks"
-    assert caption("Short one").endswith(HASHTAGS)
+    assert caption("Короткий").splitlines()[0] == "Короткий"
     assert len(caption("x" * 3000)) <= TITLE_MAX
+    assert len({caption("Один и тот же") for _ in range(30)}) > 5, "tags must rotate"
     print("chunking and caption logic ok")
 
     try:
