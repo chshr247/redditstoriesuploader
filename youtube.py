@@ -82,31 +82,21 @@ def title_for(text: str) -> str:
     return text + tag
 
 
-# Openers rotate so consecutive uploads do not share a first line. The body of
-# the description is the story's own opening, which differs by construction -
-# that is where the real variation comes from, not from shuffling boilerplate.
-OPENERS = [
-    "Кто здесь неправ?",
-    "А вы бы как поступили?",
-    "Смотрите, что произошло.",
-    "Вот так вот.",
-    "Смотрите, что я нашёл.",
-    "Вот это поворот.",
-    "Вот так вот бывает.",
-    "Вот так вот бывает, друзья.",
-]
-
-
 def description_for(title: str, body: str = "", hashtags=None) -> str:
-    """Teaser built from the story itself, plus a rotating slice of tags."""
+    """Teaser built from the story itself, plus a rotating slice of tags.
+
+    The first line is the title and nothing else. A rotating opener used to sit
+    above it - "Смотрите, что произошло." - and it only pushed the conflict
+    below the fold: the two lines a viewer sees before tapping "ещё" were spent
+    on boilerplate. The variation it was there for comes from the story's own
+    opening anyway, which differs by construction.
+    """
     pool = list(YT_HASHTAGS if hashtags is None else hashtags)
     random.shuffle(pool)
     tags = " ".join(pool[:5] + ["#Shorts"])
 
     teaser = " ".join(re.split(r"(?<=[.!?])\s+", body.strip())[:2]).strip()
-    parts = [random.choice(OPENERS), title.strip()]
-    if teaser:
-        parts.append(teaser)
+    parts = [title.strip()] + ([teaser] if teaser else [])
     return (("\n\n".join(parts)) + "\n\n" + tags)[:DESC_MAX]
 
 
@@ -360,6 +350,9 @@ if __name__ == "__main__":
         # the teaser must stop at two sentences, not dump the whole story
         d = description_for("Заголовок", "Первое. Второе. Третье. Четвёртое.")
         assert "Второе." in d and "Третье." not in d, d
+
+        # the conflict is the first thing read, before any boilerplate
+        assert d.startswith("Заголовок\n\n"), d
 
         # consecutive descriptions must not be clones
         variants = {description_for("Один и тот же", "Одно и то же.") for _ in range(30)}

@@ -61,7 +61,7 @@ Softening a story is not your job. If it needs sanitising to be postable, SKIP i
 Otherwise answer in exactly this shape:
 
 NARRATOR: male or female
-TITLE: <ONE sentence, max 12 words - the hook that goes on the title card>
+TITLE: <ONE sentence, max 12 words - the conflict, stated, for the title card>
 <blank line>
 <the narration, one paragraph>
 
@@ -90,14 +90,15 @@ Rules:
 - Reported anger read in a calm voice is the single most artificial thing the narration can do. Give the narrator a contrasting cue when they answer: [me, cold] «Ужин на столе».
 - Sounds are cues too, and they are what make a told story sound told rather than read. Drop [sighing] before resignation, [laughing] or [amused] before something absurd, [whispering] before a confession. Two or three across the whole narration, at the moments a person would actually make that sound.
 - Let sentences breathe at their natural length. Do not chop the story into short fragments to force pauses: the engine puts a real gap at every full stop, and a wall of three-word sentences comes out sounding stilted. Enumerations of three or more items are the exception - split those, since a comma list is read as one flat run.
-- The TITLE is a hook, not a summary. It sits on screen for the two or three seconds in which the viewer decides to stay, so it has to leave a question open. Never state the outcome, never describe the whole plot, never write a calm report of events.
+- The TITLE states the conflict outright. It is not a teaser and not a riddle: name who did what to whom, in the bluntest words the story allows, so that a stranger understands the whole situation from the title alone. Hiding the point to "leave a question open" reads as clickbait and loses them. What you withhold is only how it ENDED - state the collision in full, never the resolution.
+- Front-load it. The feed cuts the title off after roughly forty characters, so everything that makes the story worth watching has to sit before the cut: the scene and the outrage first, the consequence after the comma. A title whose punch lands in the last three words arrives already truncated.
 - The TITLE is ALWAYS ONE SENTENCE. Never two. It carries no full stop, no exclamation mark and no question mark inside it - one unbroken line, and nothing after it.
-  It still has to turn, though: a hook that only sets up is flat. Make the turn on a comma with "а" or "но" instead of on a full stop - the collision survives, the sentence stays whole:
+  It still has to turn: make the turn on a comma with "а" or "но" instead of on a full stop - the collision survives, the sentence stays whole:
+    "Мать в метро потребовала уступить место, а у парня оказался протез" — works, the situation is fully clear and it still stings
+    "Попросила золовку платить 800 долларов за комнату, а семья назвала меня монстром" — works, the sum and the verdict are both in it
     "Соседка орала на моих детей, а наказала я своих" — works, it contradicts itself and demands an explanation
     "Соседка орала на моих детей. Наказала я своих." — WRONG, two sentences, no matter how well it reads
-    "Я наказала сыновей, а не соседку" — does not work, it just reports
-    "Мужа похоронили в четверг, а в пятницу она спросила про деньги" — works
-    "Она ждала наследство от моего покойного мужа" — does not
+    "Она ждала наследство от моего покойного мужа" — too vague, it names no scene and no one's words
   Build it from the sharpest concrete fact, or from the collision between two people.
   A title must name something that HAPPENED - a scene, a line someone said, a thing someone did. These shapes are never a hook, because nothing happens in them, and they are rejected outright:
     an instruction or plea to the world: "Не используйте меня для воспитания детей", "Никогда не занимайте денег родне"
@@ -105,11 +106,12 @@ Rules:
     a label for a topic: "История о том, как я съехал", "Мой опыт с ипотекой"
   Each of those describes a situation in general. Replace it with the single worst moment of that situation, in concrete words - what was said, by whom, when. "Не используйте меня для воспитания детей" becomes "Отец ткнул в меня пальцем. «Будешь плохо есть - станешь как он»".
   Do not open the title with a verb in the imperative addressed to the viewer, and do not write it as advice.
-  It is read aloud, so no abbreviations, no brackets, no "(20F)" - write ages and genders as words if they matter at all.
+  It is read aloud, so no abbreviations, no brackets, no "(20F)" - write genders as words if they matter at all.
+  Numbers in the TITLE are DIGITS, always: "800 долларов", "15 лет", "трое детей" only when there is no figure. A digit is the one thing the eye catches while scrolling; "восемьсот" is read as just more text. The currency stays a word after the number - the voice reads the title out loud, and a bare "$" is not a word.
 - The narration opens on the first beat of the story. Never repeat or rephrase the title.
 - First person, past tense, short plain sentences.
 - Cut everything that does not move the plot: greetings, "edit:", "TL;DR", thanks, award mentions.
-- Write numbers as words.
+- In the narration write numbers as words. Only the TITLE uses digits.
 - The story must END, not stop. Land the payoff or twist, then close it with one short line that settles it - what it cost, what changed, what the narrator felt afterwards. A narration that runs out mid-scene, or breaks off right after the reveal with nothing to absorb it, is a failure even if the word count is right. Budget for this from the start: reach the ending deliberately instead of using every word on the setup and hitting the limit.
 - After the story is closed, and only then, add the LAST line: one short question to the viewer about what they would have done, or whose side they take. It stands alone, it is the final sentence of the narration, and it must end with a question mark. Nothing follows it.
 - That closing question is the only place the viewer may be addressed. Never ask for likes, follows or subscriptions, and never mention the video, the channel or the algorithm.
@@ -238,6 +240,19 @@ WEAK_TITLE = re.compile(
 
 MAX_TITLE_WORDS = 12
 
+# Numbers spelled out in the title: "восемьсот долларов" where "800 долларов"
+# belongs. Full words only - a stem like "пят" would fire on "пятница".
+# ponytail: tens and up only. Numerals below twenty share stems with ordinary
+# words and are short enough to read fine either way, so they are left alone;
+# extend the list if "пять тысяч" style titles start slipping through as prose.
+SPELLED_NUMBER = re.compile(
+    r"\b(?:двадцат[иь]|тридцат[иь]|сорока?|пятьдесят|пятидесяти|шестьдесят"
+    r"|шестидесяти|семьдесят|семидесяти|восемьдесят|восьмидесяти|девяносто"
+    r"|девяноста|ст[оа]|двести|двухсот|тр[ие]ста|тр[ёе]хсот|четыреста"
+    r"|четыр[ёе]хсот|пятьсот|пятисот|шестьсот|шестисот|семьсот|семисот"
+    r"|восемьсот|восьмисот|девятьсот|девятисот|тысяч\w*|миллион\w*"
+    r"|миллиард\w*)\b", re.IGNORECASE)
+
 
 def _title_fault(title: str) -> str:
     """Empty when the title is usable, otherwise what to tell the model."""
@@ -251,6 +266,10 @@ def _title_fault(title: str) -> str:
         return ("the TITLE states a position or gives advice instead of showing "
                 "a moment - rewrite it as the single sharpest thing that "
                 "happened, in concrete words")
+    n = SPELLED_NUMBER.search(t)
+    if n:
+        return (f"the TITLE spells the number \"{n.group()}\" out in letters - "
+                "write it in digits, \"800 долларов\" not \"восемьсот долларов\"")
     # One sentence, always. The same boundary split_cta() uses, so "two
     # sentences" means here exactly what it means everywhere else in the file.
     if len(SENTENCE.split(t)) > 1:
@@ -439,6 +458,15 @@ if __name__ == "__main__":
     assert _title_fault("Отец ткнул в меня пальцем. «Будешь плохо есть»")
     assert not _title_fault("Соседка орала на моих детей, а наказала я своих")
     assert not _title_fault("Мужа похоронили в четверг, а в пятницу она спросила про деньги")
+    # digits are the point of the title, not a stray token to trip over
+    assert not _title_fault("Попросила золовку платить 800 долларов за комнату, а семья назвала меня монстром")
+    assert _title_fault("Попросила золовку платить восемьсот долларов за комнату")
+    assert _title_fault("Отец требует тридцать процентов моей зарплаты")
+    assert _title_fault("Брат занял пять тысяч и пропал перед моей свадьбой")
+    # ordinary words that merely start like a numeral must not trip it
+    assert not _title_fault("Мужа похоронили в четверг, а в пятницу она спросила про деньги")
+    assert not _title_fault("Он оставил пятно на платье, а виноватой стала я")
+    assert not _title_fault("Ремонт стоит дороже, а платить велели мне")
     # a trailing stop is stripped before the card is drawn, so it is not a split
     assert not _title_fault("Тест сказал другое.")
     # "не" plus a normal verb is a fact, not an instruction - it must pass
