@@ -54,9 +54,12 @@ FISH_TITLE_CUE = os.getenv(
 # Same idea for the closing question. It is synthesized apart from the story so
 # it reads as the narrator turning to the viewer, not as one more sentence of
 # the plot - which is the whole reason it is there.
-FISH_CTA_CUE = os.getenv(
-    "FISH_CTA_CUE",
-    "[asking the viewer, calm, no stress on the last word]")
+# This is the delivery constraint, not the mood: the model writes the mood cue
+# in front of the question, picked for how that story ended, and _cued() merges
+# the two into one bracket. That merged shape is what won the listening test -
+# mood plus the constraint. Mood on its own was a separate take, and it lost.
+# Kept short because both halves count against the 60-char ceiling together.
+FISH_CTA_CUE = os.getenv("FISH_CTA_CUE", "[calm, no stress on the last word]")
 # Fish returns audio only, so word timings come from local whisper alignment.
 # base is enough - we use its timings, never its text.
 WHISPER_SIZE = os.getenv("WHISPER_SIZE", "base")
