@@ -15,6 +15,7 @@ Two things to know before wiring this into a schedule:
     seven days. Switch it to "In production" (unverified is fine) or you will
     be re-authorising every week.
 """
+import datetime
 import json
 import logging
 import random
@@ -189,13 +190,25 @@ def daily_allowance(day: int) -> int:
     return 8
 
 
+def _utc_date(ts: float):
+    return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).date()
+
+
 def status() -> dict:
+    """Counts run on UTC calendar days, not a trailing 24-hour window.
+
+    A rolling window sounds equivalent and is not: three uploads bunched into
+    one evening keep the next whole day blocked, because each only frees up
+    24 hours after itself. Calendar days reset at a predictable moment and the
+    allowance means what it says.
+    """
     with _db() as db:
         rows = db.execute("SELECT ts FROM uploaded ORDER BY ts").fetchall()
     now = time.time()
-    first = rows[0][0] if rows else now
-    day = int((now - first) // 86400)
-    today = sum(1 for (ts,) in rows if ts > now - 86400)
+    today_date = _utc_date(now)
+    first_date = _utc_date(rows[0][0]) if rows else today_date
+    day = (today_date - first_date).days
+    today = sum(1 for (ts,) in rows if _utc_date(ts) == today_date)
     last = rows[-1][0] if rows else 0
     return {"day": day, "today": today, "allowed": daily_allowance(day),
             "since_last_h": (now - last) / 3600 if last else 999, "total": len(rows)}
@@ -358,6 +371,16 @@ if __name__ == "__main__":
 
         assert daily_allowance(0) == 3 and daily_allowance(2) == 3
         assert daily_allowance(3) == 4 and daily_allowance(30) == 8
+
+        # The case that broke it: two uploads two hours apart, either side of
+        # midnight. A trailing 24h window counts both as "today"; calendar days
+        # do not, which is the whole point.
+        midnight = datetime.datetime(2026, 8, 1, tzinfo=datetime.timezone.utc)
+        before = (midnight - datetime.timedelta(hours=1)).timestamp()
+        after = (midnight + datetime.timedelta(hours=1)).timestamp()
+        assert after - before < 24 * 3600, "the two are inside one rolling window"
+        assert _utc_date(before) != _utc_date(after), "but they are different days"
+        assert _utc_date(0) == datetime.date(1970, 1, 1)
         print("title, description and schedule logic ok")
         sys.exit(0)
 
