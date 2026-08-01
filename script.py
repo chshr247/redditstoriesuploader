@@ -25,6 +25,10 @@ class Unsuitable(Exception):
 # changes - the whole word budget hangs off it.
 WPM = {"ru": 150, "en": 191}
 TOLERANCE = 0.15
+# The closing question is spoken too, so it needs its own slice of the budget.
+# Added on top of TARGET_SEC rather than carved out of it: taken from the story
+# it would squeeze the payoff, which is the one part that must not be rushed.
+CTA_SEC = 3
 
 LANG_NAME = {"ru": "Russian", "en": "English"}
 
@@ -57,7 +61,7 @@ Softening a story is not your job. If it needs sanitising to be postable, SKIP i
 Otherwise answer in exactly this shape:
 
 NARRATOR: male or female
-TITLE: <one line, max 8 words - the hook that goes on the title card>
+TITLE: <ONE sentence, max 12 words - the hook that goes on the title card>
 <blank line>
 <the narration, one paragraph>
 
@@ -87,17 +91,29 @@ Rules:
 - Sounds are cues too, and they are what make a told story sound told rather than read. Drop [sighing] before resignation, [laughing] or [amused] before something absurd, [whispering] before a confession. Two or three across the whole narration, at the moments a person would actually make that sound.
 - Let sentences breathe at their natural length. Do not chop the story into short fragments to force pauses: the engine puts a real gap at every full stop, and a wall of three-word sentences comes out sounding stilted. Enumerations of three or more items are the exception - split those, since a comma list is read as one flat run.
 - The TITLE is a hook, not a summary. It sits on screen for the two or three seconds in which the viewer decides to stay, so it has to leave a question open. Never state the outcome, never describe the whole plot, never write a calm report of events.
-  Build it from the sharpest concrete fact, or from the collision between two people. Two short sentences are fine when the first sets up and the second lands:
-    "Соседка орала на моих детей. Наказала я своих." — works, it contradicts itself and demands an explanation
-    "Я наказала сыновей, а не соседку." — does not, it just reports
-    "Мужа похоронили в четверг. В пятницу она спросила про деньги." — works
-    "Она ждала наследство от моего покойного мужа." — does not
+- The TITLE is ALWAYS ONE SENTENCE. Never two. It carries no full stop, no exclamation mark and no question mark inside it - one unbroken line, and nothing after it.
+  It still has to turn, though: a hook that only sets up is flat. Make the turn on a comma with "а" or "но" instead of on a full stop - the collision survives, the sentence stays whole:
+    "Соседка орала на моих детей, а наказала я своих" — works, it contradicts itself and demands an explanation
+    "Соседка орала на моих детей. Наказала я своих." — WRONG, two sentences, no matter how well it reads
+    "Я наказала сыновей, а не соседку" — does not work, it just reports
+    "Мужа похоронили в четверг, а в пятницу она спросила про деньги" — works
+    "Она ждала наследство от моего покойного мужа" — does not
+  Build it from the sharpest concrete fact, or from the collision between two people.
+  A title must name something that HAPPENED - a scene, a line someone said, a thing someone did. These shapes are never a hook, because nothing happens in them, and they are rejected outright:
+    an instruction or plea to the world: "Не используйте меня для воспитания детей", "Никогда не занимайте денег родне"
+    a stated position or complaint: "Меня достали чужие дети", "Свекровь не уважает границы"
+    a label for a topic: "История о том, как я съехал", "Мой опыт с ипотекой"
+  Each of those describes a situation in general. Replace it with the single worst moment of that situation, in concrete words - what was said, by whom, when. "Не используйте меня для воспитания детей" becomes "Отец ткнул в меня пальцем. «Будешь плохо есть - станешь как он»".
+  Do not open the title with a verb in the imperative addressed to the viewer, and do not write it as advice.
   It is read aloud, so no abbreviations, no brackets, no "(20F)" - write ages and genders as words if they matter at all.
 - The narration opens on the first beat of the story. Never repeat or rephrase the title.
 - First person, past tense, short plain sentences.
 - Cut everything that does not move the plot: greetings, "edit:", "TL;DR", thanks, award mentions.
 - Write numbers as words.
-- End on the payoff or twist. No calls to subscribe, no addressing the viewer.
+- The story must END, not stop. Land the payoff or twist, then close it with one short line that settles it - what it cost, what changed, what the narrator felt afterwards. A narration that runs out mid-scene, or breaks off right after the reveal with nothing to absorb it, is a failure even if the word count is right. Budget for this from the start: reach the ending deliberately instead of using every word on the setup and hitting the limit.
+- After the story is closed, and only then, add the LAST line: one short question to the viewer about what they would have done, or whose side they take. It stands alone, it is the final sentence of the narration, and it must end with a question mark. Nothing follows it.
+- That closing question is the only place the viewer may be addressed. Never ask for likes, follows or subscriptions, and never mention the video, the channel or the algorithm.
+- Vary the question so it names what actually happened in this story - "А вы бы простили брата за такое?" beats "А вы бы как поступили?". The same generic line under every video reads as a template.
 - No headings, markup, quotes, emoji or commentary anywhere."""
 
 
@@ -147,6 +163,32 @@ def speakers(s: str) -> list[str | None]:
     return out
 
 
+# A sentence boundary the model actually produces: terminal punctuation, then
+# whitespace, then either a delivery cue or a capital. The cue belongs to the
+# sentence it opens, so the lookahead steps over it rather than splitting on it.
+SENTENCE = re.compile(
+    r"(?<=[.!?…»])\s+(?=(?:\[[^\]\n]{1,60}\]\s*)*[«„“A-ZА-ЯЁ])")
+
+
+def split_cta(body: str) -> tuple[str, str]:
+    """(story, closing question). The question is empty when there is none.
+
+    Voiced as its own take, so it has to be a separate string: read inside the
+    narration it lands as one more sentence of the plot, which is exactly what
+    it must not sound like.
+    """
+    parts = SENTENCE.split(body.strip())
+    if len(parts) < 2:
+        return body.strip(), ""
+    story, cta = " ".join(parts[:-1]).strip(), parts[-1].strip()
+    # Only a bare question qualifies. A story ending on «Ты серьёзно?» closes
+    # inside the quote mark, so it fails this test and stays in the narration -
+    # it is a line of dialogue, not the narrator addressing anyone.
+    if not plain(cta).endswith("?"):
+        return body.strip(), ""
+    return story, cta
+
+
 def plain(s: str) -> str:
     """Everything the engine needs and the viewer must not see.
 
@@ -168,12 +210,66 @@ def _words(s: str) -> int:
 
 
 def _target_words() -> int:
-    """Budget for title plus narration together - both are spoken."""
-    return round(TARGET_SEC / 60 * _wpm())
+    """Budget for title plus narration together - both are spoken.
+
+    CTA_SEC rides on top of TARGET_SEC so the closing question is paid for out
+    of extra runtime instead of out of the ending.
+    """
+    return round((TARGET_SEC + CTA_SEC) / 60 * _wpm())
 
 
 def _fits(total: int, target: int) -> bool:
     return target * (1 - TOLERANCE) <= total <= target * (1 + TOLERANCE)
+
+
+# Titles that describe a situation instead of showing a moment. The model has
+# prose rules against these; this catches the ones that slip through, since a
+# weak first line costs the whole view.
+WEAK_TITLE = re.compile(
+    r"^(?:"
+    r"не\s+\w+(?:те|йте)\b"          # imperative plea: "Не используйте меня..."
+    r"|никогда\s+не\s+\w+(?:те|йте)\b"
+    r"|истори[яю]\s+о\s+том\b"
+    r"|о\s+том,?\s+как\b"
+    r"|мой\s+опыт\b"
+    r")", re.IGNORECASE)
+
+MAX_TITLE_WORDS = 12
+
+
+def _title_fault(title: str) -> str:
+    """Empty when the title is usable, otherwise what to tell the model."""
+    t = plain(title).strip()
+    if not t:
+        return "the TITLE line is missing"
+    if len(t.split()) > MAX_TITLE_WORDS:
+        return (f"the TITLE is {len(t.split())} words, keep it under "
+                f"{MAX_TITLE_WORDS}")
+    if WEAK_TITLE.match(t):
+        return ("the TITLE states a position or gives advice instead of showing "
+                "a moment - rewrite it as the single sharpest thing that "
+                "happened, in concrete words")
+    # One sentence, always. The same boundary split_cta() uses, so "two
+    # sentences" means here exactly what it means everywhere else in the file.
+    if len(SENTENCE.split(t)) > 1:
+        return ("the TITLE is two sentences - it must be exactly one, with the "
+                "turn made on a comma with \"а\" or \"но\" instead of a full stop")
+    return ""
+
+
+def _ending_fault(body: str) -> str:
+    """Empty when the narration closes properly.
+
+    The closing question is mandatory, so its question mark doubles as the
+    marker that the text reached its end rather than being cut off.
+    """
+    t = plain(body).strip()
+    if not t:
+        return "the narration is missing"
+    if not t.endswith("?"):
+        return ("the narration must finish the story and then close with one "
+                "short question to the viewer, ending in a question mark")
+    return ""
 
 
 def guess_gender(post: dict) -> str:
@@ -215,7 +311,8 @@ def write_script(post: dict) -> tuple[str, str, str]:
         {"role": "system", "content": SYSTEM.format(lang=LANG_NAME.get(OUTPUT_LANG, "English"))},
         {"role": "user", "content":
             f"Title and narration together must total about {target} words "
-            f"(that is {TARGET_SEC} seconds of speech).\n\n"
+            f"(that is {TARGET_SEC + CTA_SEC} seconds of speech, the last "
+            f"{CTA_SEC} of them the closing question).\n\n"
             f"Title: {post['title']}\n\nBody:\n{post['text']}"},
     ]
 
@@ -238,21 +335,27 @@ def write_script(post: dict) -> tuple[str, str, str]:
         if hit:
             raise Unsuitable(f"generated text tripped the blocklist ({hit})")
 
+        # Length was the only thing checked here for a long time, which is how
+        # a story could stop mid-scene and still pass. A hook that does not
+        # hook and an ending that does not end cost more than a few words do.
         total = _words(title) + _words(body)
-        if title and body and _fits(total, target):
+        faults = [f for f in (_title_fault(title), _ending_fault(body)) if f]
+        if not _fits(total, target):
+            faults.append(f"it is {total} words, rewrite to about {target} - "
+                          f"{'cut it down' if total > target else 'expand it'}")
+        if not faults:
             return title, body, gender
 
-        log.warning("attempt %d: %d words instead of %d", attempt + 1, total, target)
+        log.warning("attempt %d rejected: %s", attempt + 1, "; ".join(faults))
         msgs += [
             {"role": "assistant", "content": raw},
             {"role": "user", "content":
-                f"That is {total} words. Rewrite to about {target}, "
-                f"{'cut it down' if total > target else 'expand it'} - keep the plot "
-                f"and keep the NARRATOR: and TITLE: lines."},
+                "Rewrite it. Problems: " + "; ".join(faults) +
+                ". Keep the plot, and keep the NARRATOR: and TITLE: lines."},
         ]
 
-    log.warning("accepting as is: %d words, video will run ~%.0f sec",
-                total, total / _wpm() * 60)
+    log.warning("accepting as is (%s): %d words, video will run ~%.0f sec",
+                "; ".join(faults), total, total / _wpm() * 60)
     return title, body, gender
 
 
@@ -293,7 +396,57 @@ if __name__ == "__main__":
     assert ACCENT in t_acc, "the title is spoken too - it keeps its marks"
     tw = _target_words()
     assert _fits(tw, tw) and not _fits(tw * 2, tw) and not _fits(3, tw)
-    print(f"logic ok: {OUTPUT_LANG}, {_wpm()} wpm, target {tw} words for {TARGET_SEC} sec")
+    assert tw > round(TARGET_SEC / 60 * _wpm()), "the CTA needs its own words"
+
+    # a title has to show a moment, not describe a stance
+    assert _title_fault("Не используйте меня для воспитания детей"), "the plea shape must be caught"
+    assert _title_fault("Никогда не занимайте денег родне")
+    assert _title_fault("История о том, как я съехал")
+    assert _title_fault("Мой опыт с ипотекой")
+    assert _title_fault("")
+    assert _title_fault(" ".join(["слово"] * (MAX_TITLE_WORDS + 1)))
+    # one sentence, always - these all read well and are all rejected anyway
+    assert _title_fault("Соседка орала на моих детей. Наказала я своих")
+    assert _title_fault("Мужа похоронили в четверг. В пятницу она спросила про деньги")
+    assert _title_fault("Отец ткнул в меня пальцем. «Будешь плохо есть»")
+    assert not _title_fault("Соседка орала на моих детей, а наказала я своих")
+    assert not _title_fault("Мужа похоронили в четверг, а в пятницу она спросила про деньги")
+    # a trailing stop is stripped before the card is drawn, so it is not a split
+    assert not _title_fault("Тест сказал другое.")
+    # "не" plus a normal verb is a fact, not an instruction - it must pass
+    assert not _title_fault("Он не пришёл на собственную свадьбу")
+    assert not _title_fault(f"[sad] За{ACCENT}мок сгорел за ночь"), "cues and marks are not words"
+
+    # the closing question is voiced apart, so it has to come off cleanly
+    s, c = split_cta("Я собрал вещи и ушёл. А вы бы простили такое?")
+    assert (s, c) == ("Я собрал вещи и ушёл.", "А вы бы простили такое?"), (s, c)
+    s, c = split_cta("Он молчал. [thoughtful] А вы бы ответили ему?")
+    assert c == "[thoughtful] А вы бы ответили ему?", c
+    assert s == "Он молчал.", s
+    # dialogue that happens to end in a question is part of the scene, not a CTA
+    s, c = split_cta("Он крикнул. [angry] «Ты серьёзно?»")
+    assert c == "" and s.endswith("«Ты серьёзно?»"), (s, c)
+    # a quoted line followed by a real CTA still splits on the CTA
+    s, c = split_cta("Он крикнул. [angry] «Ты серьёзно?» А вы бы стерпели?")
+    assert c == "А вы бы стерпели?", c
+    assert s.endswith("«Ты серьёзно?»"), s
+    # nothing to split: one sentence, or no question at all
+    assert split_cta("Одна строка без вопроса.") == ("Одна строка без вопроса.", "")
+    assert split_cta("Первая. Вторая.") == ("Первая. Вторая.", "")
+    # the split must not lose or duplicate a single word
+    full = "Я ушёл. Она осталась. [sad] А вы бы вернулись?"
+    s, c = split_cta(full)
+    assert _words(s) + _words(c) == _words(full), (s, c)
+
+    # the closing question is what proves the text reached its end
+    assert not _ending_fault("Я собрал вещи и ушёл. А вы бы простили такое?")
+    assert _ending_fault("Я собрал вещи и ушёл."), "a story with no CTA is unfinished"
+    assert _ending_fault("Он открыл дверь и"), "a cut-off narration must be caught"
+    assert _ending_fault("Он крикнул. [angry] «Ты серьёзно?»"), "direct speech is not a CTA"
+    assert _ending_fault("")
+    assert not _ending_fault("Всё закончилось. [thoughtful] А вы бы поступили так же?")
+    print(f"logic ok: {OUTPUT_LANG}, {_wpm()} wpm, target {tw} words "
+          f"for {TARGET_SEC}+{CTA_SEC} sec")
 
     if OPENAI_API_KEY:
         import source
