@@ -123,6 +123,76 @@ Rules:
 - That opening cue is the ONLY markup the question may carry. Never put a second cue inside the line. The mood cue alone shapes the whole question, last word included.
 - No headings, markup, quotes, emoji or commentary anywhere."""
 
+# Appended to SYSTEM when one post is worth more than one video. Kept apart so
+# the single-video prompt - which is what most runs use - stays byte-identical
+# and keeps hitting the provider's prefix cache.
+MULTI = """
+
+This post carries more story than one video holds. Write it as EXACTLY {n} parts,
+all of them in one answer, separated by a line containing only three dashes:
+
+NARRATOR: male or female
+TITLE: <part 1 title>
+<blank line>
+<part 1 narration>
+---
+TITLE: <part 2 title>
+<blank line>
+<part 2 narration>
+
+NARRATOR is written once, at the very top, and holds for every part.
+Every rule above applies to EACH part on its own - its own title, its own cues,
+its own closing question, its own length. On top of them:
+- Cut where the story turns, never where the words run out. Each part covers a
+  whole stretch of events; one that stops in the middle of a scene is a failure.
+- Never write "Часть 1" or any part number anywhere in your text. The marker is
+  added outside it.
+- Part 1 gives a stranger everything they need. Each later part opens with ONE
+  short line saying where things stopped, then carries on - whoever is watching
+  may never have seen the part before it.
+- Each part's TITLE names the collision THAT part is about and never how it
+  turns out. This is the same rule as above and it is the one most easily lost
+  on the parts after the first, where the obvious title is the payoff:
+    "Клиент заявил, что килограмм недовесили, и официантка принесла весы" — works
+    "Клиент ждал бесплатное мясо, а весы показали полный килограмм" — WRONG, the
+    whole reason to watch is gone before the video starts
+  Most of the people who open a later part came from the one before it. Giving
+  them the answer in the title is telling them not to bother.
+- Every part except the last ends on a cliffhanger: stop one beat BEFORE the
+  answer, at the moment the outcome is about to land, on a finished sentence.
+  The stop IS the cliffhanger. So these parts carry NO closing question and no
+  line addressed to the viewer at all. This OVERRIDES the rule above that every
+  narration ends with a question to the viewer - that rule is for the last part.
+    right:  "...Мусоровоз медленно подъезжал к дому соседа. И тут я замерла."
+    wrong:  "...И тут я замерла. [curious] Как думаете, что было дальше?"
+  Do not swap the question for a rhetorical one of the narrator's either
+  ("Что мне оставалось делать?"). End on what happened, and stop there.
+- The LAST part resolves everything and closes the way described above: the
+  payoff, one short settling line, then the question to the viewer.
+- Do not stall to fill the count. Every part needs events of its own, and two
+  parts of real story beat three parts of waiting. If the post cannot carry {n}
+  full parts, write fewer - but never fewer than two."""
+
+# A separator line the model actually produces, and nothing else: the prompt
+# bans markup, so a bare rule can only be the one we asked for.
+PART_SEP = re.compile(r"^\s*-{3,}\s*$", re.M)
+
+# Source characters worth one video. A 75-second narration is ~195 Russian
+# words, and an English source spends fewer characters on the same events than
+# the retelling does, so the threshold sits above the narration's own length.
+# source.py never fetches past MAX_CHARS = 4000, which is where MAX_PARTS lands.
+PART_CHARS = 1800
+MAX_PARTS = 3
+
+
+def part_count(post: dict) -> int:
+    """How many videos this post is worth, by length of the source alone.
+
+    A guess, made before spending an LLM call: the model still gets to answer
+    with fewer parts if the material is thinner than the character count says.
+    """
+    return min(len(post["text"]) // PART_CHARS + 1, MAX_PARTS)
+
 
 def _wpm() -> int:
     return WPM.get(OUTPUT_LANG, WPM["en"])
@@ -308,15 +378,37 @@ def _cta_fault(cta: str) -> str:
     return ""
 
 
-def _ending_fault(body: str) -> str:
+def _ending_fault(body: str, final: bool = True) -> str:
     """Empty when the narration closes properly.
 
-    The closing question is mandatory, so its question mark doubles as the
-    marker that the text reached its end rather than being cut off.
+    For an ordinary video, and for the LAST part of a split story, the closing
+    question is mandatory - so its question mark doubles as the marker that the
+    text reached its end instead of being cut off mid-scene.
+
+    A part that is not the last one has no question: it stops one beat before
+    the answer, and that stop is the cliffhanger. Adding a question on top only
+    restates it, and in practice it came out as "Как думаете, что было дальше?"
+    - the generic shape the rules reject everywhere else. That costs the
+    question mark as an end marker, so the weaker test stands in: terminal
+    punctuation, which still catches the failure it was put there for ("Он
+    открыл дверь и"). What it cannot catch is a part that stops because the
+    words ran out rather than on purpose - for a middle part those two look
+    alike from the outside, and only the prompt can tell them apart.
     """
     t = plain(body).strip()
     if not t:
         return "the narration is missing"
+
+    if not final:
+        if split_cta(body)[1]:
+            return ("this part is not the last one, so it must NOT end with a "
+                    "question to the viewer - stop one beat before the answer "
+                    "and let the stop be the cliffhanger")
+        if t[-1] not in ".!…»":
+            return ("the part breaks off in the middle of a sentence - stop "
+                    "before the answer, but finish the sentence you are on")
+        return ""
+
     if not t.endswith("?"):
         return ("the narration must finish the story and then close with one "
                 "short question to the viewer, ending in a question mark")
@@ -354,20 +446,74 @@ def _split(raw: str, fallback_gender: str = "male") -> tuple[str, str, str]:
     return gender, strip_tags(_clean(title)).rstrip(" .,:;-"), _clean(body)
 
 
-def write_script(post: dict) -> tuple[str, str, str]:
-    """(title, narration, gender) filling TARGET_SEC. One retry to fix the length."""
+def _parse_parts(raw: str, post: dict, parts: int,
+                 target: int) -> tuple[str, list[tuple[str, str]], list[str]]:
+    """(gender, [(title, body), ...], complaints) for one model answer.
+
+    Every part is checked on its own and the complaints are labelled, so a
+    rewrite request names the part that is wrong instead of the whole answer.
+    """
+    chunks = [c for c in PART_SEP.split(raw) if c.strip()] if parts > 1 else [raw]
+    faults = []
+    # Fewer parts than asked is allowed down to two - the prompt tells the model
+    # to write fewer rather than stall, and a thin third part is worse than none.
+    if not (2 <= len(chunks) <= parts if parts > 1 else len(chunks) == 1):
+        faults.append(f"you wrote {len(chunks)} parts - write between 2 and "
+                      f"{parts}, separated by a line of three dashes")
+    # counted before this, so writing four parts when asked for three is a
+    # complaint rather than a silent truncation
+    chunks = chunks[:parts]
+
+    gender, out = "", []
+    for i, chunk in enumerate(chunks, 1):
+        g, title, body = _split(chunk, gender or guess_gender(post))
+        gender = gender or g
+        # the model can introduce what the source did not have, so re-check
+        hit = safety.blocked(title, body)
+        if hit:
+            raise Unsuitable(f"generated text tripped the blocklist ({hit})")
+
+        # Length was the only thing checked here for a long time, which is how
+        # a story could stop mid-scene and still pass. A hook that does not
+        # hook and an ending that does not end cost more than a few words do.
+        # Only the last part closes with a question to the viewer; the ones
+        # before it end on the cliffhanger itself.
+        label = f"part {i}: " if parts > 1 else ""
+        faults += [label + f for f in
+                   (_title_fault(title), _ending_fault(body, final=i == len(chunks)))
+                   if f]
+        total = _words(title) + _words(body)
+        if not _fits(total, target):
+            faults.append(f"{label}it is {total} words, rewrite to about {target} - "
+                          f"{'cut it down' if total > target else 'expand it'}")
+        out.append((title, body))
+    return gender or guess_gender(post), out, faults
+
+
+def write_script(post: dict, parts: int = 1) -> tuple[str, list[tuple[str, str]]]:
+    """(gender, [(title, narration), ...]) - one entry per video, each TARGET_SEC.
+
+    parts > 1 splits the post across that many videos in a SINGLE call: the
+    model needs the whole plot in front of it to choose where the cuts fall and
+    to end each part on purpose rather than wherever the budget ran out.
+    """
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is empty - fill in .env")
 
     client = OpenAI(api_key=OPENAI_API_KEY, base_url=LLM_BASE_URL or None)
     target = _target_words()
+    system = SYSTEM.format(lang=LANG_NAME.get(OUTPUT_LANG, "English"))
+    if parts > 1:
+        system += MULTI.format(n=parts)
     msgs = [
-        {"role": "system", "content": SYSTEM.format(lang=LANG_NAME.get(OUTPUT_LANG, "English"))},
+        {"role": "system", "content": system},
         {"role": "user", "content":
-            f"Title and narration together must total about {target} words "
-            f"(that is {TARGET_SEC + CTA_SEC} seconds of speech, the last "
-            f"{CTA_SEC} of them the closing question).\n\n"
-            f"Title: {post['title']}\n\nBody:\n{post['text']}"},
+            f"{'Each part' if parts > 1 else 'The'} title and narration together "
+            f"must total about {target} words, which is "
+            f"{TARGET_SEC + CTA_SEC} seconds of speech - the last {CTA_SEC} of "
+            f"them the closing question"
+            + (", which only the final part has.\n\n" if parts > 1 else ".\n\n")
+            + f"Title: {post['title']}\n\nBody:\n{post['text']}"},
     ]
 
     for attempt in range(2):
@@ -383,22 +529,9 @@ def write_script(post: dict) -> tuple[str, str, str]:
         if skip:
             raise Unsuitable(skip.group(1).strip()[:120] or "no reason given")
 
-        gender, title, body = _split(raw, guess_gender(post))
-        # the model can introduce what the source did not have, so re-check
-        hit = safety.blocked(title, body)
-        if hit:
-            raise Unsuitable(f"generated text tripped the blocklist ({hit})")
-
-        # Length was the only thing checked here for a long time, which is how
-        # a story could stop mid-scene and still pass. A hook that does not
-        # hook and an ending that does not end cost more than a few words do.
-        total = _words(title) + _words(body)
-        faults = [f for f in (_title_fault(title), _ending_fault(body)) if f]
-        if not _fits(total, target):
-            faults.append(f"it is {total} words, rewrite to about {target} - "
-                          f"{'cut it down' if total > target else 'expand it'}")
+        gender, written, faults = _parse_parts(raw, post, parts, target)
         if not faults:
-            return title, body, gender
+            return gender, written
 
         log.warning("attempt %d rejected: %s", attempt + 1, "; ".join(faults))
         msgs += [
@@ -408,9 +541,12 @@ def write_script(post: dict) -> tuple[str, str, str]:
                 ". Keep the plot, and keep the NARRATOR: and TITLE: lines."},
         ]
 
-    log.warning("accepting as is (%s): %d words, video will run ~%.0f sec",
-                "; ".join(faults), total, total / _wpm() * 60)
-    return title, body, gender
+    if not written:
+        raise Unsuitable("the model returned nothing usable")
+    log.warning("accepting as is (%s): %d words across %d part(s)",
+                "; ".join(faults),
+                sum(_words(t) + _words(b) for t, b in written), len(written))
+    return gender, written
 
 
 if __name__ == "__main__":
@@ -509,6 +645,18 @@ if __name__ == "__main__":
     assert _ending_fault("Он крикнул. [angry] «Ты серьёзно?»"), "direct speech is not a CTA"
     assert _ending_fault("")
 
+    # a part that is not the last one carries no question at all - the stop is
+    # the cliffhanger, and terminal punctuation is what proves it was deliberate
+    assert not _ending_fault("Мусоровоз подъезжал к дому. И тут я замерла.", final=False)
+    assert not _ending_fault("Он крикнул. [angry] «Ты серьёзно?»", final=False), \
+        "a scene may end on a line of dialogue"
+    assert _ending_fault("Он открыл дверь и", final=False), "a cut-off part must be caught"
+    assert _ending_fault(f"И тут я замерла. {GOOD_CTA}", final=False), \
+        "a middle part must not address the viewer"
+    assert _ending_fault("И тут я замерла. Что мне было делать?", final=False), \
+        "a rhetorical question is the same shape and is out too"
+    assert _ending_fault("", final=False)
+
     # a leading mood cue, and nothing else on the line
     assert not _cta_fault(GOOD_CTA)
     assert not _cta_fault("[thoughtful] А вы бы простили его?")
@@ -517,17 +665,58 @@ if __name__ == "__main__":
     # marking one word for stress was measured and does nothing - keep it out
     assert _cta_fault("[doubtful] А вы бы [emphasis]простили его?"), "cue inside the line"
     assert _cta_fault("[doubtful] А вы бы простили [quietly] его?"), "second cue"
+
+    # how many videos a post is worth, by source length alone
+    assert part_count({"text": "x" * 500}) == 1
+    assert part_count({"text": "x" * (PART_CHARS + 10)}) == 2
+    assert part_count({"text": "x" * 4000}) == MAX_PARTS, "MAX_CHARS must not exceed it"
+
+    # a two-part answer must come apart cleanly: one NARRATOR at the top, a
+    # title and a cliffhanger question in each half
+    RAW2 = ("NARRATOR: female\n"
+            "TITLE: Свекровь потребовала ключи, а я сменила замки\n\n"
+            "Тело первой части. И тут я услышала её шаги на лестнице.\n"
+            "---\n"
+            "TITLE: Свекровь пришла с полицией, а ключи были уже другие\n\n"
+            "Тело второй части. [doubtful] А вы бы её пустили?")
+    g4, p4, f4 = _parse_parts(RAW2, {"title": "", "text": ""}, 2, 6)
+    assert g4 == "female" and len(p4) == 2, (g4, p4)
+    assert p4[0][0].startswith("Свекровь потребовала"), p4[0]
+    assert p4[1][0].startswith("Свекровь пришла"), p4[1]
+    assert p4[1][1].startswith("Тело второй"), p4[1]
+    # the fixture is deliberately far off six words; nothing else may be wrong
+    assert all("words" in f for f in f4), f4
+    assert all(f.startswith("part ") for f in f4), "faults must name their part"
+    # only the last part may address the viewer, and only it must
+    RAW_BAD = RAW2.replace("И тут я услышала её шаги на лестнице.",
+                           "[curious] Как думаете, что было дальше?")
+    _, _, f7 = _parse_parts(RAW_BAD, {"title": "", "text": ""}, 2, 6)
+    assert any(f.startswith("part 1") and "not the last" in f for f in f7), f7
+    RAW_BAD2 = RAW2.replace("[doubtful] А вы бы её пустили?", "И она ушла.")
+    _, _, f8 = _parse_parts(RAW_BAD2, {"title": "", "text": ""}, 2, 6)
+    assert any(f.startswith("part 2") and "question" in f for f in f8), f8
+    # one part where two were asked for is a fault, not a silent single video
+    _, p5, f5 = _parse_parts(RAW2.split("---")[0], {"title": "", "text": ""}, 2, 6)
+    assert len(p5) == 1 and any("parts" in f for f in f5), f5
+    # and the single-video path must not start splitting on a stray dash line
+    _, p6, _ = _parse_parts("TITLE: Заголовок\n\n---\n\nТело. А вы бы смогли?",
+                            {"title": "", "text": ""}, 1, 6)
+    assert len(p6) == 1, p6
+
     print(f"logic ok: {OUTPUT_LANG}, {_wpm()} wpm, target {tw} words "
           f"for {TARGET_SEC}+{CTA_SEC} sec")
 
     if OPENAI_API_KEY:
         import source
         post = source.fetch(1)[0]
-        title, body, gender = write_script(post)
-        print(f"\n--- r/{post['sub']} [{post['score']}] {post['title']}\n")
-        print(f"NARRATOR: {gender}\nTITLE: {title}")
-        print("\n" + body)
-        n = _words(title) + _words(body)
-        print(f"\n{n} words -> ~{n / _wpm() * 60:.0f} sec")
+        n = part_count(post)
+        gender, written = write_script(post, parts=n)
+        print(f"\n--- r/{post['sub']} [{post['score']}] {len(post['text'])}ch "
+              f"-> {len(written)} part(s)\n{post['title']}\n")
+        print(f"NARRATOR: {gender}")
+        for i, (title, body) in enumerate(written, 1):
+            w = _words(title) + _words(body)
+            print(f"\nTITLE {i}/{len(written)}: {title}\n\n{body}\n"
+                  f"[{w} words -> ~{w / _wpm() * 60:.0f} sec]")
     else:
         print("OPENAI_API_KEY not set - live run skipped")

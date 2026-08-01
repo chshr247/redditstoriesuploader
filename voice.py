@@ -259,7 +259,7 @@ def _cued(text: str, cue: str) -> str:
 
 def speak_parts(title: str, body: str, name: str, gap: float = 0.0,
                 rate: str = RATE, speed: float = FISH_SPEED,
-                gender: str = "male") -> tuple:
+                gender: str = "male", fish_voice: str = "") -> tuple:
     """Narrate the title card, the story, then the closing question - one track.
 
     Three takes rather than one, for two different reasons. The title is split
@@ -273,13 +273,21 @@ def speak_parts(title: str, body: str, name: str, gap: float = 0.0,
     to zero and the join is heard as a cut. Default is none - each part's own
     trailing decay and the full stop it ends on supply the beat.
 
+    `fish_voice` pins the narrator. Left empty it is drawn per video, which is
+    what an ordinary story wants; a story split across several videos passes the
+    id it was queued with, or the second half arrives in someone else's voice.
+
     Returns (mp3, story_and_question_words_offset_to_the_track, title_end_sec).
     """
-    # one voice for the whole video - the parts must not swap narrators
-    fish_voice = pick_voice(gender)
+    # one voice for the whole video - the takes must not swap narrators
+    fish_voice = fish_voice or pick_voice(gender)
     story, cta = script.split_cta(body)
     if not cta:
-        log.warning("%s: no closing question found, narrating body as one part", name)
+        # Expected for every part of a split story except the last: those end on
+        # the cliffhanger and address the viewer nowhere. For an ordinary video
+        # _ending_fault() has already refused the text and write_script() has
+        # already shouted, so a warning here would only be a second voice.
+        log.info("%s: no closing question, narrating the body as one take", name)
 
     t_mp3, _ = speak(_cued(title, FISH_TITLE_CUE), f"{name}_title",
                      rate=rate, speed=speed, fish_voice=fish_voice)

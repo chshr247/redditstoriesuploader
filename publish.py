@@ -259,7 +259,12 @@ if __name__ == "__main__":
             authorize()
         elif len(sys.argv) > 1 and sys.argv[1].endswith(".mp4"):
             mp4 = Path(sys.argv[1])
-            pid = upload(mp4, mp4.stem, direct="--direct" in sys.argv,
+            # the real title lives beside the file, written by main.py; the stem
+            # is only a post id, which is what the caption used to say
+            from youtube import _meta_for, part_suffix
+            meta = _meta_for(mp4)
+            pid = upload(mp4, (meta.get("title") or mp4.stem) + part_suffix(meta),
+                         direct="--direct" in sys.argv,
                          private="--public" not in sys.argv)
             print(pid, status(pid))
         else:
