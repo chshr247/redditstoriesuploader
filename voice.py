@@ -172,8 +172,9 @@ def speak(text: str, name: str, voice: str = TTS_VOICE, rate: str = RATE,
     """Synthesize into out/<name>.mp3 and out/<name>.json. Returns (mp3, words)."""
     mp3 = OUT_DIR / f"{name}.mp3"
 
-    # cues and stress marks steer the engine but are never seen or heard as
-    # such, so subtitles and alignment only ever get the plain text
+    # cues steer the engine and are never seen; accents steer nothing at all
+    # (measured, see ACCENTS in script.py) and must not be seen either, so
+    # subtitles and alignment only ever get the plain text
     readable = script.plain(text)
 
     if TTS_BACKEND == "fish":
