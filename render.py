@@ -114,7 +114,8 @@ def build_ass(words: list[dict], path, title: str = "", title_end: float = 0) ->
     """Title card for the intro, then one word card at a time."""
     lines = [ASS_HEADER]
     if title and title_end > 0:
-        # the title reaches here straight from the model, stress marks and all
+        # the title reaches here straight from the model, cues and stray
+        # accents and all - plain() is what keeps both off the card
         safe = safety.mask(script.plain(re.sub(r"[{}\\]", "", title)))
         lines.append(f"Dialogue: 0,{_ts(0)},{_ts(title_end)},Card,,0,0,0,,"
                      r"{\fscx85\fscy85\t(0,180,\fscx100\fscy100)}" + safe)

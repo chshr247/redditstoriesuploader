@@ -72,14 +72,17 @@ Rules:
 - Imagine a stranger scrolling who knows nothing about Reddit. Everything they need is in your text.
 - Write for the ear, not the eye: short sentences, plain words, natural spoken rhythm. Punctuate where a person would actually pause - the voice engine reads commas and full stops as breath.
 - Always write ё where the word has it: всё, ещё, её, свёкор, объём. Writing "все" for "всё" makes the voice say the wrong word.
-- Mark the stress on homographs - words spelled alike but stressed differently - by putting the combining acute U+0301 straight after the stressed vowel. Use U+0301 only, never the grave U+0300. Always decide from the meaning in the sentence:
-    сто́ит = is worth, costs   |   стои́т = is standing
-    за́мок = castle            |   замо́к = a lock
-    бо́льшая = the greater     |   больша́я = a big one
-    по́том = with sweat        |   пото́м = afterwards
-    пла́чу = I cry             |   плачу́ = I pay
-    у́же = narrower            |   уже́ = already
-  Mark only genuinely ambiguous words, never ordinary ones.
+- {lang} has homographs: same letters, different stress, different meaning. There are hundreds and no list covers them, so learn the SHAPES they come in rather than memorising words. These are examples of each shape, not an inventory:
+    two unrelated words that collided: замок, мука, духи, полки, белки, вести, пропасть, хлопок, вина, село
+    genitive singular against nominative plural - the largest group by far: стены, руки, ноги, горы, окна, слова, дома, стороны, деньгами
+    forms of one verb: плачу, лечу, ношу, сушу, кошу, солю, целую
+    aspect pairs differing in nothing but stress: насыпать, отрезать, разрезать, ссыпать
+    a short adjective against a comparative or another adjective: большая, дорога, острота
+  The voice engine guesses the stress from the surrounding words and there is no way to correct it: a wrong guess is heard as a different word, and no markup fixes it - accent marks are ignored outright, so never write one anywhere.
+  So before you commit any word of this kind, read your own sentence back with the OTHER stress. If it still makes sense that way, the sentence is broken and you must rewrite it. Two ways out, in this order:
+    let the context decide, which is enough most of the time: "во дворе стоит машина" leaves no room for "costs", "это стоит слишком дорого" leaves none for "stands"
+    or take a different word: "он запер дверь" instead of "он повесил замок", "дороже" instead of "больше стоит", "позже" instead of "потом"
+  Short sentences are where this bites, because a three-word sentence gives the engine nothing to go on. That is the one place worth spending an extra word.
 - Mark delivery with cues in square brackets, in English, placed immediately before the words they change: "[nervous] Я открыл письмо. [shocked] Она знала всё это время." Free-form descriptions work too: [voice dropping], [barely holding it together].
 - Use between three and six cues in the whole narration, and only where the story actually turns - the reveal, the punchline, the moment it goes wrong. A cue on every sentence sounds like a bad audiobook. Never put one in the TITLE line.
 - Put every line of direct speech inside «angle quotes», always, with no exception - they are what tells the renderer to colour that line differently on screen. Reported speech without quotes stays uncoloured and reads as the narrator's own voice.
@@ -117,7 +120,7 @@ Rules:
 - That closing question is the only place the viewer may be addressed. Never ask for likes, follows or subscriptions, and never mention the video, the channel or the algorithm.
 - Vary the question so it names what actually happened in this story - "А вы бы простили брата за такое?" beats "А вы бы как поступили?". The same generic line under every video reads as a template.
 - The closing question OPENS with a mood cue - [doubtful], [thoughtful], [curious], [quietly] - written before its first word. Pick the one that fits how the story ended. Shape it exactly like this, and nothing more: "[doubtful] А как бы вы поступили на моём месте?"
-- That opening cue is the ONLY markup the question may carry. Never put a second cue inside the line, and never try to mark a single word for stress - it does nothing to the delivery here and only risks being read out as text. The mood cue alone shapes the whole question, last word included.
+- That opening cue is the ONLY markup the question may carry. Never put a second cue inside the line. The mood cue alone shapes the whole question, last word included.
 - No headings, markup, quotes, emoji or commentary anywhere."""
 
 
@@ -127,13 +130,16 @@ def _wpm() -> int:
 
 TAG = re.compile(r"\[[^\]\n]{1,60}\]")
 ACCENT = "́"                      # combining acute: за́мок vs замо́к
-# The model occasionally reaches for the grave instead. Strip both on the way
-# to the screen rather than trust it to pick the right codepoint every time.
+# Measured against Fish on 2026-08-02: the engine ignores the mark completely -
+# "за́мок" and "замо́к" synthesize identically. The prompt no longer asks for
+# them, so this is a net, not a feature: a mark the model writes out of habit
+# would otherwise reach the screen as a speck over the letter. Grave included,
+# since the model reached for the wrong codepoint often enough to matter.
 ACCENTS = re.compile("[̀́]")
 
 
 def strip_tags(s: str) -> str:
-    """Drop Fish delivery cues, keeping stress marks for the voice engine."""
+    """Drop Fish delivery cues. Accents, if any, are left to plain()."""
     return re.sub(r"\s+", " ", TAG.sub(" ", s)).strip()
 
 
@@ -196,8 +202,9 @@ def split_cta(body: str) -> tuple[str, str]:
 def plain(s: str) -> str:
     """Everything the engine needs and the viewer must not see.
 
-    Stress marks steer pronunciation but render as specks over letters, and
-    whisper never emits them - so alignment has to compare without them too.
+    Accents steer nothing - the engine ignores them - but they render as specks
+    over letters, and whisper never emits them, so alignment has to compare
+    without them too.
     """
     return ACCENTS.sub("", strip_tags(s))
 
@@ -430,17 +437,17 @@ if __name__ == "__main__":
     assert tt == "Мой заголовок", tt
     assert "[calm]" in bt, "body must keep its cues"
 
-    # stress marks reach the engine but never the screen
+    # an accent the model writes anyway must never reach the screen
     marked = f"Он сорвал замо{ACCENT}к с двери."
-    assert strip_tags(marked) == marked, "the voice must still get the mark"
     assert plain(marked) == "Он сорвал замок с двери.", plain(marked)
     assert plain(f"[sad] За{ACCENT}мок на холме") == "Замок на холме"
     assert _words(f"замо{ACCENT}к и за{ACCENT}мок") == 3
     assert "ё" in plain("Всё ещё её"), "ё is a real letter, keep it"
     # a grave slipping in must not survive to the screen either
     assert plain("сто̀ит") == "стоит" and plain("сто́ит") == "стоит"
+    # _split keeps an accent; every screen path runs plain() over it anyway
     _, t_acc, _ = _split(f"NARRATOR: male\nTITLE: За{ACCENT}мок\n\nТело.")
-    assert ACCENT in t_acc, "the title is spoken too - it keeps its marks"
+    assert plain(t_acc) == "Замок", plain(t_acc)
     tw = _target_words()
     assert _fits(tw, tw) and not _fits(tw * 2, tw) and not _fits(3, tw)
     assert tw > round(TARGET_SEC / 60 * _wpm()), "the CTA needs its own words"
