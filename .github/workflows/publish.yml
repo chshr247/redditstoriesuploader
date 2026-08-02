@@ -23,6 +23,15 @@ on:
     # has somewhere to put its last upload. Still not around the clock: the
     # daily allowance resets at midnight UTC, which is 03:00 MSK, and a 24-hour
     # grid would spend the day's quota on uploads nobody is awake for.
+    #
+    # This grid is the fallback, not the primary trigger. An external pinger
+    # POSTs to the workflow_dispatch API on the same minutes, and a dispatch
+    # does not go through the queue that drops these crons - measured again
+    # 2026-08-02, three slots in a row silently missing. Both firing in the
+    # same minute costs nothing: the gate below refuses in seconds, and the
+    # concurrency group keeps the two off seen.db. The cron stays because the
+    # pinger's token is a fine-grained PAT, those cap at a year, and an expired
+    # one fails by doing nothing at all.
     - cron: "7,37 7-20 * * *"
   workflow_dispatch:
     inputs:
