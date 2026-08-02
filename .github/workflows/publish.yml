@@ -63,8 +63,11 @@ jobs:
       # keeps two workflow RUNS apart, but matrix jobs live inside one run and
       # would go in parallel - both writing seen.db, both committing it, and the
       # last step deliberately refuses to auto-resolve a conflict on a binary
-      # sqlite file. Sequential also means the second job checks out the first
-      # one's pushed state instead of racing it.
+      # sqlite file.
+      # Sequential is necessary and NOT sufficient: the second job also has to
+      # check out the branch tip rather than the commit that triggered the run,
+      # or it starts from a state written before the first job pushed. See the
+      # `ref:` on the checkout step.
       max-parallel: 1
       # One channel failing must not cancel the other: they are separate
       # accounts and a dead token on one says nothing about the other.
@@ -145,6 +148,18 @@ jobs:
           # history is 500 KiB - cheaper than the branch that has to handle
           # not having it.
           fetch-depth: 0
+          # THE TIP OF THE BRANCH, not the commit that triggered the run - which
+          # is what checkout takes by default, and what broke the second channel
+          # the first time this matrix ran for real. The channels go one after
+          # another and each pushes seen.db when it is done; pinned to the
+          # trigger commit, the second job starts from a state that predates the
+          # first job's push, so its own commit is not a fast-forward and the
+          # rebase lands on a binary conflict in seen.db. Its upload is then
+          # never recorded, and the next run republishes against a count that
+          # never heard of it.
+          # A branch NAME resolves at checkout time, so the second job gets the
+          # first one's state; github.sha would not.
+          ref: ${{ github.ref_name }}
 
       - uses: actions/setup-python@v5
         with:
