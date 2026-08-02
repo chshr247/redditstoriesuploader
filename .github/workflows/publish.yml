@@ -197,7 +197,12 @@ jobs:
       - name: Send it to TikTok drafts
         if: steps.gate.outputs.go == 'true' && inputs.dry_run != true
         continue-on-error: true
-        run: python publish.py --next
+        run: |
+          if [ "${{ inputs.force }}" = "true" ]; then
+            python publish.py --next --force
+          else
+            python publish.py --next
+          fi
 
       - name: Keep the state file
         if: always() && steps.gate.outputs.go == 'true'
