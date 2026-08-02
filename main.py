@@ -97,12 +97,19 @@ def make_split(post: dict, n: int) -> Path:
 
 
 def _room() -> int:
-    """Uploads left in today's allowance.
+    """YouTube uploads still available to this run.
 
     A split story must not straddle the night: the parts are spaced by hours,
     and a part 2 landing the next morning is a different video to everyone who
     saw part 1. So the whole story has to fit in what is left of today.
+
+    Zero when YouTube is not due right now, which is what a TikTok-only run is.
+    Splitting there would queue a part that only youtube.upload_next() can
+    clear, so the story's middle would sit in the queue until YouTube's turn
+    comes round - blocking every later video behind it for hours.
     """
+    if youtube.due():
+        return 0
     s = youtube.status()
     return max(0, s["allowed"] - s["today"])
 

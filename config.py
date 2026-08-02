@@ -80,6 +80,11 @@ MIN_SEC = int(os.getenv("MIN_SEC", 62))
 TIKTOK_CLIENT_KEY = os.getenv("TIKTOK_CLIENT_KEY", "")
 TIKTOK_CLIENT_SECRET = os.getenv("TIKTOK_CLIENT_SECRET", "")
 TIKTOK_REFRESH_TOKEN = os.getenv("TIKTOK_REFRESH_TOKEN", "")
+# Drafts a day, and deliberately above YouTube's 2-3: nothing here is published
+# automatically, so the ceiling is not about flooding a feed - it is how many
+# stories a day the pipeline is allowed to spend. Runs where only this is due
+# produce a TikTok-only video; YouTube keeps its own, slower allowance.
+TIKTOK_PER_DAY = int(os.getenv("TIKTOK_PER_DAY", 4))
 HASHTAGS = os.getenv("HASHTAGS", "#reddit #redditstories #storytime #fyp")
 
 # --- YouTube (https://console.cloud.google.com -> OAuth client, type Desktop) ---
