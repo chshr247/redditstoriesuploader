@@ -228,7 +228,7 @@ def _cued(text: str, cue: str) -> str:
     stray cue mid-line cannot suppress the merge.
     """
     text = text.rstrip()
-    if text[-1:] not in ".!?…»":
+    if text[-1:] not in script.TERMINAL:
         text += "."
     if TTS_BACKEND != "fish" or not cue:
         return text
