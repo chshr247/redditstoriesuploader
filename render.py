@@ -4,6 +4,7 @@ Subtitles are ASS, not drawtext: one Dialogue line per word with a scale-up
 transition, which is the whole kinetic-typography effect. ffmpeg burns them
 in a single pass, so no frame ever reaches Python.
 """
+import hashlib
 import json
 import logging
 import random
@@ -12,7 +13,7 @@ import subprocess
 
 import safety
 import script
-from config import BG_DIR, OUT_DIR, SUBTITLE_FONT
+from config import BG_DIR, CHANNEL, CHANNELS, OUT_DIR, SUBTITLE_FONT
 from voice import duration as _dur
 
 W, H = 1080, 1920
@@ -139,20 +140,46 @@ def build_ass(words: list[dict], path, title: str = "", title_end: float = 0) ->
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _pick_bg() -> "Path":
+def _pick_bg(key: str = "", channel: str = CHANNEL) -> "Path":
+    """A background clip. With a `key`, one that the other channels did not get.
+
+    The channels tell the same story in different languages, and the two videos
+    must not be the same footage with a different soundtrack - that is one video
+    posted twice as far as a platform is concerned, and as far as anyone who
+    sees both is concerned too. Drawing at random is not enough: with three
+    clips a third of the pairs would collide.
+
+    So the clip is chosen from the story, offset by the channel. Same key on two
+    channels lands on two different clips as long as there are at least as many
+    clips as channels, and the seek inside the clip is still random, so nothing
+    repeats frame for frame either. No state: two runs hours apart on different
+    machines agree without having to have met.
+
+    md5 rather than hash(): the built-in is salted per process, so it would give
+    a different answer every run and the guarantee would be gone.
+    """
     # recursive on purpose: an archive that carries its own top folder unpacks
     # to assets/bg/bg/*.mp4, and a flat search would silently find nothing
-    clips = [p for p in BG_DIR.rglob("*")
-             if p.suffix.lower() in (".mp4", ".mov", ".webm")]
+    clips = sorted(p for p in BG_DIR.rglob("*")
+                   if p.suffix.lower() in (".mp4", ".mov", ".webm"))
     if not clips:
         raise RuntimeError(f"no background clips under {BG_DIR} - drop a vertical mp4 there")
-    return random.choice(clips)
+    if not key or len(clips) < 2:
+        return random.choice(clips)
+    seed = int(hashlib.md5(key.encode()).hexdigest()[:8], 16)
+    offset = CHANNELS.index(channel) if channel in CHANNELS else 0
+    return clips[(seed + offset) % len(clips)]
 
 
 def render(mp3, words: list[dict], name: str, bg=None,
-           title: str = "", title_end: float = 0):
-    """Burn subtitles over a background clip and mux the narration."""
-    bg = bg or _pick_bg()
+           title: str = "", title_end: float = 0, key: str = ""):
+    """Burn subtitles over a background clip and mux the narration.
+
+    `key` identifies the STORY rather than the file: out/<id>_en.mp4 and
+    out/<id>.mp4 are the same story on two channels, and that is exactly the
+    pair that must not share footage.
+    """
+    bg = bg or _pick_bg(key)
     dur = _dur(mp3)
     ass = OUT_DIR / f"{name}.ass"
     out = OUT_DIR / f"{name}.mp4"
@@ -223,6 +250,20 @@ if __name__ == "__main__":
     assert len(events) == len(cards), f"{len(events)} lines for {len(cards)} cards"
 
     try:
+        clips = sorted(p for p in BG_DIR.rglob("*")
+                       if p.suffix.lower() in (".mp4", ".mov", ".webm"))
+        if len(clips) >= len(CHANNELS):
+            # The same story must not land on the same clip on two channels, or
+            # the two videos are one video with two soundtracks. Checked over
+            # several keys: one key agreeing proves nothing about the next.
+            for k in ("abc123", "def456", "ghi789", "_selftest"):
+                picked = {c: _pick_bg(k, c).name for c in CHANNELS}
+                assert len(set(picked.values())) == len(CHANNELS), (k, picked)
+            # and the answer must not change between runs, or two runs of the
+            # same channel hours apart would disagree about what they picked
+            assert _pick_bg("abc123") == _pick_bg("abc123")
+        else:
+            print(f"only {len(clips)} clip(s) in {BG_DIR} - channels will share footage")
         bg = _pick_bg()
     except RuntimeError:
         bg = None

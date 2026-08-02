@@ -32,9 +32,9 @@ from pathlib import Path
 
 import source
 import tags as tags_          # `tags` is the local variable in description_for
-from config import (DB_PATH, DECLARE_AI, OUT_DIR, PART_GAP_HOURS, YT_CLIENT_ID,
-                    YT_CLIENT_SECRET, YT_MIN_GAP_HOURS, YT_REFRESH_TOKEN,
-                    save_env)
+from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL, OUT_DIR,
+                    PART_GAP_HOURS, YT_CLIENT_ID, YT_CLIENT_SECRET,
+                    YT_MIN_GAP_HOURS, YT_REFRESH_KEY, YT_REFRESH_TOKEN, save_env)
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -61,11 +61,15 @@ def _form_post(url: str, body: dict) -> dict:
 
 
 def access_token() -> str:
+    # The token key is named for the channel away from the default one, and the
+    # error has to say WHICH key: "YT_REFRESH_TOKEN is empty" while the English
+    # channel is looking for YT_REFRESH_TOKEN_EN sends you to the wrong line.
     for name, val in [("YT_CLIENT_ID", YT_CLIENT_ID),
                       ("YT_CLIENT_SECRET", YT_CLIENT_SECRET),
-                      ("YT_REFRESH_TOKEN", YT_REFRESH_TOKEN)]:
+                      (YT_REFRESH_KEY, YT_REFRESH_TOKEN)]:
         if not val:
-            raise RuntimeError(f"{name} is empty - run `python youtube.py --auth`")
+            raise RuntimeError(f"{name} is empty - run `OUTPUT_LANG={CHANNEL} "
+                               "python youtube.py --auth`")
 
     r = _form_post(TOKEN_URL, {
         "client_id": YT_CLIENT_ID, "client_secret": YT_CLIENT_SECRET,
@@ -73,6 +77,12 @@ def access_token() -> str:
     if "access_token" not in r:
         raise RuntimeError(f"no access_token in response: {r}")
     return r["access_token"]
+
+
+# The word in front of "2/3" on a split story, in the channel's own language.
+# The file's channel decides it, not the process: --text on an old file has to
+# print what that file was made as.
+PART_WORD = {"ru": "Часть", "en": "Part"}
 
 
 def part_prefix(meta: dict) -> str:
@@ -83,7 +93,10 @@ def part_prefix(meta: dict) -> str:
     is dead air. In the feed the marker leads the title, which is why it has to
     survive the length limit below.
     """
-    return f"Часть {meta['part']}/{meta['total']} - " if meta.get("total", 0) > 1 else ""
+    if meta.get("total", 0) <= 1:
+        return ""
+    word = PART_WORD.get(meta.get("channel", DEFAULT_CHANNEL), PART_WORD["en"])
+    return f"{word} {meta['part']}/{meta['total']} - "
 
 
 def title_for(text: str, prefix: str = "") -> str:
@@ -186,6 +199,14 @@ def _db():
     db = sqlite3.connect(DB_PATH)
     db.execute("CREATE TABLE IF NOT EXISTS uploaded("
                "file TEXT PRIMARY KEY, yt_id TEXT, ts REAL)")
+    # Which channel the upload went to. Every count below is per channel, and
+    # without this one channel's uploads spend the other's daily allowance and
+    # hold it behind the gap - a second channel that silently never publishes.
+    # The file name stays the key: only the default channel keeps the bare
+    # <post_id>.mp4, so two channels cannot collide on one name.
+    if "channel" not in {c[1] for c in db.execute("PRAGMA table_info(uploaded)")}:
+        db.execute("ALTER TABLE uploaded ADD COLUMN channel TEXT")
+        db.execute("UPDATE uploaded SET channel=?", (DEFAULT_CHANNEL,))
     return db
 
 
@@ -213,7 +234,8 @@ def status() -> dict:
     allowance means what it says.
     """
     with _db() as db:
-        rows = db.execute("SELECT ts FROM uploaded ORDER BY ts").fetchall()
+        rows = db.execute("SELECT ts FROM uploaded WHERE channel=? ORDER BY ts",
+                          (CHANNEL,)).fetchall()
     now = time.time()
     today_date = _utc_date(now)
     first_date = _utc_date(rows[0][0]) if rows else today_date
@@ -224,8 +246,23 @@ def status() -> dict:
             "since_last_h": (now - last) / 3600 if last else 999, "total": len(rows)}
 
 
+def _meta_for(mp4: Path) -> dict:
+    p = mp4.with_suffix(".meta.json")
+    return json.loads(p.read_text("utf-8")) if p.exists() else {}
+
+
+def _mine(mp4: Path) -> bool:
+    """Was this file made for the channel this process is?
+
+    Both channels render into the same out/, and locally they sit there side by
+    side. A file with no meta predates the second channel, so it belongs to the
+    default one - which is also what its bare name says.
+    """
+    return _meta_for(mp4).get("channel", DEFAULT_CHANNEL) == CHANNEL
+
+
 def pending() -> list:
-    """Rendered videos that have not been uploaded, oldest first.
+    """This channel's rendered videos that have not been uploaded, oldest first.
 
     Parts of one story cannot get out of order: source.next_part() hands out
     part N+1 only after part N is uploaded, so at most one part of a given story
@@ -234,13 +271,9 @@ def pending() -> list:
     """
     with _db() as db:
         done = {r[0] for r in db.execute("SELECT file FROM uploaded")}
-    return sorted((p for p in OUT_DIR.glob("*.mp4") if p.name not in done),
+    return sorted((p for p in OUT_DIR.glob("*.mp4")
+                   if p.name not in done and _mine(p)),
                   key=lambda p: p.stat().st_mtime)
-
-
-def _meta_for(mp4: Path) -> dict:
-    p = mp4.with_suffix(".meta.json")
-    return json.loads(p.read_text("utf-8")) if p.exists() else {}
 
 
 def show_text(mp4: Path | None = None) -> None:
@@ -271,8 +304,9 @@ def show_text(mp4: Path | None = None) -> None:
 def mark_done(mp4: Path, yt_id: str = "manual") -> None:
     """Record a hand-made upload so the queue stops offering it."""
     with _db() as db:
-        db.execute("INSERT OR REPLACE INTO uploaded VALUES (?,?,?)",
-                   (mp4.name, yt_id, time.time()))
+        db.execute("INSERT OR REPLACE INTO uploaded VALUES (?,?,?,?)",
+                   (mp4.name, yt_id, time.time(),
+                    _meta_for(mp4).get("channel", DEFAULT_CHANNEL)))
     print(f"{mp4.name} marked as uploaded")
 
 
@@ -325,8 +359,8 @@ def upload_next(private: bool = True, force: bool = False) -> str | None:
                    body=meta.get("body", ""), prefix=part_prefix(meta),
                    kind=meta.get("kind", "story"))
     with _db() as db:
-        db.execute("INSERT OR REPLACE INTO uploaded VALUES (?,?,?)",
-                   (mp4.name, yt_id, time.time()))
+        db.execute("INSERT OR REPLACE INTO uploaded VALUES (?,?,?,?)",
+                   (mp4.name, yt_id, time.time(), CHANNEL))
     # Cleared here and nowhere earlier: an upload that fails has to leave the
     # part pending, or the story loses its middle - the mp4 is already gone.
     if meta.get("total", 0) > 1:
@@ -380,9 +414,13 @@ def authorize() -> None:
 
 
 def _save_refresh_token(token: str) -> None:
-    """Write it into .env instead of asking the operator to copy it by hand."""
-    save_env("YT_REFRESH_TOKEN", token)
-    print("\nrefresh token saved to .env")
+    """Write it into .env instead of asking the operator to copy it by hand.
+
+    Under the channel's own key: a token written to YT_REFRESH_TOKEN while the
+    English channel was being authorised would log the Russian one out.
+    """
+    save_env(YT_REFRESH_KEY, token)
+    print(f"\nrefresh token saved to .env as {YT_REFRESH_KEY}")
     print("it is valid for a year, and only while the consent screen is out of Testing")
 
 
@@ -397,8 +435,12 @@ if __name__ == "__main__":
 
         # the part marker: absent for ordinary videos, and never trimmed away
         assert part_prefix({}) == "" and part_prefix({"part": 1, "total": 1}) == ""
-        pfx = part_prefix({"part": 2, "total": 3})
+        pfx = part_prefix({"part": 2, "total": 3, "channel": "ru"})
         assert pfx == "Часть 2/3 - ", pfx
+        # the marker speaks the language of the FILE, not of this process
+        assert part_prefix({"part": 2, "total": 3, "channel": "en"}) == "Part 2/3 - "
+        # a file from before channels existed is the default channel's
+        assert part_prefix({"part": 2, "total": 3}) == "Часть 2/3 - "
         long = title_for("я" * 200, pfx)
         assert len(long) <= TITLE_MAX and long.startswith(pfx), long
         assert long.endswith(" #Shorts"), long
@@ -417,15 +459,25 @@ if __name__ == "__main__":
         variants = {description_for("Один и тот же", "Одно и то же.") for _ in range(30)}
         assert len(variants) > 5, "descriptions are not varying"
 
-        # the tags answer to the text: a boss story carries work tags, and a
-        # fact carries none of the story pool at all
-        boss = description_for("Начальник вычел из зарплаты за опоздание",
-                               "Директор орал при всём офисе.")
-        assert set(boss.split()) & set(tags_.TOPIC_TAGS), boss
-        fact = description_for("У осьминога три сердца", "Кровь синеет из-за меди.",
-                               kind="fact")
+        # The tags answer to the text: a boss story carries work tags, and a
+        # fact carries none of the story pool at all. Written in this channel's
+        # language - description_for() reads the buckets of the channel it runs
+        # on, so a Russian fixture under OUTPUT_LANG=en would match nothing and
+        # the test would be asserting the wrong thing.
+        BOSS, FACT_ = {
+            "ru": (("Начальник вычел из зарплаты за опоздание",
+                    "Директор орал при всём офисе."),
+                   ("У осьминога три сердца", "Кровь синеет из-за меди.")),
+            "en": (("My boss docked my pay for being late",
+                    "The manager yelled at me in front of everyone."),
+                   ("An octopus has three hearts", "The blue comes from copper.")),
+        }[CHANNEL]
+        boss = description_for(*BOSS)
+        assert set(boss.split()) & tags_.TOPIC_TAGS[CHANNEL], boss
+        fact = description_for(*FACT_, kind="fact")
         # #рекомендации is in both pools on purpose; #драма is in one
-        story_only = set(tags_.GENERIC["story"]) - set(tags_.GENERIC["fact"])
+        story_only = (set(tags_.GENERIC[CHANNEL]["story"])
+                      - set(tags_.GENERIC[CHANNEL]["fact"]))
         assert not (set(fact.split()) & story_only), fact
 
         assert daily_allowance(0) == 2 and daily_allowance(6) == 2
@@ -448,8 +500,8 @@ if __name__ == "__main__":
             authorize()
         elif "--status" in sys.argv:
             s = status()
-            print(f"day {s['day']}, {s['today']}/{s['allowed']} today, "
-                  f"{s['total']} uploaded, {len(pending())} queued")
+            print(f"channel {CHANNEL}: day {s['day']}, {s['today']}/{s['allowed']} "
+                  f"today, {s['total']} uploaded, {len(pending())} queued")
             for p in pending()[:10]:
                 print("  ", p.name)
             if nxt := source.next_part():

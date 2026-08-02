@@ -51,13 +51,35 @@ concurrency:
 
 jobs:
   publish:
+    name: publish (${{ matrix.channel }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: write        # needed to push seen.db back
       issues: write          # the TikTok draft reminder, see the last step
 
+    strategy:
+      # ONE AT A TIME, and this is load-bearing. The concurrency group above
+      # keeps two workflow RUNS apart, but matrix jobs live inside one run and
+      # would go in parallel - both writing seen.db, both committing it, and the
+      # last step deliberately refuses to auto-resolve a conflict on a binary
+      # sqlite file. Sequential also means the second job checks out the first
+      # one's pushed state instead of racing it.
+      max-parallel: 1
+      # One channel failing must not cancel the other: they are separate
+      # accounts and a dead token on one says nothing about the other.
+      fail-fast: false
+      matrix:
+        # Set the CHANNELS repo variable to ["ru","en"] to turn the English
+        # channel on - it stays off until its accounts exist, because a channel
+        # with no refresh token fails every run rather than skipping it.
+        channel: ${{ fromJSON(vars.CHANNELS || '["ru"]') }}
+
     env:
+      # Which channel this job is. Everything channel-scoped keys off it: the
+      # prompt set, the voices, the hashtag buckets, the credentials, and every
+      # count in seen.db.
+      OUTPUT_LANG: ${{ matrix.channel }}
       # secret names match the .env keys one to one, so there is nothing to map
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
@@ -73,6 +95,17 @@ jobs:
       TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
       TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
       TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
+      # Both channels' values are handed to both jobs and config.py picks by
+      # suffix - no mapping in YAML, and nothing to keep in step here when a
+      # third channel appears. The English job cannot reach the unsuffixed
+      # keys above: for a non-default channel the suffixed name is the only
+      # name that counts, which is what stops an English video from being
+      # uploaded to the Russian account.
+      YT_REFRESH_TOKEN_EN: ${{ secrets.YT_REFRESH_TOKEN_EN }}
+      TIKTOK_REFRESH_TOKEN_EN: ${{ secrets.TIKTOK_REFRESH_TOKEN_EN }}
+      FISH_VOICES_MALE_EN: ${{ vars.FISH_VOICES_MALE_EN }}
+      FISH_VOICES_FEMALE_EN: ${{ vars.FISH_VOICES_FEMALE_EN }}
+      YT_HASHTAGS_EN: ${{ vars.YT_HASHTAGS_EN }}
       # drafts a day; above YouTube's allowance on purpose, see config.py
       TIKTOK_PER_DAY: ${{ vars.TIKTOK_PER_DAY || '4' }}
       # A real knob for the same reason YT_MIN_GAP_HOURS is one, and tunable
@@ -88,7 +121,6 @@ jobs:
       # 200 usable posts across the six above, and raising it thins that fast.
       VIRAL_MIN_SCORE: ${{ vars.VIRAL_MIN_SCORE || '40000' }}
       VIRAL_PER_DAY: ${{ vars.VIRAL_PER_DAY || '1' }}
-      OUTPUT_LANG: ru
       TTS_BACKEND: fish
       SUBTITLE_FONT: Arial Black
       # Deliberately below the code default of 5. With the grid this is the only
@@ -266,8 +298,11 @@ jobs:
           # which would tie this to the shape TikTok happens to give them.
           caption=$(printf '%s\n' "$caption" | head -n -1)
           if [ -n "$caption" ]; then
+            # The channel is in the title because the reminder is useless
+            # without it: the two TikTok accounts are unrelated, and the only
+            # thing that says which app account to publish from is this line.
             printf '%s\n' "$caption" | gh issue create \
-              --title "TikTok: опубликуй «$(printf '%s' "$caption" | head -1)»" \
+              --title "TikTok ${{ matrix.channel }}: опубликуй «$(printf '%s' "$caption" | head -1)»" \
               --assignee "${{ github.repository_owner }}" \
               --body-file -
           fi
@@ -279,7 +314,7 @@ jobs:
             git config user.name  "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add seen.db
-            git commit -m "state: used stories and uploads [skip ci]"
+            git commit -m "state: used stories and uploads (${{ matrix.channel }}) [skip ci]"
             # The upload already happened. If this commit does not land, the
             # gap and the daily count are next computed from a state that has
             # never heard of it - youtube.py reads since_last_h straight out of

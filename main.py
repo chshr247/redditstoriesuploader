@@ -18,16 +18,22 @@ import script
 import source
 import voice
 import youtube
-from config import MIN_SEC, OUT_DIR, VIRAL_MIN_SCORE
+from config import CHANNEL, MIN_SEC, OUT_DIR, VIRAL_MIN_SCORE, chan_file
 
 log = logging.getLogger("main")
 
 MAX_SLOWDOWN = 0.15   # beyond this the voice starts sounding drugged
 
 
-def _render(title: str, body: str, gender: str, name: str, sub: str,
+def _render(title: str, body: str, gender: str, key: str, sub: str,
             fish_voice: str = "", meta: dict | None = None) -> Path:
-    """Narrate one script and burn it into out/<name>.mp4."""
+    """Narrate one script and burn it into out/<key>[_<channel>].mp4.
+
+    `key` names the STORY; the channel is what turns it into a file name. Both
+    channels render the same story from the same post id, so without that they
+    would write over each other in out/ and count as one row in `uploaded`.
+    """
+    name = chan_file(key)
     mp3, words, title_end = voice.speak_parts(title, body, name, gender=gender,
                                               fish_voice=fish_voice)
 
@@ -45,11 +51,15 @@ def _render(title: str, body: str, gender: str, name: str, sub: str,
         if total < MIN_SEC:
             log.warning("still %.1fs after slowing down - story was too short", total)
 
-    out = render.render(mp3, words, name, title=title, title_end=title_end)
-    # publishing runs separately and later, so the text has to survive on disk
+    # keyed on the story, not the file: that is what keeps the two channels'
+    # versions of one story off the same background clip
+    out = render.render(mp3, words, name, title=title, title_end=title_end, key=key)
+    # publishing runs separately and later, so the text has to survive on disk.
+    # The channel goes in with it - the part marker's language and which
+    # channel's queue the file belongs to are both read back from here.
     (out.with_suffix(".meta.json")).write_text(json.dumps(
         {"title": script.plain(title), "body": script.plain(body), "sub": sub,
-         **(meta or {})}, ensure_ascii=False), "utf-8")
+         "channel": CHANNEL, **(meta or {})}, ensure_ascii=False), "utf-8")
     return out
 
 
@@ -67,14 +77,14 @@ def make_video(post: dict) -> Path:
 
 def make_part(p: dict) -> Path:
     """Render one already-written part of a split story."""
-    name = f"{p['post_id']}_p{p['n']}"
-    out = OUT_DIR / f"{name}.mp4"
+    key = f"{p['post_id']}_p{p['n']}"
+    out = OUT_DIR / f"{chan_file(key)}.mp4"
     if out.exists():
         # only reachable when out/ outlived the failure, i.e. locally. Re-voicing
         # a part that is already on disk costs a TTS call for nothing.
         log.info("%s already rendered, reusing it", out.name)
         return out
-    return _render(p["title"], p["body"], p["gender"], name, p["sub"],
+    return _render(p["title"], p["body"], p["gender"], key, p["sub"],
                    fish_voice=p["voice"],
                    meta={"post_id": p["post_id"], "part": p["n"], "total": p["total"]})
 
