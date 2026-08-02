@@ -6,12 +6,19 @@ out loud verbatim. No "**", no emoji, no stage directions.
 Title and body come from one call. The source is English and the narration
 usually is not, so the title needs translating too - and a model that writes
 both at once keeps them in one voice, for one request instead of two.
+
+The instructions themselves live in prompts.py, one set per channel language.
+What stays here is the machinery that checks the answer, and the parts of that
+which depend on the language - the shapes a title must not have - are keyed by
+language the same way. Every one of those checks exists because a rule in the
+prompt alone was not enough (see todo.md, "причина 3").
 """
 import logging
 import re
 
 from openai import OpenAI
 
+import prompts
 import safety
 from config import (LLM_BASE_URL, LLM_MODEL, OPENAI_API_KEY, OUTPUT_LANG,
                     TARGET_SEC)
@@ -23,7 +30,17 @@ class Unsuitable(Exception):
 # Measured with `python voice.py`. Russian runs far slower than English on the
 # same voice, so this MUST be re-measured whenever TTS_VOICE or OUTPUT_LANG
 # changes - the whole word budget hangs off it.
-WPM = {"ru": 150, "en": 191}
+#
+# en measured 2026-08-02 on the four voices the English channel actually uses,
+# 134-word sample each: 165, 194, 199 and 156 wpm. 191 before that was a guess
+# and would have written 253-word scripts - a hundred seconds of video on the
+# slowest of them. The number here is the HARMONIC mean of the four, which is
+# the one that makes the average DURATION come out at TARGET_SEC + CTA_SEC;
+# the arithmetic mean would aim short. Range at 230 words: 69 to 88 seconds,
+# all of it clear of the MIN_SEC floor, so no video gets re-voiced slower.
+# The spread between voices is still wider than the word tolerance, which is
+# the open problem noted in todo.md item 3 and is not specific to a language.
+WPM = {"ru": 150, "en": 177}
 TOLERANCE = 0.15
 # The closing question is spoken too, so it needs its own slice of the budget.
 # Added on top of TARGET_SEC rather than carved out of it: taken from the story
@@ -34,197 +51,11 @@ LANG_NAME = {"ru": "Russian", "en": "English"}
 
 log = logging.getLogger(__name__)
 
-SYSTEM = """You turn Reddit stories into narration for vertical short videos (TikTok/Shorts).
-
-Write everything in {lang}. The source post is in English - translate and adapt it,
-do not transliterate. Use natural spoken {lang}, not a literal word-for-word rendering.
-
-First decide whether the post works at all. Answer with exactly
-
-SKIP: <short reason>
-
-and nothing else if any of these is true:
-- it is not a personal story: news, politics, activism, a call to action, a question, a meta post about Reddit itself
-- nothing actually happens, or the payoff is a shrug
-- it only works if you already know the subreddit, a meme, or Reddit slang
-- it continues an earlier post the viewer never saw
-- it needs specialist knowledge to land: a game, a fandom, professional jargon
-- it cannot be told safely on TikTok: it centres on nazism or hate symbols, sexual violence, harm to children, suicide or self-harm, graphic violence, or hard drugs
-
-The bar for keeping it: a stranger scrolling past, who has never heard of Reddit,
-recognises the situation from their own life - family, money, work, neighbours,
-dating, petty injustice - and wants to know how it ended. Everything else is a SKIP.
-Be strict. Passing on a mediocre story costs nothing; a boring video costs a viewer.
-
-Softening a story is not your job. If it needs sanitising to be postable, SKIP it.
-
-Otherwise answer in exactly this shape:
-
-NARRATOR: male or female
-TITLE: <ONE sentence, six to nine words - the biggest fact of the story, for the title card>
-<blank line>
-<the narration, one paragraph>
-
-Rules:
-- NARRATOR is the gender of the person telling the story, taken from the post: markers like (28F), "my wife", "my husband", "as a girl". If the post never says, answer male.
-- {lang} marks gender on past-tense verbs and adjectives. Every one of them must agree with NARRATOR - "я сделал" for male, "я сделала" for female - and stay consistent from the first word to the last. This is the single easiest way to make the narration sound wrong, so check it.
-- Keep it TikTok-safe: no profanity, no slurs, no graphic detail. Say "умер", not how.
-- Imagine a stranger scrolling who knows nothing about Reddit. Everything they need is in your text.
-- Write for the ear, not the eye: short sentences, plain words, natural spoken rhythm. Punctuate where a person would actually pause - the voice engine reads commas and full stops as breath.
-- Always write ё where the word has it: всё, ещё, её, свёкор, объём. Writing "все" for "всё" makes the voice say the wrong word.
-- {lang} has homographs: same letters, different stress, different meaning. There are hundreds and no list covers them, so learn the SHAPES they come in rather than memorising words. These are examples of each shape, not an inventory:
-    two unrelated words that collided: замок, мука, духи, полки, белки, вести, пропасть, хлопок, вина, село
-    genitive singular against nominative plural - the largest group by far: стены, руки, ноги, горы, окна, слова, дома, стороны, деньгами
-    forms of one verb: плачу, лечу, ношу, сушу, кошу, солю, целую
-    aspect pairs differing in nothing but stress: насыпать, отрезать, разрезать, ссыпать
-    a short adjective against a comparative or another adjective: большая, дорога, острота
-  The voice engine guesses the stress from the surrounding words and there is no way to correct it: a wrong guess is heard as a different word, and no markup fixes it - accent marks are ignored outright, so never write one anywhere.
-  So before you commit any word of this kind, read your own sentence back with the OTHER stress. If it still makes sense that way, the sentence is broken and you must rewrite it. Two ways out, in this order:
-    let the context decide, which is enough most of the time: "во дворе стоит машина" leaves no room for "costs", "это стоит слишком дорого" leaves none for "stands"
-    or take a different word: "он запер дверь" instead of "он повесил замок", "дороже" instead of "больше стоит", "позже" instead of "потом"
-  Short sentences are where this bites, because a three-word sentence gives the engine nothing to go on. That is the one place worth spending an extra word.
-- Mark delivery with cues in square brackets, in English, placed immediately before the words they change: "[nervous] Я открыл письмо. [shocked] Она знала всё это время." Free-form descriptions work too: [voice dropping], [barely holding it together].
-- Use between three and six cues in the whole narration, and only where the story actually turns - the reveal, the punchline, the moment it goes wrong. A cue on every sentence sounds like a bad audiobook. Never put one in the TITLE line.
-- Put every line of direct speech inside «angle quotes», always, with no exception - they are what tells the renderer to colour that line differently on screen. Reported speech without quotes stays uncoloured and reads as the narrator's own voice.
-- Every line of direct speech gets its own cue, and the cue must START A SENTENCE - close the narration with a full stop first, then the cue, then the line. The engine applies an emotion cue to the sentence it opens, so one buried mid-phrase after a colon barely registers:
-    right: "Он спустился и заорал. [husband, shouting and furious] «Почему ты не сказала, что ужин готов?»"
-    wrong: "Он спустился и заорал: [husband, shouting] «Почему ты не сказала, что ужин готов?»"
-- The cue starts with ONE English word naming who is speaking, then a comma, then how they said it. Use the same label for the same person every time - husband, wife, sister, boss, neighbour, mother. That label is what gives each speaker their own subtitle colour, so it must never be skipped or renamed halfway through.
-- Reported anger read in a calm voice is the single most artificial thing the narration can do. Give the narrator a contrasting cue when they answer: [me, cold] «Ужин на столе».
-- Sounds are cues too, and they are what make a told story sound told rather than read. Drop [sighing] before resignation, [laughing] or [amused] before something absurd, [whispering] before a confession. Two or three across the whole narration, at the moments a person would actually make that sound.
-- Let sentences breathe at their natural length. Do not chop the story into short fragments to force pauses: the engine puts a real gap at every full stop, and a wall of three-word sentences comes out sounding stilted. Enumerations of three or more items are the exception - split those, since a comma list is read as one flat run.
-- The TITLE names ONE fact: the single biggest thing that happens anywhere in the story, stated in full, in the bluntest words the story allows. What it withholds is the CAUSE and the outcome - how that came about and how it ended is what the video is for. Never withhold the event itself. A title that hides what happened reads as nothing having happened, and a stranger scrolls past it.
-- Keep it SHORT: six to nine words. The feed cuts the title off after roughly forty characters and the fact has to survive that cut whole, so who did what sits at the front and nothing load-bearing waits until the end.
-- The TITLE is ALWAYS ONE SENTENCE. Never two. It carries no full stop, no exclamation mark and no question mark inside it - one unbroken line, and nothing after it.
-- It must rest on at least ONE of these three. Without one the fact stays abstract and the title is dead on the screen:
-    a digit, and the more absurd its size the better: "Брат продал кольцо покойной бабушки за 5000"
-    a line someone actually said, in «angle quotes»: "Свекровь сказала при гостях «этот ребёнок не наш»"
-    the named stake instead of its category: "кольцо покойной бабушки", never "украшение"
-  Working titles, for shape:
-    "Соседка прислала мне счёт на 80000 за свой потоп"
-    "Тёща въехала в нашу квартиру, пока мы были в отпуске"
-    "Отец вычеркнул меня из завещания после одного ужина"
-    "Мать сняла с моей карты 40000 на футбол брата"
-  The same stories written wrong, because the event is hidden:
-    "Тёща жила в нашей квартире" — nothing happened, so there is nothing to watch
-    "У нас были сложности с соседкой" — a topic, not a fact
-    "Соседка орала на моих детей. Наказала я своих." — WRONG, two sentences, no matter how well it reads
-- The verb must be what the post actually says. Escalating "не отдала ключи" into "украла ключи" buys the click and loses the viewer at the eighth second, when the narration turns out to be smaller than the title promised.
-  A title must name something that HAPPENED - a scene, a line someone said, a thing someone did. These shapes are never a hook, because nothing happens in them, and they are rejected outright:
-    an instruction or plea to the world: "Не используйте меня для воспитания детей", "Никогда не занимайте денег родне"
-    a stated position or complaint: "Меня достали чужие дети", "Свекровь не уважает границы"
-    a label for a topic: "История о том, как я съехал", "Мой опыт с ипотекой"
-  Each of those describes a situation in general. Replace it with the single worst moment of that situation, in concrete words - what was said, by whom, when, and all of it inside one sentence. "Не используйте меня для воспитания детей" becomes "Отец ткнул в меня пальцем и сказал «будешь как он»".
-  Do not open the title with a verb in the imperative addressed to the viewer, and do not write it as advice.
-  It is read aloud, so no abbreviations, no brackets, no "(20F)" - write genders as words if they matter at all.
-  Numbers in the TITLE are DIGITS, always, and they carry NO currency: "счёт на 8000", never "8000 рублей" and never "800 долларов". A digit is the one thing the eye catches while scrolling; "восемьсот" is read as just more text, and the currency word is three syllables spent pushing the fact past the cut. Write the figure out in full - "20000", never "20 тысяч". Do not convert a sum into another currency either: drop the unit and keep the number the source gives.
-- The narration OPENS on the moment the title names, inside its first two sentences, and only then goes back for the setup: "Соседка положила чек на стол и потребовала вернуть ей деньги за продукты. А началось всё с того, что дети затеяли торговать выпечкой." Events do not have to run in the order they happened - the title is a promise, and a viewer who has to wait seventy seconds for it leaves long before it is paid. Do not repeat the title word for word: land the scene it points at, with the detail the title left out.
-- First person, past tense, short plain sentences.
-- Cut everything that does not move the plot: greetings, "edit:", "TL;DR", thanks, award mentions.
-- In the narration write numbers as words. Only the TITLE uses digits.
-- The story must END, not stop. Land the payoff or twist, then close it with one short line that settles it - what it cost, what changed, what the narrator felt afterwards. A narration that runs out mid-scene, or breaks off right after the reveal with nothing to absorb it, is a failure even if the word count is right. Budget for this from the start: reach the ending deliberately instead of using every word on the setup and hitting the limit.
-- After the story is closed, and only then, add the LAST line: one short question to the viewer about what they would have done, or whose side they take. It stands alone, it is the final sentence of the narration, and it must end with a question mark. Nothing follows it.
-- That closing question is the only place the viewer may be addressed. Never ask for likes, follows or subscriptions, and never mention the video, the channel or the algorithm.
-- Vary the question so it names what actually happened in this story - "А вы бы простили брата за такое?" beats "А вы бы как поступили?". The same generic line under every video reads as a template.
-- The closing question OPENS with a mood cue - [doubtful], [thoughtful], [curious], [quietly] - written before its first word. Pick the one that fits how the story ended. Shape it exactly like this, and nothing more: "[doubtful] А как бы вы поступили на моём месте?"
-- That opening cue is the ONLY markup the question may carry. Never put a second cue inside the line. The mood cue alone shapes the whole question, last word included.
-- No headings, markup, quotes, emoji or commentary anywhere."""
-
-# Appended to SYSTEM when one post is worth more than one video. Kept apart so
-# the single-video prompt - which is what most runs use - stays byte-identical
-# and keeps hitting the provider's prefix cache.
-MULTI = """
-
-This post carries more story than one video holds. Write it as EXACTLY {n} parts,
-all of them in one answer, separated by a line containing only three dashes:
-
-NARRATOR: male or female
-TITLE: <part 1 title>
-<blank line>
-<part 1 narration>
----
-TITLE: <part 2 title>
-<blank line>
-<part 2 narration>
-
-NARRATOR is written once, at the very top, and holds for every part.
-Every rule above applies to EACH part on its own - its own title, its own cues,
-its own closing question, its own length. On top of them:
-- Cut where the story turns, never where the words run out. Each part covers a
-  whole stretch of events; one that stops in the middle of a scene is a failure.
-- Never write "Часть 1" or any part number anywhere in your text. The marker is
-  added outside it.
-- Part 1 gives a stranger everything they need. Each later part opens with ONE
-  short line saying where things stopped, then carries on - whoever is watching
-  may never have seen the part before it.
-- A part's TITLE comes from the OPENING of that part, never from its end. Take
-  the biggest fact among the events the part starts with - one the narration
-  reaches within its first two sentences, so the promise is paid immediately.
-  The cliffhanger the part stops on is the one thing the title may never name:
-  it has not happened yet when the viewer reads the title, and naming it means
-  the whole part is spent waiting for the line they already saw.
-    "Официантка вынесла клиенту весы прямо в зал" — works, it happens early and
-    the narration lands on it at once
-    "Соседка пришла с чеком и потребовала деньги" — WRONG if that is the scene
-    the part ENDS on: seventy seconds of video before the title comes true
-    "Весы показали полный килограмм, и клиент ушёл ни с чем" — WRONG, it is the
-    payoff, so the whole reason to watch is gone before the video starts
-  Most of the people who open a later part came from the one before it. Giving
-  them the answer in the title is telling them not to bother.
-- For a later part the recap line does not count as one of those first two
-  sentences: say where things stopped, then answer the title, then carry on.
-- Every part except the last ends on a cliffhanger: stop one beat BEFORE the
-  answer, at the moment the outcome is about to land, on a finished sentence.
-  The stop IS the cliffhanger. So these parts carry NO closing question and no
-  line addressed to the viewer at all. This OVERRIDES the rule above that every
-  narration ends with a question to the viewer - that rule is for the last part.
-    right:  "...Мусоровоз медленно подъезжал к дому соседа. И тут я замерла."
-    wrong:  "...И тут я замерла. [curious] Как думаете, что было дальше?"
-  Do not swap the question for a rhetorical one of the narrator's either
-  ("Что мне оставалось делать?"). End on what happened, and stop there.
-- The LAST part resolves everything and closes the way described above: the
-  payoff, one short settling line, then the question to the viewer.
-- Do not stall to fill the count. Every part needs events of its own, and two
-  parts of real story beat three parts of waiting. If the post cannot carry {n}
-  full parts, write fewer - but never fewer than two."""
-
-# Appended to SYSTEM for a post from a fact subreddit. Appended rather than
-# written as a second prompt for the same reason MULTI is: the story prompt is
-# the cached prefix, and this way a fact video pays for the tail only.
-# It exists because the gate above SKIPs anything that is not somebody's own
-# experience, which is every post in a fact sub - without this the sub would be
-# fetched every run and rejected every run, at the price of an LLM call each time.
-FACT = """
-
-This post is not a story. It is a fact - a piece of knowledge, a curiosity, a
-thing most people have wrong - and it becomes a video of the same shape as the
-stories. Every rule above holds EXCEPT where this changes it.
-
-- The gate is different. SKIP it if:
-    the fact is not actually stated in the post, only linked to or implied
-    it is a news event, politics or activism
-    it needs a picture, a diagram or a formula to make sense
-    it is advice about using a website, an app or a service
-    someone who hears it once learns nothing they could repeat to another person
-  Keep it when hearing it makes you want to tell somebody: a number nobody would
-  believe, a thing everyone is sure of that is wrong, the reason behind something
-  ordinary that no one ever looks at twice.
-- Invent NOTHING. Every claim you speak has to be in the post. If the post does
-  not carry enough material for the word count, answer SKIP - do not pad it with
-  what you happen to know, and do not stretch a detail into a paragraph. Leave
-  out anything the post states vaguely rather than sharpening it yourself.
-- No narrator character: there is no "я" anywhere and nothing is anyone's own
-  experience. Third person, present tense. NARRATOR names only which voice reads
-  it, so answer male or female freely - no word of the text may depend on which.
-  The gender-agreement rule above therefore has nothing to agree with here.
-- Order: the fact itself in the first sentence, then how it came to be true, then
-  the part that is hardest to believe. Same ending as a story - land it, one short
-  line to settle it, then the closing question, which here asks whether they knew
-  or what they would have guessed.
-- Direct speech is rare in a fact and «angle quotes» are not required. The
-  delivery cues still are: put them on the numbers and the turns, [surprised],
-  [amused], [flatly] before the figure that sounds made up.
-- The TITLE rules are unchanged. The one fact it names is THE fact."""
+# One set of instructions per channel language, kept in prompts.py: the
+# examples are most of the prompt, and examples in the wrong language teach
+# the wrong thing. MULTI and FACT are still appended to SYSTEM, so an
+# ordinary video keeps hitting the provider's prefix cache on SYSTEM alone.
+SYSTEM, MULTI, FACT = prompts.SYSTEM, prompts.MULTI, prompts.FACT
 
 # A separator line the model actually produces, and nothing else: the prompt
 # bans markup, so a bare rule can only be the one we asked for.
@@ -304,8 +135,16 @@ def speakers(s: str) -> list[str | None]:
 # A sentence boundary the model actually produces: terminal punctuation, then
 # whitespace, then either a delivery cue or a capital. The cue belongs to the
 # sentence it opens, so the lookahead steps over it rather than splitting on it.
+#
+# Both closing quotes are terminal: » ends a Russian line of speech and ” an
+# English one, and American style puts the full stop INSIDE the quote, so the
+# last character of the sentence is the quote itself. Without ” here an English
+# story that ends a scene on dialogue has no boundary before its closing
+# question - split_cta() returns nothing, _ending_fault() says the question is
+# missing, and every such story costs a rewrite.
+TERMINAL = ".!?…»”"
 SENTENCE = re.compile(
-    r"(?<=[.!?…»])\s+(?=(?:\[[^\]\n]{1,60}\]\s*)*[«„“A-ZА-ЯЁ])")
+    rf"(?<=[{re.escape(TERMINAL)}])\s+(?=(?:\[[^\]\n]{{1,60}}\]\s*)*[«„“A-ZА-ЯЁ])")
 
 
 def split_cta(body: str) -> tuple[str, str]:
@@ -364,14 +203,38 @@ def _fits(total: int, target: int) -> bool:
 # Titles that describe a situation instead of showing a moment. The model has
 # prose rules against these; this catches the ones that slip through, since a
 # weak first line costs the whole view.
-WEAK_TITLE = re.compile(
-    r"^(?:"
-    r"не\s+\w+(?:те|йте)\b"          # imperative plea: "Не используйте меня..."
-    r"|никогда\s+не\s+\w+(?:те|йте)\b"
-    r"|истори[яю]\s+о\s+том\b"
-    r"|о\s+том,?\s+как\b"
-    r"|мой\s+опыт\b"
-    r")", re.IGNORECASE)
+#
+# Everything below is per channel language, and it has to be: a rule in the
+# prompt that no check backs up is a rule that quietly stops applying. The
+# Russian numeral list run over an English title matches nothing and refuses
+# nothing, which looks exactly like a title with no faults in it.
+WEAK_TITLE = {
+    "ru": re.compile(
+        r"^(?:"
+        r"не\s+\w+(?:те|йте)\b"          # imperative plea: "Не используйте меня..."
+        r"|никогда\s+не\s+\w+(?:те|йте)\b"
+        r"|истори[яю]\s+о\s+том\b"
+        r"|о\s+том,?\s+как\b"
+        r"|мой\s+опыт\b"
+        r")", re.IGNORECASE),
+    # English says the same shapes with its own words. "PSA" and "a reminder
+    # that" have no Russian counterpart in the list because Russian Reddit
+    # translations do not produce them; they are the native form of the plea
+    # here and the single most common way an English title says nothing.
+    "en": re.compile(
+        r"^(?:"
+        # apostrophes are written both ways - the model reaches for the curly
+        # one as often as the straight one, and a rule that only catches half
+        # of them is the same as no rule
+        r"(?:please\s+)?(?:don['’]?t|do\s+not|never|always|stop|quit)\s+\w+"
+        r"|psa\b|ps\s?a:"
+        r"|(?:a|just\s+a)\s+reminder\b"
+        r"|(?:the\s+)?story\s+of\s+(?:how|when|the)\b"
+        r"|my\s+experience\b"
+        r"|(?:here['’]?s\s+)?why\s+you\s+(?:should|shouldn['’]?t|need)\b"
+        r"|i['’]?m\s+(?:so\s+)?(?:done|tired|sick|fed\s+up)\s+(?:of|with)\b"
+        r")", re.IGNORECASE),
+}
 
 # Nine is what the prompt asks for; ten is the slack. A title states one fact
 # now, and a fact that needs eleven words is carrying its own explanation - which
@@ -384,59 +247,91 @@ MAX_TITLE_WORDS = 10
 # ponytail: tens and up only. Numerals below twenty share stems with ordinary
 # words and are short enough to read fine either way, so they are left alone;
 # extend the list if "пять тысяч" style titles start slipping through as prose.
-SPELLED_NUMBER = re.compile(
-    r"\b(?:двадцат[иь]|тридцат[иь]|сорока?|пятьдесят|пятидесяти|шестьдесят"
-    r"|шестидесяти|семьдесят|семидесяти|восемьдесят|восьмидесяти|девяносто"
-    r"|девяноста|ст[оа]|двести|двухсот|тр[ие]ста|тр[ёе]хсот|четыреста"
-    r"|четыр[ёе]хсот|пятьсот|пятисот|шестьсот|шестисот|семьсот|семисот"
-    r"|восемьсот|восьмисот|девятьсот|девятисот|тысяч\w*|миллион\w*"
-    r"|миллиард\w*)\b", re.IGNORECASE)
+SPELLED_NUMBER = {
+    "ru": re.compile(
+        r"\b(?:двадцат[иь]|тридцат[иь]|сорока?|пятьдесят|пятидесяти|шестьдесят"
+        r"|шестидесяти|семьдесят|семидесяти|восемьдесят|восьмидесяти|девяносто"
+        r"|девяноста|ст[оа]|двести|двухсот|тр[ие]ста|тр[ёе]хсот|четыреста"
+        r"|четыр[ёе]хсот|пятьсот|пятисот|шестьсот|шестисот|семьсот|семисот"
+        r"|восемьсот|восьмисот|девятьсот|девятисот|тысяч\w*|миллион\w*"
+        r"|миллиард\w*)\b", re.IGNORECASE),
+    # Same rule, and "20k" added because English writes it that way and it is
+    # read aloud as one mumbled syllable.
+    "en": re.compile(
+        r"\b(?:twenty|thirty|fou?rty|fifty|sixty|seventy|eighty|ninety"
+        r"|hundreds?|thousands?|millions?|billions?|grand)\b|\b\d+\s?k\b",
+        re.IGNORECASE),
+}
 
 # The currency word after a figure. It buys nothing - the sum is the hook, not
 # the unit - and costs three syllables of the ~40 characters the feed shows.
-CURRENCY = re.compile(r"\d[\d\s]{0,8}(?:рубл|руб\b|долл|евро|₽)|[$₽]\s*\d", re.IGNORECASE)
+CURRENCY = {
+    "ru": re.compile(r"\d[\d\s]{0,8}(?:рубл|руб\b|долл|евро|₽)|[$₽]\s*\d",
+                     re.IGNORECASE),
+    "en": re.compile(r"\d[\d\s]{0,8}(?:dollars?|bucks|euros?|pounds?|usd)\b"
+                     r"|[$€£]\s*\d", re.IGNORECASE),
+}
 
-# Words whose stress the voice engine has to guess, and guesses from context the
-# title does not have: a six-word line gives it nothing to go on, so a wrong
-# guess is heard as a different word in the first three seconds of the video.
+# Words the voice engine has to guess at, and guesses from context the title
+# does not have: a six-word line gives it nothing to go on, so a wrong guess is
+# heard as a different word in the first three seconds of the video.
 # ponytail: a hand-picked list, not a dictionary. These are the ones whose other
 # reading is a plausible word in a story title; the pairs that only collide in
-# rare grammar (руки, окна, дома) are left out because they would fire on
-# everything. Add to it when a video actually comes back mispronounced.
-HOMOGRAPH = re.compile(
-    r"\b(?:замок|замка|мука|духи|полки|белки|пропасть|хлопок|село"
-    r"|дорога|стоит|плачу|лечу|ношу|острота)\b", re.IGNORECASE)
+# rare grammar (руки, окна, дома / "present", "record") are left out because
+# they would fire on everything. Add to it when a video actually comes back
+# mispronounced.
+HOMOGRAPH = {
+    "ru": re.compile(
+        r"\b(?:замок|замка|мука|духи|полки|белки|пропасть|хлопок|село"
+        r"|дорога|стоит|плачу|лечу|ношу|острота)\b", re.IGNORECASE),
+    # English calls them heteronyms and has far fewer that matter here. "read"
+    # is the one that actually bites: past and present are spelled alike and a
+    # story title is almost always past.
+    "en": re.compile(
+        r"\b(?:read|lead|tear|tears|wound|bow|wind|refuse|desert|resume"
+        r"|invalid|row|sow)\b", re.IGNORECASE),
+}
+
+# How the model is told to keep a title to one sentence, which is the one
+# complaint that has to name a conjunction to be actionable.
+_TURN_WORDS = {"ru": '"а" or "но"', "en": '"and" or "but"'}
 
 
-def _title_fault(title: str) -> str:
+def _title_fault(title: str, lang: str = "") -> str:
     """Empty when the title is usable, otherwise what to tell the model."""
+    lang = lang or OUTPUT_LANG
     t = plain(title).strip()
     if not t:
         return "the TITLE line is missing"
     if len(t.split()) > MAX_TITLE_WORDS:
         return (f"the TITLE is {len(t.split())} words, keep it under "
                 f"{MAX_TITLE_WORDS}")
-    if WEAK_TITLE.match(t):
+    if WEAK_TITLE[lang].match(t):
         return ("the TITLE states a position or gives advice instead of showing "
                 "a moment - rewrite it as the single sharpest thing that "
                 "happened, in concrete words")
-    n = SPELLED_NUMBER.search(t)
+    n = SPELLED_NUMBER[lang].search(t)
     if n:
         return (f"the TITLE spells the number \"{n.group()}\" out in letters - "
-                "write the whole figure in digits, \"20000\" not \"20 тысяч\"")
-    c = CURRENCY.search(t)
+                "write the whole figure in digits, \"20000\" not \"20 тысяч\""
+                if lang == "ru" else
+                f"the TITLE writes the number \"{n.group()}\" out in words - "
+                "write the whole figure in digits, \"20000\" not \"20 thousand\"")
+    c = CURRENCY[lang].search(t)
     if c:
         return (f"the TITLE names a currency in \"{c.group().strip()}\" - drop "
-                "the unit and keep the bare figure, \"счёт на 8000\"")
-    h = HOMOGRAPH.search(t)
+                "the unit and keep the bare figure, "
+                + ("\"счёт на 8000\"" if lang == "ru" else "\"a bill for 8000\""))
+    h = HOMOGRAPH[lang].search(t)
     if h:
-        return (f"\"{h.group()}\" is stressed two ways and the TITLE is too short "
+        return (f"\"{h.group()}\" is said two ways and the TITLE is too short "
                 "for the engine to guess right - say it with a different word")
     # One sentence, always. The same boundary split_cta() uses, so "two
     # sentences" means here exactly what it means everywhere else in the file.
     if len(SENTENCE.split(t)) > 1:
         return ("the TITLE is two sentences - it must be exactly one, with the "
-                "turn made on a comma with \"а\" or \"но\" instead of a full stop")
+                f"turn made on a comma with {_TURN_WORDS[lang]} instead of a "
+                "full stop")
     return ""
 
 
@@ -489,7 +384,9 @@ def _ending_fault(body: str, final: bool = True) -> str:
             return ("this part is not the last one, so it must NOT end with a "
                     "question to the viewer - stop one beat before the answer "
                     "and let the stop be the cliffhanger")
-        if t[-1] not in ".!…»":
+        # everything terminal except the question mark: a middle part must not
+        # end on a question at all, which the check above has just refused
+        if t[-1] not in TERMINAL.replace("?", ""):
             return ("the part breaks off in the middle of a sentence - stop "
                     "before the answer, but finish the sentence you are on")
         return ""
@@ -587,11 +484,12 @@ def write_script(post: dict, parts: int = 1) -> tuple[str, list[tuple[str, str]]
 
     client = OpenAI(api_key=OPENAI_API_KEY, base_url=LLM_BASE_URL or None)
     target = _target_words()
-    system = SYSTEM.format(lang=LANG_NAME.get(OUTPUT_LANG, "English"))
+    lang = OUTPUT_LANG
+    system = SYSTEM[lang].format(lang=LANG_NAME[lang])
     if post.get("kind") == "fact":
-        system += FACT          # never both: part_count() keeps facts at one part
+        system += FACT[lang]    # never both: part_count() keeps facts at one part
     if parts > 1:
-        system += MULTI.format(n=parts)
+        system += MULTI[lang].format(n=parts)
     msgs = [
         {"role": "system", "content": system},
         {"role": "user", "content":
@@ -675,43 +573,99 @@ if __name__ == "__main__":
     assert _fits(tw, tw) and not _fits(tw * 2, tw) and not _fits(3, tw)
     assert tw > round(TARGET_SEC / 60 * _wpm()), "the CTA needs its own words"
 
+    # Both languages are checked on every run, whichever channel this process
+    # is. A rule that only holds for the channel you happen to be testing is
+    # how the English side would ship with its numeral check switched off.
+    def ru(title: str) -> str:
+        return _title_fault(title, "ru")
+
+    def en(title: str) -> str:
+        return _title_fault(title, "en")
+
     # a title has to show a moment, not describe a stance
-    assert _title_fault("Не используйте меня для воспитания детей"), "the plea shape must be caught"
-    assert _title_fault("Никогда не занимайте денег родне")
-    assert _title_fault("История о том, как я съехал")
-    assert _title_fault("Мой опыт с ипотекой")
-    assert _title_fault("")
-    assert _title_fault(" ".join(["слово"] * (MAX_TITLE_WORDS + 1)))
+    assert ru("Не используйте меня для воспитания детей"), "the plea shape must be caught"
+    assert ru("Никогда не занимайте денег родне")
+    assert ru("История о том, как я съехал")
+    assert ru("Мой опыт с ипотекой")
+    assert ru("")
+    assert ru(" ".join(["слово"] * (MAX_TITLE_WORDS + 1)))
     # one sentence, always - these all read well and are all rejected anyway
-    assert _title_fault("Соседка орала на моих детей. Наказала я своих")
-    assert _title_fault("В четверг были похороны. В пятницу она спросила про деньги")
-    assert _title_fault("Отец ткнул в меня пальцем. «Будешь плохо есть»")
-    assert not _title_fault("Соседка орала на моих детей, а наказала я своих")
-    assert not _title_fault("В четверг похороны, а в пятницу она спросила про деньги")
+    assert ru("Соседка орала на моих детей. Наказала я своих")
+    assert ru("В четверг были похороны. В пятницу она спросила про деньги")
+    assert ru("Отец ткнул в меня пальцем. «Будешь плохо есть»")
+    assert not ru("Соседка орала на моих детей, а наказала я своих")
+    assert not ru("В четверг похороны, а в пятницу она спросила про деньги")
     # digits are the point of the title, not a stray token to trip over
-    assert not _title_fault("Золовка платит 8000 за комнату в моей квартире")
-    assert _title_fault("Попросила золовку платить восемьсот за комнату")
-    assert _title_fault("Отец требует тридцать процентов моей зарплаты")
-    assert _title_fault("Брат занял пять тысяч и пропал перед свадьбой")
+    assert not ru("Золовка платит 8000 за комнату в моей квартире")
+    assert ru("Попросила золовку платить восемьсот за комнату")
+    assert ru("Отец требует тридцать процентов моей зарплаты")
+    assert ru("Брат занял пять тысяч и пропал перед свадьбой")
     # the figure is the hook, the unit is filler - and it eats the 40-char cut
-    assert _title_fault("Соседка прислала счёт на 80000 рублей за свой потоп")
-    assert _title_fault("Свекровь потребовала 800 долларов за комнату")
-    assert _title_fault("Свекровь потребовала $800 за комнату")
-    assert not _title_fault("Соседка прислала счёт на 80000 за свой потоп")
+    assert ru("Соседка прислала счёт на 80000 рублей за свой потоп")
+    assert ru("Свекровь потребовала 800 долларов за комнату")
+    assert ru("Свекровь потребовала $800 за комнату")
+    assert not ru("Соседка прислала счёт на 80000 за свой потоп")
     # ordinary words that merely start like a numeral must not trip it
-    assert not _title_fault("В четверг похороны, а в пятницу она спросила про деньги")
-    assert not _title_fault("Он оставил пятно на платье, а виноватой стала я")
-    assert not SPELLED_NUMBER.search("Ремонт стоит дороже"), '"сто" must not fire on "стоит"'
+    assert not ru("В четверг похороны, а в пятницу она спросила про деньги")
+    assert not ru("Он оставил пятно на платье, а виноватой стала я")
+    assert not SPELLED_NUMBER["ru"].search("Ремонт стоит дороже"), '"сто" must not fire on "стоит"'
 
     # a homograph in a short title is read as a coin flip, so it never ships
-    assert _title_fault("Тёща сменила замок в нашей квартире"), "за́мок vs замо́к"
-    assert _title_fault("Ремонт стоит дороже, а платить велели мне"), "стóит vs стои́т"
-    assert not _title_fault("Тёща въехала в нашу квартиру, пока мы были в отпуске")
+    assert ru("Тёща сменила замок в нашей квартире"), "за́мок vs замо́к"
+    assert ru("Ремонт стоит дороже, а платить велели мне"), "стóит vs стои́т"
+    assert not ru("Тёща въехала в нашу квартиру, пока мы были в отпуске")
     # a trailing stop is stripped before the card is drawn, so it is not a split
-    assert not _title_fault("Тест сказал другое.")
+    assert not ru("Тест сказал другое.")
     # "не" plus a normal verb is a fact, not an instruction - it must pass
-    assert not _title_fault("Он не пришёл на собственную свадьбу")
-    assert not _title_fault(f"[sad] Он сжё{ACCENT}г мои письма за одну ночь"), "cues and marks are not words"
+    assert not ru("Он не пришёл на собственную свадьбу")
+    assert not ru(f"[sad] Он сжё{ACCENT}г мои письма за одну ночь"), "cues and marks are not words"
+
+    # The same list in English. Same order, so the two blocks can be read side
+    # by side and a rule missing from one of them is visible.
+    assert en("Don't let your family borrow money"), "the plea shape must be caught"
+    assert en("Never lend your car to a friend")
+    assert en("PSA: check your bank statements every month")
+    assert en("A reminder that family money is never free")
+    assert en("The story of how I moved out")
+    assert en("My experience with an entitled landlord")
+    assert en("Why you should never cosign for family")
+    assert en("I'm done with my neighbor's kids")
+    assert en("")
+    assert en(" ".join(["word"] * (MAX_TITLE_WORDS + 1)))
+    # one sentence, always
+    assert en("The neighbor screamed at my kids. I grounded mine")
+    assert not en("The neighbor screamed at my kids, but I grounded mine")
+    # digits stay digits, and the currency word is filler that eats the cut
+    assert not en("My sister-in-law pays 8000 for one room")
+    assert en("My sister-in-law pays eight hundred for one room")
+    assert en("Dad wants thirty percent of my paycheck")
+    assert en("My brother borrowed 5000 dollars and vanished")
+    assert en("My brother borrowed $5000 and vanished before the wedding")
+    assert en("Neighbor billed me 20k for her own flood")
+    assert not en("Neighbor billed me 80000 for her own flood")
+    # ordinary words must not trip the numeral check
+    assert not en("Mom took my car keys on my wedding day")
+    assert not en("He left a stain on the dress and blamed me")
+    # heteronyms: the engine picks the reading from context a title has none of
+    assert en("I read my sister's messages and told everyone"), "read vs read"
+    assert en("She had tears in her eyes at the register"), "tears vs tears"
+    assert not en("My mother-in-law moved in while we were away")
+    assert not en("Dad cut me from the will after one dinner.")
+    assert not en(f"[sad] He burned my letters in one night"), "cues are not words"
+    # the checks must not leak across languages: each one refuses its own
+    # language's mistakes and stays quiet on the other's ordinary words
+    assert not en("Соседка прислала счёт на 80000 за свой потоп")
+    assert not ru("Dad cut me from the will after one dinner")
+
+    # An English scene ends on the quote mark, with the stop inside it. If that
+    # is not a sentence boundary, the closing question after it is invisible.
+    s, c = split_cta("He yelled. [angry] “Are you serious?” Would you have stayed?")
+    assert c == "Would you have stayed?", c
+    assert s.endswith("“Are you serious?”"), s
+    assert not _ending_fault('He left. [me, cold] “Dinner is on the table.” '
+                             "[doubtful] Would you have said that?")
+    assert not _ending_fault('...And I froze. [angry] “Get out of my house.”',
+                             final=False), "a part may end on a line of dialogue"
 
     # the closing question is voiced apart, so it has to come off cleanly
     s, c = split_cta("Я собрал вещи и ушёл. А вы бы простили такое?")
@@ -805,7 +759,11 @@ if __name__ == "__main__":
     long_post = {"text": "x" * (PART_CHARS * 3)}
     assert part_count(long_post) > 1
     assert part_count({**long_post, "kind": "fact"}) == 1
-    assert "Invent NOTHING" not in SYSTEM and "Invent NOTHING" in FACT
+    assert all("Invent NOTHING" not in SYSTEM[l] and "Invent NOTHING" in FACT[l]
+               for l in SYSTEM), "the fact block must not leak into the story prompt"
+    # the prompt set has to exist for the channel this process is, or the run
+    # dies deep inside write_script() with a KeyError instead of here
+    assert OUTPUT_LANG in SYSTEM and OUTPUT_LANG in WEAK_TITLE, OUTPUT_LANG
 
     print(f"logic ok: {OUTPUT_LANG}, {_wpm()} wpm, target {tw} words "
           f"for {TARGET_SEC}+{CTA_SEC} sec")

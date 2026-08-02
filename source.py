@@ -17,8 +17,9 @@ import urllib.parse
 import urllib.request
 
 import safety
-from config import (DB_PATH, FACT_SUBREDDITS, MAX_SCORE, MIN_COMMENTS,
-                    MIN_SCORE, SUBREDDITS, VIRAL_MIN_SCORE, VIRAL_PER_DAY)
+from config import (DB_PATH, DEFAULT_CHANNEL, FACT_SUBREDDITS, MAX_SCORE,
+                    MIN_COMMENTS, MIN_SCORE, OUTPUT_LANG, SUBREDDITS,
+                    VIRAL_MIN_SCORE, VIRAL_PER_DAY)
 
 API = "https://api.pullpush.io/reddit/search/submission/"
 UA = "StoryReader/0.1"
@@ -46,7 +47,36 @@ def _db():
                "gender TEXT, voice TEXT, sub TEXT, ts REAL, "
                "done INT DEFAULT 0, tries INT DEFAULT 0, "
                "PRIMARY KEY(post_id, n))")
+    _add_lang(db)
     return db
+
+
+# One post becomes one video per channel: the same story told in Russian and in
+# English is two videos for two audiences that never meet. So "used" is a fact
+# about (post, language), not about the post - and that is a change of PRIMARY
+# KEY, which sqlite cannot do with ALTER TABLE. Hence a rebuild.
+#
+# Rows written before this are the Russian channel's by definition, so they are
+# carried over as such and nothing is lost or re-told.
+def _add_lang(db) -> None:
+    for table, cols, pk in [
+            ("seen", "id, score, sub, ts", "id, lang"),
+            ("parts", "post_id, n, total, title, body, gender, voice, sub, ts, "
+                      "done, tries", "post_id, n, lang")]:
+        if "lang" in {c[1] for c in db.execute(f"PRAGMA table_info({table})")}:
+            continue
+        # name, type and default carried over from the live schema; the old
+        # PRIMARY KEY is deliberately NOT, it is being replaced
+        decl = [f"{c[1]} {c[2]}" + (f" DEFAULT {c[4]}" if c[4] is not None else "")
+                for c in db.execute(f"PRAGMA table_info({table})")]
+        db.execute(f"CREATE TABLE {table}_new({', '.join(decl)}, "
+                   f"lang TEXT NOT NULL DEFAULT '{DEFAULT_CHANNEL}', "
+                   f"PRIMARY KEY({pk}))")
+        db.execute(f"INSERT INTO {table}_new({cols}, lang) "
+                   f"SELECT {cols}, '{DEFAULT_CHANNEL}' FROM {table}")
+        db.execute(f"DROP TABLE {table}")
+        db.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
+        log.info("%s: migrated to per-channel rows", table)
 
 
 def _api(**params):
@@ -97,7 +127,8 @@ def _harvest(limit: int, floor: int, ceiling: int) -> list[dict]:
     """
     db = _db()
     out = []
-    seen = {r[0] for r in db.execute("SELECT id FROM seen")}
+    seen = {r[0] for r in db.execute("SELECT id FROM seen WHERE lang=?",
+                                     (OUTPUT_LANG,))}
     # Shuffled, not in order: the loop stops as soon as it has enough, so a
     # fixed order means the first subreddit answers every single time and the
     # rest are never read. Twenty-six of the first twenty-seven stories came
@@ -106,9 +137,12 @@ def _harvest(limit: int, floor: int, ceiling: int) -> list[dict]:
     for sub in random.sample(subs, len(subs)):
         if len(out) >= limit:
             break
+        # Per channel, like the seen set above. A shared cursor would start the
+        # second channel wherever the first one has already got to, and every
+        # story between the two positions would never be told in that language.
         row = db.execute(
-            "SELECT MIN(score) FROM seen WHERE sub=? AND score>=?",
-            (sub, floor)).fetchone()
+            "SELECT MIN(score) FROM seen WHERE sub=? AND lang=? AND score>=?",
+            (sub, OUTPUT_LANG, floor)).fetchone()
         top = min(row[0], ceiling) if row[0] else ceiling
         if top <= floor:
             log.info("r/%s: nothing left above %d, trying another sub", sub, floor)
@@ -172,16 +206,18 @@ def viral_due() -> bool:
         datetime.datetime.now(datetime.timezone.utc).date(),
         datetime.time.min, datetime.timezone.utc).timestamp()
     with _db() as db:
-        used = db.execute("SELECT COUNT(*) FROM seen WHERE score>=? AND ts>=?",
-                          (VIRAL_MIN_SCORE, start)).fetchone()[0]
+        used = db.execute(
+            "SELECT COUNT(*) FROM seen WHERE lang=? AND score>=? AND ts>=?",
+            (OUTPUT_LANG, VIRAL_MIN_SCORE, start)).fetchone()[0]
     return used < VIRAL_PER_DAY
 
 
 def mark_used(post_id: str, score: int, sub: str) -> None:
     """Call only after a successful render, otherwise the story is lost."""
     with _db() as db:
-        db.execute("INSERT OR IGNORE INTO seen VALUES (?,?,?,?)",
-                   (post_id, score, sub, time.time()))
+        db.execute("INSERT OR IGNORE INTO seen(id, score, sub, ts, lang) "
+                   "VALUES (?,?,?,?,?)",
+                   (post_id, score, sub, time.time(), OUTPUT_LANG))
 
 
 # ---------------------------------------------------------------- split stories
@@ -197,8 +233,11 @@ def queue_parts(post: dict, parts: list[tuple[str, str]], gender: str,
     now = time.time()
     with _db() as db:
         db.executemany(
-            "INSERT OR REPLACE INTO parts VALUES (?,?,?,?,?,?,?,?,?,0,0)",
-            [(post["id"], i, len(parts), title, body, gender, voice, post["sub"], now)
+            "INSERT OR REPLACE INTO parts(post_id, n, total, title, body, "
+            "gender, voice, sub, ts, done, tries, lang) "
+            "VALUES (?,?,?,?,?,?,?,?,?,0,0,?)",
+            [(post["id"], i, len(parts), title, body, gender, voice, post["sub"],
+              now, OUTPUT_LANG)
              for i, (title, body) in enumerate(parts, 1)])
     log.info("%s: queued %d parts", post["id"], len(parts))
 
@@ -207,16 +246,21 @@ _PART_COLS = ("post_id", "n", "total", "title", "body", "gender", "voice", "sub"
 
 
 def next_part() -> dict | None:
-    """The earliest unpublished part, or None.
+    """The earliest unpublished part of THIS channel's queue, or None.
 
     Strictly in order: a part clears only once it is UPLOADED, so part 2 is
     invisible here until part 1 is actually out. That is the whole guard against
     publishing a story's middle before its beginning.
+
+    Scoped to the channel because it decides what the next video is: without
+    that, an English run would render the Russian channel's part 2 and publish
+    it to an audience that never saw part 1 and could not read it anyway.
     """
     with _db() as db:
         row = db.execute(
             f"SELECT {','.join(_PART_COLS)} FROM parts "
-            "WHERE done=0 ORDER BY ts, n LIMIT 1").fetchone()
+            "WHERE done=0 AND lang=? ORDER BY ts, n LIMIT 1",
+            (OUTPUT_LANG,)).fetchone()
     return dict(zip(_PART_COLS, row)) if row else None
 
 
@@ -228,7 +272,8 @@ def finish_part(post_id: str, n: int) -> None:
     build it again from the text stored here.
     """
     with _db() as db:
-        db.execute("UPDATE parts SET done=1 WHERE post_id=? AND n=?", (post_id, n))
+        db.execute("UPDATE parts SET done=1 WHERE post_id=? AND n=? AND lang=?",
+                   (post_id, n, OUTPUT_LANG))
 
 
 MAX_TRIES = 3
@@ -242,12 +287,15 @@ def fail_part(post_id: str, n: int) -> None:
     Losing the tail of one story beats a channel that quietly stops publishing.
     """
     with _db() as db:
-        db.execute("UPDATE parts SET tries=tries+1 WHERE post_id=? AND n=?",
-                   (post_id, n))
-        row = db.execute("SELECT tries FROM parts WHERE post_id=? AND n=?",
-                         (post_id, n)).fetchone()
+        db.execute("UPDATE parts SET tries=tries+1 "
+                   "WHERE post_id=? AND n=? AND lang=?", (post_id, n, OUTPUT_LANG))
+        row = db.execute("SELECT tries FROM parts WHERE post_id=? AND n=? AND lang=?",
+                         (post_id, n, OUTPUT_LANG)).fetchone()
         if row and row[0] >= MAX_TRIES:
-            db.execute("UPDATE parts SET done=1 WHERE post_id=?", (post_id,))
+            # only this channel's copy of the story is dropped: the other one
+            # may be rendering fine, and its parts are different rows
+            db.execute("UPDATE parts SET done=1 WHERE post_id=? AND lang=?",
+                       (post_id, OUTPUT_LANG))
             log.error("%s part %d failed %d times - dropping the rest of the "
                       "story so the queue can move on", post_id, n, row[0])
 
@@ -260,7 +308,8 @@ def multipart_today() -> bool:
     """
     today = datetime.datetime.now(datetime.timezone.utc).date()
     with _db() as db:
-        rows = db.execute("SELECT ts FROM parts WHERE n=1").fetchall()
+        rows = db.execute("SELECT ts FROM parts WHERE n=1 AND lang=?",
+                          (OUTPUT_LANG,)).fetchall()
     return any(
         datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).date() == today
         for (ts,) in rows)
@@ -312,6 +361,19 @@ if __name__ == "__main__":
         with _db() as db:
             db.execute("DELETE FROM seen WHERE id LIKE '_selftest%'")
         assert viral_due()
+
+    # A story spent on one channel must stay available on the other - that is
+    # the whole point of keying `seen` by (id, lang), and the failure mode is
+    # invisible: the second channel would simply never be offered the post.
+    other = "en" if OUTPUT_LANG != "en" else "ru"
+    with _db() as db:
+        db.execute("INSERT OR REPLACE INTO seen(id, score, sub, ts, lang) "
+                   "VALUES (?,?,?,?,?)",
+                   ("_selftest_other", MIN_SCORE, "test", time.time(), other))
+        mine = {r[0] for r in db.execute("SELECT id FROM seen WHERE lang=?",
+                                         (OUTPUT_LANG,))}
+        assert "_selftest_other" not in mine, "the other channel's row leaked in"
+        db.execute("DELETE FROM seen WHERE id='_selftest_other'")
 
     posts = fetch(3)
     assert posts, "source returned nothing - check network / SUBREDDITS"
