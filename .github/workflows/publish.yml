@@ -55,6 +55,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write        # needed to push seen.db back
+      issues: write          # the TikTok draft reminder, see the last step
 
     env:
       # secret names match the .env keys one to one, so there is nothing to map
@@ -219,11 +220,31 @@ jobs:
       - name: Send it to TikTok drafts
         if: steps.gate.outputs.go == 'true' && inputs.dry_run != true
         continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -o pipefail
           if [ "${{ inputs.force }}" = "true" ]; then
-            python publish.py --next --force
+            python publish.py --next --force | tee /tmp/tiktok.out
           else
-            python publish.py --next
+            python publish.py --next | tee /tmp/tiktok.out
+          fi
+
+          # A draft is only half delivered: it sits in the inbox until a human
+          # taps publish, and the caption is not in there - the inbox endpoint
+          # takes the file and nothing else, so the text has to reach a phone
+          # some other way. An issue is the only channel that needs no second
+          # service and no second secret; GITHUB_TOKEN is already here. The
+          # assignee is what makes it arrive - a notification for one's own
+          # repo depends on the watch setting, an assignment does not.
+          # No CAPTION line means nothing was sent (allowance spent, queue
+          # empty, upload failed) and there is nothing to remind anyone about.
+          caption=$(sed -n '/^CAPTION:/,$p' /tmp/tiktok.out | tail -n +2)
+          if [ -n "$caption" ]; then
+            printf '%s\n' "$caption" | gh issue create \
+              --title "TikTok: опубликуй «$(printf '%s' "$caption" | head -1)»" \
+              --assignee "${{ github.repository_owner }}" \
+              --body-file -
           fi
 
       - name: Keep the state file
