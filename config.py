@@ -64,12 +64,31 @@ FISH_CTA_CUE = os.getenv("FISH_CTA_CUE", "[calm, no stress on the last word]")
 # base is enough - we use its timings, never its text.
 WHISPER_SIZE = os.getenv("WHISPER_SIZE", "base")
 
-SUBREDDITS = os.getenv("SUBREDDITS", "tifu").split(",")
+SUBREDDITS = [s.strip() for s in os.getenv("SUBREDDITS", "tifu").split(",") if s.strip()]
+# Subs that carry facts rather than personal stories. Searched alongside the
+# rest, but tagged: script.py writes a fact with a different prompt, because the
+# story prompt SKIPs anything that is not somebody's own experience - which is
+# every post in here. They are NOT a third source of stories, they are the same
+# pool with a flag on it, so a sub named twice would just be read twice.
+# Picked for having a readable body: r/todayilearned and r/interestingasfuck are
+# the obvious candidates and both are useless here - the fact is the title and
+# the body is a link, so there is nothing to narrate for 75 seconds.
+FACT_SUBREDDITS = [s.strip() for s in
+                   os.getenv("FACT_SUBREDDITS", "YouShouldKnow").split(",") if s.strip()]
 MIN_SCORE = int(os.getenv("MIN_SCORE", 3000))
 # Ceiling, not a typo. Above this a post went viral for Reddit-internal reasons
 # - memes, meta drama, war, death - not because the story is good. The band
 # between MIN and MAX is where ordinary relatable stories live.
 MAX_SCORE = int(os.getenv("MAX_SCORE", 30000))
+# ...with one deliberate exception a day. The ordinary band is chosen for being
+# relatable, which is not the same as being watched: a day of nothing but
+# ordinary stories has no peak in it. So the first video of each day is taken
+# from ABOVE the ceiling instead - the loudest thing the subs have, whatever
+# made it loud. Everything after it comes from the ordinary band as before.
+VIRAL_MIN_SCORE = int(os.getenv("VIRAL_MIN_SCORE", 40000))
+# Per UTC day, matching the allowance reset the rest of the pipeline uses. More
+# than one and the exception stops being one.
+VIRAL_PER_DAY = int(os.getenv("VIRAL_PER_DAY", 1))
 MIN_COMMENTS = int(os.getenv("MIN_COMMENTS", 100))
 TARGET_SEC = int(os.getenv("TARGET_SEC", 75))
 # hard floor: under this a video loses monetization eligibility, so main.py
@@ -98,7 +117,11 @@ HASHTAGS = os.getenv("HASHTAGS", "#reddit #redditstories #storytime #fyp")
 YT_CLIENT_ID = os.getenv("YT_CLIENT_ID", "")
 YT_CLIENT_SECRET = os.getenv("YT_CLIENT_SECRET", "")
 YT_REFRESH_TOKEN = os.getenv("YT_REFRESH_TOKEN", "")
-# Pool to draw a different set from per upload, so descriptions are not clones.
+# EXTRA generic tags, added to the pool in tags.py - not the pool itself any
+# more. tags.py owns the topic buckets and matches them against the text, and
+# anything in here that a topic can earn (#семья, #работа, #отношения) is
+# dropped rather than handed out at random: that is what put #отношения under
+# a story about a boss. What is left is the broad stuff, and it still counts.
 # The quotes .env needs around a "#..." value are literal in a CI variable, so
 # strip them here rather than publish a hashtag that starts with a quote mark.
 YT_HASHTAGS = [t for t in (h.strip().strip('"\'')
@@ -134,4 +157,11 @@ if __name__ == "__main__":
     assert SUBREDDITS and all(SUBREDDITS), "SUBREDDITS is empty"
     assert 15 <= TARGET_SEC <= 180, f"TARGET_SEC={TARGET_SEC} out of sane range"
     assert MIN_SEC < TARGET_SEC, "TARGET_SEC must aim above the MIN_SEC floor"
-    print(f"OK: {len(SUBREDDITS)} subs, {TARGET_SEC}s (floor {MIN_SEC}s), voice {TTS_VOICE}")
+    # The two bands must not overlap, or the same post is both an ordinary
+    # story and the day's one exception, and the cursors fight over it.
+    assert MIN_SCORE < MAX_SCORE <= VIRAL_MIN_SCORE, \
+        f"bands overlap: {MIN_SCORE} < {MAX_SCORE} <= {VIRAL_MIN_SCORE}"
+    assert not (set(FACT_SUBREDDITS) & set(SUBREDDITS)), \
+        "a sub in both lists is searched twice - keep the fact subs out of SUBREDDITS"
+    print(f"OK: {len(SUBREDDITS)} subs + {len(FACT_SUBREDDITS)} fact subs, "
+          f"{TARGET_SEC}s (floor {MIN_SEC}s), viral from {VIRAL_MIN_SCORE}")

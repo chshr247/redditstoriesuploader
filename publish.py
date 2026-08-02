@@ -36,10 +36,11 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+import tags as tags_          # `tags` is the local variable in caption()
 from config import (DB_PATH, DECLARE_AI, OUT_DIR, PART_GAP_HOURS,
                     TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET,
                     TIKTOK_MIN_GAP_HOURS, TIKTOK_PER_DAY, TIKTOK_REFRESH_TOKEN,
-                    YT_HASHTAGS, save_env)
+                    save_env)
 
 API = "https://open.tiktokapis.com/v2"
 AUTH_URL = "https://www.tiktok.com/v2/auth/authorize/"
@@ -186,14 +187,19 @@ def authorize() -> None:
     print(f"scopes granted: {r.get('scope')}")
 
 
-def caption(title: str, hashtags=None) -> str:
-    """Title plus a rotating slice of tags, trimmed to TikTok's limit.
+def caption(title: str, hashtags=None, body: str = "",
+            kind: str = "story") -> str:
+    """Title plus tags matched to the video, trimmed to TikTok's limit.
 
     Deliberately shorter than the YouTube description: TikTok shows two lines
     before the fold, so anything past the hook is scrolled past anyway.
+
+    Tags come from tags.py rather than from a shuffled flat pool - see the note
+    in youtube.description_for(). `body` is what lets them match on more than
+    the title; it sits in the meta file beside the mp4, so it costs nothing.
     """
-    pool = list(YT_HASHTAGS if hashtags is None else hashtags)
-    random.shuffle(pool)
+    pool = (tags_.pick(title, body, kind) if hashtags is None
+            else random.sample(list(hashtags), min(5, len(hashtags))))
     tags = " ".join(pool[:5])
     text = f"{title.strip()}\n\n{tags}"
     if len(text) > TITLE_MAX:
@@ -226,7 +232,8 @@ def _send(upload_url: str, path: Path, spans: list) -> None:
                 log.info("chunk %d-%d/%d -> %s", start, end, size, r.status)
 
 
-def upload(mp4, title: str, direct: bool = False, private: bool = True) -> str:
+def upload(mp4, title: str, direct: bool = False, private: bool = True,
+           body: str = "", kind: str = "story") -> str:
     """Upload the file. Returns publish_id. Drafts unless direct=True."""
     mp4 = Path(mp4)
     size = mp4.stat().st_size
@@ -239,7 +246,7 @@ def upload(mp4, title: str, direct: bool = False, private: bool = True) -> str:
 
     if direct:
         body = {"source_info": source, "post_info": {
-            "title": caption(title),
+            "title": caption(title, body=body, kind=kind),
             "privacy_level": "SELF_ONLY" if private else "PUBLIC_TO_EVERYONE",
             # TikTok's rules are their own - see DECLARE_AI in config.py
             "is_aigc": DECLARE_AI,
@@ -375,12 +382,14 @@ def upload_next(direct: bool = False, private: bool = True,
         return None
 
     title = part_prefix(meta) + (meta.get("title") or mp4.stem)
-    pid = upload(mp4, title, direct=direct, private=private)
+    pid = upload(mp4, title, direct=direct, private=private,
+                 body=meta.get("body", ""), kind=meta.get("kind", "story"))
     with _db() as db:
         db.execute("INSERT OR REPLACE INTO tiktok VALUES (?,?,?)",
                    (mp4.name, pid, time.time()))
     if not direct:
-        print("\nCAPTION:\n" + caption(title) + "\n")
+        print("\nCAPTION:\n" + caption(title, body=meta.get("body", ""),
+                                       kind=meta.get("kind", "story")) + "\n")
     return pid
 
 
@@ -396,6 +405,15 @@ if __name__ == "__main__":
     assert caption("Короткий").splitlines()[0] == "Короткий"
     assert len(caption("x" * 3000)) <= TITLE_MAX
     assert len({caption("Один и тот же") for _ in range(30)}) > 5, "tags must rotate"
+    # the body is matched too, not just the title - it is where most of the
+    # topic words are, and passing it is the whole reason caption() takes it
+    assert set(caption("Заголовок", body="Свекровь въехала в квартиру.").split()) \
+        & set(tags_.TOPIC_TAGS)
+    # ...and a fact carries nothing from the story pool that is not also a
+    # fact tag - #рекомендации belongs to both, #драма to exactly one
+    _story_only = set(tags_.GENERIC["story"]) - set(tags_.GENERIC["fact"])
+    assert not (set(caption("Факт", body="Кровь синеет из-за меди.",
+                            kind="fact").split()) & _story_only)
 
     # A spent allowance stops an ordinary video and never a part: the inbox
     # must not end up holding the middle of a story with no beginning.

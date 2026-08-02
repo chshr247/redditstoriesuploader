@@ -17,7 +17,8 @@ import urllib.parse
 import urllib.request
 
 import safety
-from config import (DB_PATH, MAX_SCORE, MIN_COMMENTS, MIN_SCORE, SUBREDDITS)
+from config import (DB_PATH, FACT_SUBREDDITS, MAX_SCORE, MIN_COMMENTS,
+                    MIN_SCORE, SUBREDDITS, VIRAL_MIN_SCORE, VIRAL_PER_DAY)
 
 API = "https://api.pullpush.io/reddit/search/submission/"
 UA = "StoryReader/0.1"
@@ -30,6 +31,12 @@ log = logging.getLogger(__name__)
 def _db():
     db = sqlite3.connect(DB_PATH)
     db.execute("CREATE TABLE IF NOT EXISTS seen(id TEXT PRIMARY KEY, score INT, sub TEXT)")
+    # When the post was used, added later: the daily viral slot has to know
+    # whether today already had one, and a row on its own cannot say. Rows
+    # written before this exists keep ts NULL, which reads as "not today" -
+    # correct for every one of them, since a run that old is over.
+    if "ts" not in {c[1] for c in db.execute("PRAGMA table_info(seen)")}:
+        db.execute("ALTER TABLE seen ADD COLUMN ts REAL")
     # A story split across videos: the TEXT of every part, written in one LLM
     # call and kept here until each part is published. It has to be text and not
     # files - a CI run throws out/ away with the runner, so part 2 is rendered
@@ -80,35 +87,45 @@ def _clean(s: str) -> str:
     return html.unescape(s).replace("&#x200B;", "").strip()
 
 
-def fetch(limit: int = 3) -> list[dict]:
-    """Return up to `limit` unused stories, highest score first."""
+def _harvest(limit: int, floor: int, ceiling: int) -> list[dict]:
+    """Up to `limit` unused posts scored inside [floor, ceiling), best first.
+
+    Every subreddit is walked top-down independently: the cursor for one is the
+    weakest post already used out of ITS OWN band, so a sub whose band is spent
+    returns nothing and the next one answers instead. That is what makes the
+    viral band survivable at all - no single sub has a year of 40k posts in it.
+    """
     db = _db()
     out = []
+    seen = {r[0] for r in db.execute("SELECT id FROM seen")}
     # Shuffled, not in order: the loop stops as soon as it has enough, so a
     # fixed order means the first subreddit answers every single time and the
     # rest are never read. Twenty-six of the first twenty-seven stories came
     # from one sub before this line existed.
-    for sub in random.sample(SUBREDDITS, len(SUBREDDITS)):
+    subs = SUBREDDITS + FACT_SUBREDDITS
+    for sub in random.sample(subs, len(subs)):
         if len(out) >= limit:
             break
-        # cursor: drop below the weakest post already used, but never above the
-        # MAX_SCORE ceiling - the viral stratum is not what we are after
-        row = db.execute("SELECT MIN(score) FROM seen WHERE sub=?", (sub,)).fetchone()
-        ceiling = min(row[0], MAX_SCORE) if row[0] else MAX_SCORE
+        row = db.execute(
+            "SELECT MIN(score) FROM seen WHERE sub=? AND score>=?",
+            (sub, floor)).fetchone()
+        top = min(row[0], ceiling) if row[0] else ceiling
+        if top <= floor:
+            log.info("r/%s: nothing left above %d, trying another sub", sub, floor)
+            continue
 
         params = {"subreddit": sub, "size": BATCH,
-                  "sort": "desc", "sort_type": "score", "score": f"<{ceiling}"}
+                  "sort": "desc", "sort_type": "score", "score": f"<{top}"}
         try:
             posts = _api(**params)
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
             log.warning("r/%s: source unavailable (%s), skipping", sub, e)
             continue
 
-        seen = {r[0] for r in db.execute("SELECT id FROM seen")}
         for p in posts:
             if len(out) >= limit:
                 break
-            if p["id"] in seen or p["score"] < MIN_SCORE or not _usable(p):
+            if p["id"] in seen or p["score"] < floor or not _usable(p):
                 continue
             title, text = _clean(p["title"]), _clean(p["selftext"])
             # cheapest possible gate: reject here and the story never costs an LLM call
@@ -117,16 +134,54 @@ def fetch(limit: int = 3) -> list[dict]:
                 log.info("skipping %s (%s)", p["id"], hit)
                 continue
             out.append({"id": p["id"], "sub": sub, "score": p["score"],
-                        "title": title, "text": text})
+                        "title": title, "text": text,
+                        "kind": "fact" if sub in FACT_SUBREDDITS else "story"})
         log.info("r/%s: %d candidates out of %d", sub, len(out), len(posts))
     db.close()
     return out
 
 
+def fetch(limit: int = 3) -> list[dict]:
+    """Return up to `limit` unused stories from the ordinary band."""
+    return _harvest(limit, MIN_SCORE, MAX_SCORE)
+
+
+def fetch_viral(limit: int = 3) -> list[dict]:
+    """The same, from above the MAX_SCORE ceiling: the day's one loud story.
+
+    Deliberately not filtered any further. What made a post reach 40k is the
+    point of taking it, so the choice of which loud story works is left to the
+    prompt's own SKIP gate, which throws out news and meta anyway.
+    """
+    return _harvest(limit, VIRAL_MIN_SCORE, 10_000_000)
+
+
+def viral_due() -> bool:
+    """True when today has not had its loud story yet.
+
+    Counted off `seen`, i.e. off stories that were actually rendered - a run
+    that fetched one and then failed on it has not spent the day's slot.
+
+    The day is the UTC one, like every other daily count here, and that is not
+    an accident: it turns over at 03:00 MSK, in the middle of the nightly gap
+    between the last run at 23:37 and the first at 10:07. A local day would
+    reset at 00:00 MSK - twenty minutes after the last run of the evening, so
+    the slot would open with nothing left awake to spend it.
+    """
+    start = datetime.datetime.combine(
+        datetime.datetime.now(datetime.timezone.utc).date(),
+        datetime.time.min, datetime.timezone.utc).timestamp()
+    with _db() as db:
+        used = db.execute("SELECT COUNT(*) FROM seen WHERE score>=? AND ts>=?",
+                          (VIRAL_MIN_SCORE, start)).fetchone()[0]
+    return used < VIRAL_PER_DAY
+
+
 def mark_used(post_id: str, score: int, sub: str) -> None:
     """Call only after a successful render, otherwise the story is lost."""
     with _db() as db:
-        db.execute("INSERT OR IGNORE INTO seen VALUES (?,?,?)", (post_id, score, sub))
+        db.execute("INSERT OR IGNORE INTO seen VALUES (?,?,?,?)",
+                   (post_id, score, sub, time.time()))
 
 
 # ---------------------------------------------------------------- split stories
@@ -245,6 +300,18 @@ if __name__ == "__main__":
         assert next_part() is None, "a hopeless story must not hold the queue"
         with _db() as db:
             db.execute("DELETE FROM parts WHERE post_id='_selftest'")
+
+    # the day's viral slot: due until a post from that band is marked used, and
+    # an ordinary one must not close it. Skipped when today already spent it -
+    # the fixture would then be testing a state the run is not in.
+    if viral_due():
+        mark_used("_selftest_small", MIN_SCORE, "test")
+        assert viral_due(), "an ordinary story must not spend the viral slot"
+        mark_used("_selftest_loud", VIRAL_MIN_SCORE, "test")
+        assert not viral_due(), "one loud story a day, and today had it"
+        with _db() as db:
+            db.execute("DELETE FROM seen WHERE id LIKE '_selftest%'")
+        assert viral_due()
 
     posts = fetch(3)
     assert posts, "source returned nothing - check network / SUBREDDITS"
