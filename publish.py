@@ -106,7 +106,9 @@ def access_token() -> str:
     }, form=True)
     if "access_token" not in r:
         raise RuntimeError(f"no access_token in response: {r}")
-    # TikTok rotates the refresh token; keep the new one or the next run fails
+    # Measured: the same token comes back every time. But the docs only promise
+    # it "may" be unchanged, so save a new one if it ever appears - the whole
+    # cost of being wrong here is a dead pipeline discovered a day later.
     if r.get("refresh_token") and r["refresh_token"] != TIKTOK_REFRESH_TOKEN:
         save_env("TIKTOK_REFRESH_TOKEN", r["refresh_token"])
         log.info("refresh token rotated, saved to .env")

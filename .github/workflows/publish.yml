@@ -167,12 +167,11 @@ jobs:
       # Same file, second platform. Never fatal: TikTok is a draft in an inbox,
       # YouTube is the published video, and losing the copy must not colour a
       # run that already shipped one.
-      # ponytail: the refresh token rotates and a runner cannot write the secret
-      # back, so this dies whenever TikTok stops honouring the old one - the
-      # symptom is this step warning while YouTube keeps working. Fix then is
-      # `python publish.py --auth` locally and updating TIKTOK_REFRESH_TOKEN;
-      # if that turns into a chore, have the step push the new value with
-      # `gh secret set` under a PAT.
+      # The refresh token does not rotate - measured 2026-08-02, every refresh
+      # returns the same value - so a static secret is enough. It does expire
+      # 365 days after it was issued, and that window does not slide, so around
+      # August 2027 this step starts warning while YouTube keeps working. Fix
+      # is one `python publish.py --auth` locally plus updating the secret.
       - name: Mirror it into TikTok drafts
         if: steps.gate.outputs.go == 'true' && inputs.dry_run != true
         continue-on-error: true
