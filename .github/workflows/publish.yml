@@ -189,8 +189,13 @@ jobs:
       # 365 days after it was issued, and that window does not slide, so around
       # August 2027 this step starts warning while YouTube keeps working. Fix
       # is one `python publish.py --auth` locally plus updating the secret.
+      # Runs on every passing gate, not only on tt: publish.py weighs its own
+      # allowance against what the file turned out to be, and a part of a split
+      # story is sent whether or not the count is spent. A YouTube-due run that
+      # makes part 1 while TikTok is exhausted would otherwise put the middle of
+      # a story into the inbox tomorrow with no beginning in front of it.
       - name: Send it to TikTok drafts
-        if: steps.gate.outputs.tt == 'true' && inputs.dry_run != true
+        if: steps.gate.outputs.go == 'true' && inputs.dry_run != true
         continue-on-error: true
         run: python publish.py --next
 

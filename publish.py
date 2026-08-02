@@ -317,12 +317,21 @@ def due() -> str:
     return "" if n < TIKTOK_PER_DAY else f"daily allowance reached ({n}/{TIKTOK_PER_DAY})"
 
 
-def upload_next(direct: bool = False, private: bool = True) -> str | None:
-    """Send one video. No schedule of its own - a draft is not a post.
+def _blocked(meta: dict, force: bool = False) -> str:
+    """Why this particular file may not go out today, empty if it may."""
+    return "" if force or meta.get("total", 0) > 1 else due()
 
-    youtube.py's allowance and gap decide when a video exists at all; this just
-    mirrors whatever came out of that into the inbox. Publishing it is a human
-    tapping a button, whenever they feel like it.
+
+def upload_next(direct: bool = False, private: bool = True,
+                force: bool = False) -> str | None:
+    """Send one video, if today's allowance still has room for it.
+
+    The allowance is checked here and not at the gate, because only here is it
+    known WHAT the file is - and a part of a split story ignores it. Skipping a
+    part leaves the inbox with the middle of a story and no beginning: the run
+    that made part 1 can hit a spent allowance while YouTube still had room,
+    and part 2 then arrives a day later against a fresh count. Three extra
+    drafts on a split day are cheaper than that.
     """
     from youtube import _meta_for, part_suffix     # local: avoids a cycle
 
@@ -333,6 +342,10 @@ def upload_next(direct: bool = False, private: bool = True) -> str | None:
 
     mp4 = queue[0]
     meta = _meta_for(mp4)
+    if reason := _blocked(meta, force):
+        log.info("%s", reason)
+        return None
+
     title = (meta.get("title") or mp4.stem) + part_suffix(meta)
     pid = upload(mp4, title, direct=direct, private=private)
     with _db() as db:
@@ -355,7 +368,22 @@ if __name__ == "__main__":
     assert caption("Короткий").splitlines()[0] == "Короткий"
     assert len(caption("x" * 3000)) <= TITLE_MAX
     assert len({caption("Один и тот же") for _ in range(30)}) > 5, "tags must rotate"
-    print("chunking and caption logic ok")
+
+    # A spent allowance stops an ordinary video and never a part: the inbox
+    # must not end up holding the middle of a story with no beginning.
+    # The restore is load-bearing - these run before every CLI command, and a
+    # leaked ceiling would leave the gate saying "due" forever.
+    _real_per_day = TIKTOK_PER_DAY
+    try:
+        TIKTOK_PER_DAY = 0
+        assert _blocked({"part": 2, "total": 2}) == "", "a part ignores the count"
+        assert _blocked({}), "an ordinary video obeys it"
+        assert _blocked({}, force=True) == "", "--force overrides it"
+        TIKTOK_PER_DAY = 10_000
+        assert _blocked({}) == "", "room left, nothing to block"
+    finally:
+        TIKTOK_PER_DAY = _real_per_day
+    print("chunking, caption and allowance logic ok")
 
     try:
         if "--auth" in sys.argv:
@@ -379,7 +407,8 @@ if __name__ == "__main__":
                 print("  queued", p.name)
         elif "--next" in sys.argv:
             print(upload_next(direct="--direct" in sys.argv,
-                              private="--public" not in sys.argv))
+                              private="--public" not in sys.argv,
+                              force="--force" in sys.argv))
         elif len(sys.argv) > 1 and sys.argv[1].endswith(".mp4"):
             mp4 = Path(sys.argv[1])
             # the real title lives beside the file, written by main.py; the stem
