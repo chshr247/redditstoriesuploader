@@ -4,18 +4,26 @@ name: publish
 # between runs except the state file, so out/ is thrown away with the runner.
 on:
   schedule:
-    # Every hour from 10:00 to 22:00 MSK. Fixed slots plus a retry hour looked
-    # cheaper and were not: the gap check is five hours, which was exactly the
-    # spacing between two of the slots, so any drift - a late cron, a manual
-    # run, a retry firing instead of its primary - pushed the next slot under
-    # the threshold and lost it whole. Asking every hour costs nothing on a
-    # public repo and lets the gap expire whenever it likes; the schedule is
-    # decided by youtube.py --due, not by the shape of this list.
+    # Twice an hour from 10:07 to 23:37 MSK. Fixed slots plus a retry hour
+    # looked cheaper and were not: the gap check is exactly the spacing between
+    # two of the slots, so any drift - a late cron, a manual run, a retry firing
+    # instead of its primary - pushed the next slot under the threshold and lost
+    # it whole. Asking often costs nothing on a public repo and lets the gap
+    # expire whenever it likes; the schedule is decided by youtube.py --due, not
+    # by the shape of this list.
     #
-    # Not around the clock on purpose: the daily allowance resets at midnight
-    # UTC, which is 03:00 MSK, and a 24-hour grid would spend the day's quota
-    # on uploads nobody is awake for.
-    - cron: "0 7-19 * * *"
+    # Not on the hour, and not thirteen times: GitHub queues scheduled runs on
+    # a best-effort basis and silently drops them under load, and :00 is the
+    # single most contended minute there is. Measured on this repo - 5 of 13
+    # firings on 2026-08-01, 1 of 3 by noon on 08-02, every one of them 24 to
+    # 56 minutes late. Off-peak minutes and two ticks an hour buy 28 attempts
+    # for the same nothing, which is what makes a dropped slot survivable.
+    #
+    # The tail runs to 23:37 rather than 22:00 so a day that started late still
+    # has somewhere to put its last upload. Still not around the clock: the
+    # daily allowance resets at midnight UTC, which is 03:00 MSK, and a 24-hour
+    # grid would spend the day's quota on uploads nobody is awake for.
+    - cron: "7,37 7-20 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -61,10 +69,15 @@ jobs:
       OUTPUT_LANG: ru
       TTS_BACKEND: fish
       SUBTITLE_FONT: Arial Black
-      # matches the code default. With an hourly grid this is the only thing
-      # setting the spacing between uploads, so it is a real knob now: three a
-      # day at five hours apart fills 10:00 to 20:00 MSK.
-      YT_MIN_GAP_HOURS: "5"
+      # Deliberately below the code default of 5. With the grid this is the only
+      # thing setting the spacing between uploads, so it is a real knob - and at
+      # five hours three uploads span ten of the twelve hours the window has,
+      # which means the first one has to land before noon or the third has
+      # nowhere to go. It did not: 2026-08-02 opened at 12:07 because GitHub
+      # dropped the two crons before it, seven minutes past the point where a
+      # third upload still fits. Only the day-2 allowance of 2 hid it. At 3.5
+      # the same three span seven hours and the slack goes from two to five.
+      YT_MIN_GAP_HOURS: "3.5"
       # The parts of one split story ignore the five hours and use this instead:
       # three parts at five-hour spacing would not fit inside one day's slots.
       PART_GAP_HOURS: "1.5"
