@@ -31,9 +31,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import source
+import tags as tags_          # `tags` is the local variable in description_for
 from config import (DB_PATH, DECLARE_AI, OUT_DIR, PART_GAP_HOURS, YT_CLIENT_ID,
-                    YT_CLIENT_SECRET, YT_HASHTAGS, YT_MIN_GAP_HOURS,
-                    YT_REFRESH_TOKEN, save_env)
+                    YT_CLIENT_SECRET, YT_MIN_GAP_HOURS, YT_REFRESH_TOKEN,
+                    save_env)
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -99,17 +100,22 @@ def title_for(text: str, prefix: str = "") -> str:
     return prefix + text + tag
 
 
-def description_for(title: str, body: str = "", hashtags=None) -> str:
-    """Teaser built from the story itself, plus a rotating slice of tags.
+def description_for(title: str, body: str = "", hashtags=None,
+                    kind: str = "story") -> str:
+    """Teaser built from the story itself, plus tags matched to it.
 
     The first line is the title and nothing else. A rotating opener used to sit
     above it - "Смотрите, что произошло." - and it only pushed the conflict
     below the fold: the two lines a viewer sees before tapping "ещё" were spent
     on boilerplate. The variation it was there for comes from the story's own
     opening anyway, which differs by construction.
+
+    The tags come from tags.py, which reads the text: a flat pool shuffled per
+    upload put #отношения under stories about a boss. An explicit `hashtags`
+    still overrides it wholesale, which is what the self-test uses.
     """
-    pool = list(YT_HASHTAGS if hashtags is None else hashtags)
-    random.shuffle(pool)
+    pool = (tags_.pick(title, body, kind) if hashtags is None
+            else random.sample(list(hashtags), min(5, len(hashtags))))
     tags = " ".join(pool[:5] + ["#Shorts"])
 
     teaser = " ".join(re.split(r"(?<=[.!?])\s+", body.strip())[:2]).strip()
@@ -118,7 +124,7 @@ def description_for(title: str, body: str = "", hashtags=None) -> str:
 
 
 def upload(mp4, title: str, private: bool = True, body: str = "",
-           prefix: str = "") -> str:
+           prefix: str = "", kind: str = "story") -> str:
     """Resumable upload in one PUT. Returns the video id."""
     # Google's docs say an unaudited project can only produce private videos.
     # Measured 2026-07-31 on this project: privacyStatus=public went straight
@@ -131,7 +137,7 @@ def upload(mp4, title: str, private: bool = True, body: str = "",
     meta = {
         "snippet": {
             "title": title_for(title, prefix),
-            "description": description_for(prefix + title, body),
+            "description": description_for(prefix + title, body, kind=kind),
             "categoryId": CATEGORY_PEOPLE_BLOGS,
         },
         "status": {
@@ -257,7 +263,8 @@ def show_text(mp4: Path | None = None) -> None:
         print("\nTITLE:")
         print(title_for(title, pfx))
         print("\nDESCRIPTION:")
-        print(description_for(pfx + title, meta.get("body", "")))
+        print(description_for(pfx + title, meta.get("body", ""),
+                              kind=meta.get("kind", "story")))
         print()
 
 
@@ -315,7 +322,8 @@ def upload_next(private: bool = True, force: bool = False) -> str | None:
 
     meta = _meta_for(mp4)
     yt_id = upload(mp4, meta.get("title") or mp4.stem, private=private,
-                   body=meta.get("body", ""), prefix=part_prefix(meta))
+                   body=meta.get("body", ""), prefix=part_prefix(meta),
+                   kind=meta.get("kind", "story"))
     with _db() as db:
         db.execute("INSERT OR REPLACE INTO uploaded VALUES (?,?,?)",
                    (mp4.name, yt_id, time.time()))
@@ -408,6 +416,17 @@ if __name__ == "__main__":
         # consecutive descriptions must not be clones
         variants = {description_for("Один и тот же", "Одно и то же.") for _ in range(30)}
         assert len(variants) > 5, "descriptions are not varying"
+
+        # the tags answer to the text: a boss story carries work tags, and a
+        # fact carries none of the story pool at all
+        boss = description_for("Начальник вычел из зарплаты за опоздание",
+                               "Директор орал при всём офисе.")
+        assert set(boss.split()) & set(tags_.TOPIC_TAGS), boss
+        fact = description_for("У осьминога три сердца", "Кровь синеет из-за меди.",
+                               kind="fact")
+        # #рекомендации is in both pools on purpose; #драма is in one
+        story_only = set(tags_.GENERIC["story"]) - set(tags_.GENERIC["fact"])
+        assert not (set(fact.split()) & story_only), fact
 
         assert daily_allowance(0) == 2 and daily_allowance(6) == 2
         assert daily_allowance(7) == 3 and daily_allowance(365) == 3, "3 is the ceiling"

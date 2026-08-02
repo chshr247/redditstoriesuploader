@@ -188,6 +188,44 @@ its own closing question, its own length. On top of them:
   parts of real story beat three parts of waiting. If the post cannot carry {n}
   full parts, write fewer - but never fewer than two."""
 
+# Appended to SYSTEM for a post from a fact subreddit. Appended rather than
+# written as a second prompt for the same reason MULTI is: the story prompt is
+# the cached prefix, and this way a fact video pays for the tail only.
+# It exists because the gate above SKIPs anything that is not somebody's own
+# experience, which is every post in a fact sub - without this the sub would be
+# fetched every run and rejected every run, at the price of an LLM call each time.
+FACT = """
+
+This post is not a story. It is a fact - a piece of knowledge, a curiosity, a
+thing most people have wrong - and it becomes a video of the same shape as the
+stories. Every rule above holds EXCEPT where this changes it.
+
+- The gate is different. SKIP it if:
+    the fact is not actually stated in the post, only linked to or implied
+    it is a news event, politics or activism
+    it needs a picture, a diagram or a formula to make sense
+    it is advice about using a website, an app or a service
+    someone who hears it once learns nothing they could repeat to another person
+  Keep it when hearing it makes you want to tell somebody: a number nobody would
+  believe, a thing everyone is sure of that is wrong, the reason behind something
+  ordinary that no one ever looks at twice.
+- Invent NOTHING. Every claim you speak has to be in the post. If the post does
+  not carry enough material for the word count, answer SKIP - do not pad it with
+  what you happen to know, and do not stretch a detail into a paragraph. Leave
+  out anything the post states vaguely rather than sharpening it yourself.
+- No narrator character: there is no "я" anywhere and nothing is anyone's own
+  experience. Third person, present tense. NARRATOR names only which voice reads
+  it, so answer male or female freely - no word of the text may depend on which.
+  The gender-agreement rule above therefore has nothing to agree with here.
+- Order: the fact itself in the first sentence, then how it came to be true, then
+  the part that is hardest to believe. Same ending as a story - land it, one short
+  line to settle it, then the closing question, which here asks whether they knew
+  or what they would have guessed.
+- Direct speech is rare in a fact and «angle quotes» are not required. The
+  delivery cues still are: put them on the numbers and the turns, [surprised],
+  [amused], [flatly] before the figure that sounds made up.
+- The TITLE rules are unchanged. The one fact it names is THE fact."""
+
 # A separator line the model actually produces, and nothing else: the prompt
 # bans markup, so a bare rule can only be the one we asked for.
 PART_SEP = re.compile(r"^\s*-{3,}\s*$", re.M)
@@ -205,7 +243,12 @@ def part_count(post: dict) -> int:
 
     A guess, made before spending an LLM call: the model still gets to answer
     with fewer parts if the material is thinner than the character count says.
+
+    A fact is never worth two: splitting one means holding the answer back for
+    hours, and nobody comes back for the second half of a piece of trivia.
     """
+    if post.get("kind") == "fact":
+        return 1
     return min(len(post["text"]) // PART_CHARS + 1, MAX_PARTS)
 
 
@@ -545,6 +588,8 @@ def write_script(post: dict, parts: int = 1) -> tuple[str, list[tuple[str, str]]
     client = OpenAI(api_key=OPENAI_API_KEY, base_url=LLM_BASE_URL or None)
     target = _target_words()
     system = SYSTEM.format(lang=LANG_NAME.get(OUTPUT_LANG, "English"))
+    if post.get("kind") == "fact":
+        system += FACT          # never both: part_count() keeps facts at one part
     if parts > 1:
         system += MULTI.format(n=parts)
     msgs = [
@@ -754,6 +799,13 @@ if __name__ == "__main__":
     _, p6, _ = _parse_parts("TITLE: Заголовок\n\n---\n\nТело. А вы бы смогли?",
                             {"title": "", "text": ""}, 1, 6)
     assert len(p6) == 1, p6
+
+    # a fact is one video whatever its length, and only a fact gets the FACT
+    # block - a story picking it up would be told to write itself in third person
+    long_post = {"text": "x" * (PART_CHARS * 3)}
+    assert part_count(long_post) > 1
+    assert part_count({**long_post, "kind": "fact"}) == 1
+    assert "Invent NOTHING" not in SYSTEM and "Invent NOTHING" in FACT
 
     print(f"logic ok: {OUTPUT_LANG}, {_wpm()} wpm, target {tw} words "
           f"for {TARGET_SEC}+{CTA_SEC} sec")
