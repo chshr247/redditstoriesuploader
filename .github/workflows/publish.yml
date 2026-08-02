@@ -247,6 +247,12 @@ jobs:
           # No CAPTION line means nothing was sent (allowance spent, queue
           # empty, upload failed) and there is nothing to remind anyone about.
           caption=$(sed -n '/^CAPTION:/,$p' /tmp/tiktok.out | tail -n +2)
+          # The CLI prints the publish_id after the caption, and the body of
+          # this issue is meant to be copied into TikTok whole - so the id has
+          # to go. It is the last line by construction: $() has already eaten
+          # the blank lines behind it. Dropping a line beats matching the id,
+          # which would tie this to the shape TikTok happens to give them.
+          caption=$(printf '%s\n' "$caption" | head -n -1)
           if [ -n "$caption" ]; then
             printf '%s\n' "$caption" | gh issue create \
               --title "TikTok: опубликуй «$(printf '%s' "$caption" | head -1)»" \
