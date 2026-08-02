@@ -75,14 +75,14 @@ def access_token() -> str:
 
 
 def part_suffix(meta: dict) -> str:
-    """" - Часть 2" for a split story, empty for an ordinary one.
+    """" - Часть 2/3" for a split story, empty for an ordinary one.
 
     Only the PUBLISHED text carries the marker. The narrated title card stays
     clean: it is the hook, and three syllables of "часть вторая" in front of it
     is dead air. In the feed the marker is the one thing telling a viewer there
     is more, which is why it has to survive the length limit below.
     """
-    return f" - Часть {meta['part']}" if meta.get("total", 0) > 1 else ""
+    return f" - Часть {meta['part']}/{meta['total']}" if meta.get("total", 0) > 1 else ""
 
 
 def title_for(text: str, suffix: str = "") -> str:
@@ -390,7 +390,7 @@ if __name__ == "__main__":
         # the part marker: absent for ordinary videos, and never trimmed away
         assert part_suffix({}) == "" and part_suffix({"part": 1, "total": 1}) == ""
         sfx = part_suffix({"part": 2, "total": 3})
-        assert sfx == " - Часть 2", sfx
+        assert sfx == " - Часть 2/3", sfx
         long = title_for("я" * 200, sfx)
         assert len(long) <= TITLE_MAX and long.endswith(sfx + " #Shorts"), long
         assert description_for("Заголовок" + sfx, "Текст.").startswith("Заголовок" + sfx)
