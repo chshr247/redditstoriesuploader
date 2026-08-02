@@ -52,6 +52,9 @@ jobs:
       YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
       YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
       YT_HASHTAGS: ${{ vars.YT_HASHTAGS }}
+      TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
+      TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
+      TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
       SUBREDDITS: ${{ vars.SUBREDDITS }}
       OUTPUT_LANG: ru
       TTS_BACKEND: fish
@@ -160,6 +163,20 @@ jobs:
             # rejecting us a second time over the time generation took
             python youtube.py --next --public --force
           fi
+
+      # Same file, second platform. Never fatal: TikTok is a draft in an inbox,
+      # YouTube is the published video, and losing the copy must not colour a
+      # run that already shipped one.
+      # ponytail: the refresh token rotates and a runner cannot write the secret
+      # back, so this dies whenever TikTok stops honouring the old one - the
+      # symptom is this step warning while YouTube keeps working. Fix then is
+      # `python publish.py --auth` locally and updating TIKTOK_REFRESH_TOKEN;
+      # if that turns into a chore, have the step push the new value with
+      # `gh secret set` under a PAT.
+      - name: Mirror it into TikTok drafts
+        if: steps.gate.outputs.go == 'true' && inputs.dry_run != true
+        continue-on-error: true
+        run: python publish.py --next
 
       - name: Keep the state file
         if: always() && steps.gate.outputs.go == 'true'

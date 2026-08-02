@@ -9,6 +9,15 @@ Two targets, and the difference matters:
       Posts for real. TikTok only grants that scope to audited apps.
 
 Default is drafts on purpose: nothing here posts publicly unless you ask.
+
+    python publish.py --auth              one-time, gets the refresh token
+    python publish.py --next              send the oldest unsent mp4 to drafts
+    python publish.py --status            what is queued, what already went
+    python publish.py out/<id>.mp4 [--direct] [--public]
+
+A draft carries no caption - TikTok's inbox endpoint takes the file and nothing
+else, the text is typed in the app at publish time. So --next prints the caption
+it would have used; that print is the only place it exists.
 """
 import hashlib
 import json
@@ -16,7 +25,9 @@ import logging
 import os
 import random
 import secrets
+import sqlite3
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -24,12 +35,17 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from config import (DECLARE_AI, TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET,
-                    TIKTOK_REFRESH_TOKEN, YT_HASHTAGS, save_env)
+from config import (DB_PATH, DECLARE_AI, OUT_DIR, TIKTOK_CLIENT_KEY,
+                    TIKTOK_CLIENT_SECRET, TIKTOK_REFRESH_TOKEN, YT_HASHTAGS,
+                    save_env)
 
 API = "https://open.tiktokapis.com/v2"
 AUTH_URL = "https://www.tiktok.com/v2/auth/authorize/"
-SCOPES = "video.publish,video.upload"
+# Drafts only by default, because that is all a sandbox client is given. Asking
+# for video.publish there does not fail at the token exchange - it fails at the
+# consent screen, before anything is granted. Add it to TIKTOK_SCOPES the day
+# the app is audited.
+SCOPES = os.getenv("TIKTOK_SCOPES", "video.upload")
 # Registered under the Login Kit product, and the app type decides what is
 # legal here: a desktop client may use http://localhost:<port>/..., a web one
 # must use https. Set TIKTOK_REDIRECT to whichever the app is configured with.
@@ -40,6 +56,23 @@ CHUNK = 10_000_000        # the size TikTok's own docs use in their example
 TITLE_MAX = 2200          # UTF-16 runes, per the direct-post reference
 
 log = logging.getLogger(__name__)
+
+
+def whoami() -> dict:
+    """Which account the refresh token actually belongs to.
+
+    Worth the extra scope: an upload that answers SEND_TO_USER_INBOX and never
+    shows up is either a sandbox that does not deliver or the wrong account
+    logged into the phone, and nothing else tells those two apart.
+    """
+    req = urllib.request.Request(
+        f"{API}/user/info/?fields=open_id,display_name",
+        headers={"Authorization": f"Bearer {access_token()}"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.load(r).get("data", {})
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"user/info -> {e.code}: {e.read().decode()[:400]}") from None
 
 
 def _post(url: str, body: dict, token: str = "", form: bool = False) -> dict:
@@ -240,6 +273,52 @@ def status(publish_id: str) -> dict:
     return r.get("data", r)
 
 
+# --------------------------------------------------------------------- queue
+
+def _db():
+    # Separate table from youtube's `uploaded`: the two platforms are not in
+    # step. A video can sit in the TikTok inbox for days before it is published
+    # by hand, and a failed TikTok run must not hide the video from YouTube.
+    db = sqlite3.connect(DB_PATH)
+    db.execute("CREATE TABLE IF NOT EXISTS tiktok("
+               "file TEXT PRIMARY KEY, publish_id TEXT, ts REAL)")
+    return db
+
+
+def pending() -> list:
+    """Rendered videos not yet sent to TikTok, oldest first."""
+    with _db() as db:
+        done = {r[0] for r in db.execute("SELECT file FROM tiktok")}
+    return sorted((p for p in OUT_DIR.glob("*.mp4") if p.name not in done),
+                  key=lambda p: p.stat().st_mtime)
+
+
+def upload_next(direct: bool = False, private: bool = True) -> str | None:
+    """Send one video. No schedule of its own - a draft is not a post.
+
+    youtube.py's allowance and gap decide when a video exists at all; this just
+    mirrors whatever came out of that into the inbox. Publishing it is a human
+    tapping a button, whenever they feel like it.
+    """
+    from youtube import _meta_for, part_suffix     # local: avoids a cycle
+
+    queue = pending()
+    if not queue:
+        log.info("nothing pending for TikTok")
+        return None
+
+    mp4 = queue[0]
+    meta = _meta_for(mp4)
+    title = (meta.get("title") or mp4.stem) + part_suffix(meta)
+    pid = upload(mp4, title, direct=direct, private=private)
+    with _db() as db:
+        db.execute("INSERT OR REPLACE INTO tiktok VALUES (?,?,?)",
+                   (mp4.name, pid, time.time()))
+    if not direct:
+        print("\nCAPTION:\n" + caption(title) + "\n")
+    return pid
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -257,6 +336,20 @@ if __name__ == "__main__":
     try:
         if "--auth" in sys.argv:
             authorize()
+        elif "--whoami" in sys.argv:
+            print(whoami())
+        elif "--status" in sys.argv:
+            with _db() as db:
+                rows = db.execute(
+                    "SELECT file, publish_id FROM tiktok ORDER BY ts DESC").fetchall()
+            print(f"{len(rows)} sent, {len(pending())} queued")
+            for f, pid in rows[:5]:
+                print("  sent  ", f, pid)
+            for p in pending()[:10]:
+                print("  queued", p.name)
+        elif "--next" in sys.argv:
+            print(upload_next(direct="--direct" in sys.argv,
+                              private="--public" not in sys.argv))
         elif len(sys.argv) > 1 and sys.argv[1].endswith(".mp4"):
             mp4 = Path(sys.argv[1])
             # the real title lives beside the file, written by main.py; the stem
@@ -268,7 +361,8 @@ if __name__ == "__main__":
                          private="--public" not in sys.argv)
             print(pid, status(pid))
         else:
-            print("usage: python publish.py --auth | out/<id>.mp4 [--direct] [--public]")
+            print("usage: python publish.py --auth | --whoami | --status | "
+                  "--next | out/<id>.mp4 [--direct] [--public]")
     except RuntimeError as e:
         print(f"\n{e}")
         sys.exit(1)
