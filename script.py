@@ -118,7 +118,7 @@ Rules:
   Do not open the title with a verb in the imperative addressed to the viewer, and do not write it as advice.
   It is read aloud, so no abbreviations, no brackets, no "(20F)" - write genders as words if they matter at all.
   Numbers in the TITLE are DIGITS, always, and they carry NO currency: "счёт на 8000", never "8000 рублей" and never "800 долларов". A digit is the one thing the eye catches while scrolling; "восемьсот" is read as just more text, and the currency word is three syllables spent pushing the fact past the cut. Write the figure out in full - "20000", never "20 тысяч". Do not convert a sum into another currency either: drop the unit and keep the number the source gives.
-- The narration ANSWERS the title inside its first two sentences - how the thing in the title came about, or what it turned out to be. The title is a promise and the viewer is sitting on it; everything else can wait, that answer cannot. Do not repeat the title word for word, answer it.
+- The narration OPENS on the moment the title names, inside its first two sentences, and only then goes back for the setup: "Соседка положила чек на стол и потребовала вернуть ей деньги за продукты. А началось всё с того, что дети затеяли торговать выпечкой." Events do not have to run in the order they happened - the title is a promise, and a viewer who has to wait seventy seconds for it leaves long before it is paid. Do not repeat the title word for word: land the scene it points at, with the detail the title left out.
 - First person, past tense, short plain sentences.
 - Cut everything that does not move the plot: greetings, "edit:", "TL;DR", thanks, award mentions.
 - In the narration write numbers as words. Only the TITLE uses digits.
@@ -157,14 +157,22 @@ its own closing question, its own length. On top of them:
 - Part 1 gives a stranger everything they need. Each later part opens with ONE
   short line saying where things stopped, then carries on - whoever is watching
   may never have seen the part before it.
-- Each part's TITLE names the biggest fact of THAT part and never how it turns
-  out. This is the same rule as above and it is the one most easily lost on the
-  parts after the first, where the obvious title is the payoff:
-    "Официантка вынесла клиенту весы прямо в зал" — works
-    "Весы показали полный килограмм, и клиент ушёл ни с чем" — WRONG, the
-    whole reason to watch is gone before the video starts
+- A part's TITLE comes from the OPENING of that part, never from its end. Take
+  the biggest fact among the events the part starts with - one the narration
+  reaches within its first two sentences, so the promise is paid immediately.
+  The cliffhanger the part stops on is the one thing the title may never name:
+  it has not happened yet when the viewer reads the title, and naming it means
+  the whole part is spent waiting for the line they already saw.
+    "Официантка вынесла клиенту весы прямо в зал" — works, it happens early and
+    the narration lands on it at once
+    "Соседка пришла с чеком и потребовала деньги" — WRONG if that is the scene
+    the part ENDS on: seventy seconds of video before the title comes true
+    "Весы показали полный килограмм, и клиент ушёл ни с чем" — WRONG, it is the
+    payoff, so the whole reason to watch is gone before the video starts
   Most of the people who open a later part came from the one before it. Giving
   them the answer in the title is telling them not to bother.
+- For a later part the recap line does not count as one of those first two
+  sentences: say where things stopped, then answer the title, then carry on.
 - Every part except the last ends on a cliffhanger: stop one beat BEFORE the
   answer, at the moment the outcome is about to land, on a finished sentence.
   The stop IS the cliffhanger. So these parts carry NO closing question and no
