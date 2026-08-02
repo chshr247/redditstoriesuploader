@@ -39,8 +39,8 @@ from pathlib import Path
 import tags as tags_          # `tags` is the local variable in caption()
 from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL, OUT_DIR,
                     PART_GAP_HOURS, TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET,
-                    TIKTOK_MIN_GAP_HOURS, TIKTOK_PER_DAY, TIKTOK_REFRESH_KEY,
-                    TIKTOK_REFRESH_TOKEN, save_env)
+                    TIKTOK_ENABLED, TIKTOK_MIN_GAP_HOURS, TIKTOK_PER_DAY,
+                    TIKTOK_REFRESH_KEY, TIKTOK_REFRESH_TOKEN, chan_key, save_env)
 
 API = "https://open.tiktokapis.com/v2"
 AUTH_URL = "https://www.tiktok.com/v2/auth/authorize/"
@@ -346,6 +346,8 @@ def due() -> str:
     shortly after. Two drafts forty minutes apart are two videos forty minutes
     apart, which is the thing the gap exists to prevent.
     """
+    if not TIKTOK_ENABLED:
+        return f"TikTok is paused for this channel ({chan_key('TIKTOK_ENABLED')}=0)"
     n = sent_today()
     if n >= TIKTOK_PER_DAY:
         return f"daily allowance reached ({n}/{TIKTOK_PER_DAY})"
@@ -357,6 +359,12 @@ def due() -> str:
 
 def _blocked(meta: dict, force: bool = False) -> str:
     """Why this particular file may not go out now, empty if it may."""
+    # Ahead of --force and ahead of the part exemption below, both deliberately.
+    # A paused channel that still delivers when a run is forced, or whenever a
+    # story happens to be split, is not paused - and the part exemption is
+    # exactly the case a quota of zero would have missed.
+    if not TIKTOK_ENABLED:
+        return f"TikTok is paused for this channel ({chan_key('TIKTOK_ENABLED')}=0)"
     if force:
         return ""
     if meta.get("total", 0) > 1:
@@ -441,7 +449,26 @@ if __name__ == "__main__":
     # leaked ceiling would leave the gate saying "due" forever.
     _real_per_day, _real_gap = TIKTOK_PER_DAY, TIKTOK_MIN_GAP_HOURS
     _real_part_gap = PART_GAP_HOURS
+    _real_enabled = TIKTOK_ENABLED
     try:
+        # A paused channel sends nothing at all: not an ordinary video, not a
+        # part of a split story, and not on --force. The part is the one that
+        # matters - it is exempt from the daily count, so pausing by setting
+        # the count to zero would have kept delivering the middles of stories.
+        TIKTOK_ENABLED = False
+        assert _blocked({}), "a paused channel must refuse"
+        assert _blocked({}, force=True), "--force must not resume a paused channel"
+        assert _blocked({"part": 2, "total": 2}), "a part must not slip past a pause"
+        assert "paused" in due(), due()
+        TIKTOK_ENABLED = True
+    finally:
+        TIKTOK_ENABLED = _real_enabled
+    try:
+        # These are about the count and the gap, so they run as an ENABLED
+        # channel whatever this one is - otherwise the whole block starts
+        # failing the day a channel is paused, which is when it is least
+        # helpful to lose the tests.
+        TIKTOK_ENABLED = True
         TIKTOK_MIN_GAP_HOURS = PART_GAP_HOURS = 0   # the count is these four
         TIKTOK_PER_DAY = 0
         assert _blocked({"part": 2, "total": 2}) == "", "a part ignores the count"
@@ -463,6 +490,7 @@ if __name__ == "__main__":
     finally:
         TIKTOK_PER_DAY, TIKTOK_MIN_GAP_HOURS = _real_per_day, _real_gap
         PART_GAP_HOURS = _real_part_gap
+        TIKTOK_ENABLED = _real_enabled
     print("chunking, caption and allowance logic ok")
 
     try:
@@ -481,7 +509,8 @@ if __name__ == "__main__":
                                   "WHERE channel=? ORDER BY ts DESC",
                                   (CHANNEL,)).fetchall()
             print(f"channel {CHANNEL}: {len(rows)} sent, "
-                  f"{sent_today()}/{TIKTOK_PER_DAY} today, {len(pending())} queued")
+                  f"{sent_today()}/{TIKTOK_PER_DAY} today, {len(pending())} queued"
+                  + ("" if TIKTOK_ENABLED else "  [PAUSED]"))
             for f, pid in rows[:5]:
                 print("  sent  ", f, pid)
             for p in pending()[:10]:

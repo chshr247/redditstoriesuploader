@@ -109,6 +109,11 @@ jobs:
       FISH_VOICES_MALE_EN: ${{ vars.FISH_VOICES_MALE_EN }}
       FISH_VOICES_FEMALE_EN: ${{ vars.FISH_VOICES_FEMALE_EN }}
       YT_HASHTAGS_EN: ${{ vars.YT_HASHTAGS_EN }}
+      # Pause TikTok for one channel without touching YouTube: set the variable
+      # to 0. Unset arrives here as an empty string, which config.py reads as
+      # "not set" and therefore as enabled.
+      TIKTOK_ENABLED: ${{ vars.TIKTOK_ENABLED }}
+      TIKTOK_ENABLED_EN: ${{ vars.TIKTOK_ENABLED_EN }}
       # drafts a day; above YouTube's allowance on purpose, see config.py
       TIKTOK_PER_DAY: ${{ vars.TIKTOK_PER_DAY || '4' }}
       # A real knob for the same reason YT_MIN_GAP_HOURS is one, and tunable

@@ -51,7 +51,14 @@ def chan_key(key: str, shared: bool = False) -> str:
 
 
 def chan_env(key: str, default: str = "", shared: bool = False) -> str:
-    return os.getenv(chan_key(key, shared), default)
+    """Empty counts as absent, which is not pedantry.
+
+    An unset repository variable does not arrive unset: `${{ vars.X }}` renders
+    to an empty string, so the env var exists and is "". os.getenv's default
+    never fires, and a key whose default matters - YT_HASHTAGS, TIKTOK_ENABLED -
+    silently comes out empty instead.
+    """
+    return os.getenv(chan_key(key, shared), "") or default
 
 
 def chan_file(base: str) -> str:
@@ -160,6 +167,13 @@ TIKTOK_CLIENT_KEY = chan_env("TIKTOK_CLIENT_KEY", shared=True)
 TIKTOK_CLIENT_SECRET = chan_env("TIKTOK_CLIENT_SECRET", shared=True)
 TIKTOK_REFRESH_TOKEN = chan_env("TIKTOK_REFRESH_TOKEN")
 TIKTOK_REFRESH_KEY = chan_key("TIKTOK_REFRESH_TOKEN")   # for errors and rotation
+# A pause switch per channel, and a real one rather than a quota of zero:
+# publish.py lets a PART of a split story past the daily count on purpose, so
+# TIKTOK_PER_DAY=0 would still deliver the middle of a story. This is checked
+# ahead of everything, --force included - a pause that --force overrides is not
+# a pause. Sending one file by hand (`python publish.py out/x.mp4`) still works.
+TIKTOK_ENABLED = chan_env("TIKTOK_ENABLED", "1").strip().lower() not in (
+    "0", "false", "no", "off")
 # Drafts a day, and deliberately above YouTube's 2-3: nothing here is published
 # automatically, so the ceiling is not about flooding a feed - it is how many
 # stories a day the pipeline is allowed to spend. Runs where only this is due
