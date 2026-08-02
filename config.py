@@ -85,6 +85,13 @@ TIKTOK_REFRESH_TOKEN = os.getenv("TIKTOK_REFRESH_TOKEN", "")
 # stories a day the pipeline is allowed to spend. Runs where only this is due
 # produce a TikTok-only video; YouTube keeps its own, slower allowance.
 TIKTOK_PER_DAY = int(os.getenv("TIKTOK_PER_DAY", 4))
+# A draft has no publish time of its own, which is why this was a count and
+# nothing else for a while. That was wrong: the notification is what a human
+# acts on, and two drafts forty minutes apart become two videos forty minutes
+# apart in the same feed - measured 2026-08-02, 11:34 and 12:11. Lower than
+# YouTube's gap because the count here is higher and the day still has to fit:
+# four drafts three hours apart span twelve of the grid's thirteen hours.
+TIKTOK_MIN_GAP_HOURS = float(os.getenv("TIKTOK_MIN_GAP_HOURS", 3))
 HASHTAGS = os.getenv("HASHTAGS", "#reddit #redditstories #storytime #fyp")
 
 # --- YouTube (https://console.cloud.google.com -> OAuth client, type Desktop) ---

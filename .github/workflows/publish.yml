@@ -75,6 +75,9 @@ jobs:
       TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
       # drafts a day; above YouTube's allowance on purpose, see config.py
       TIKTOK_PER_DAY: ${{ vars.TIKTOK_PER_DAY || '4' }}
+      # A real knob for the same reason YT_MIN_GAP_HOURS is one, and tunable
+      # here rather than in config.py so changing it is a variable, not a push.
+      TIKTOK_MIN_GAP_HOURS: ${{ vars.TIKTOK_MIN_GAP_HOURS || '3' }}
       SUBREDDITS: ${{ vars.SUBREDDITS }}
       OUTPUT_LANG: ru
       TTS_BACKEND: fish
