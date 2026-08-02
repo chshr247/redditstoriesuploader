@@ -94,6 +94,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The last step rebases when a push races one of yours, and a rebase
+          # needs the merge base. The default depth of 1 does not have it and
+          # the fetch that would deepen it does not happen on its own. Whole
+          # history is 500 KiB - cheaper than the branch that has to handle
+          # not having it.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -255,7 +262,24 @@ jobs:
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add seen.db
             git commit -m "state: used stories and uploads [skip ci]"
-            git push
+            # The upload already happened. If this commit does not land, the
+            # gap and the daily count are next computed from a state that has
+            # never heard of it - youtube.py reads since_last_h straight out of
+            # this file - and the next run publishes immediately. A bare push
+            # loses that race against any commit pushed by hand during the run.
+            # Retry, but never resolve a conflict automatically: seen.db is a
+            # binary sqlite file, "ours" would silently drop whichever side is
+            # not the runner's, and this file gets edited by hand too.
+            for _ in 1 2 3; do
+              if git push; then exit 0; fi
+              git pull --rebase || {
+                git rebase --abort || true
+                echo "::error::seen.db conflicts with origin/main - the upload above is NOT recorded, reconcile by hand"
+                exit 1
+              }
+            done
+            echo "::error::seen.db still unpushed after 3 tries - the upload above is NOT recorded"
+            exit 1
           else
             echo "seen.db unchanged"
           fi
