@@ -55,6 +55,8 @@ jobs:
       TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
       TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
       TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
+      # drafts a day; above YouTube's allowance on purpose, see config.py
+      TIKTOK_PER_DAY: ${{ vars.TIKTOK_PER_DAY || '4' }}
       SUBREDDITS: ${{ vars.SUBREDDITS }}
       OUTPUT_LANG: ru
       TTS_BACKEND: fish
@@ -80,6 +82,11 @@ jobs:
       # otherwise thirteen runs a day each pay for an apt-get first and find
       # out afterwards that they had nothing to do. Only python-dotenv is
       # needed here: youtube.py --due reads seen.db and the env, nothing else.
+      # Two allowances, one run. YouTube is the slow one - 2-3 a day, five hours
+      # apart, because those go public the moment they land. TikTok only fills
+      # an inbox, so it runs on a plain daily count and a higher ceiling. A run
+      # happens if EITHER is due; the video is made once and offered to whoever
+      # asked for it.
       - name: Is an upload due?
         id: gate
         run: |
@@ -88,12 +95,20 @@ jobs:
           # empty, so a scheduled run can never take this branch by accident.
           if [ "${{ inputs.force }}" = "true" ]; then
             echo "::warning::forced - allowance and gap check bypassed"
-            echo "go=true" >> "$GITHUB_OUTPUT"
-          elif [ "${{ inputs.dry_run }}" = "true" ] || python youtube.py --due; then
+            yt=true; tt=true
+          elif [ "${{ inputs.dry_run }}" = "true" ]; then
+            yt=true; tt=true
+          else
+            if python youtube.py --due; then yt=true; else yt=false; fi
+            if python publish.py --due; then tt=true; else tt=false; fi
+          fi
+          echo "yt=$yt" >> "$GITHUB_OUTPUT"
+          echo "tt=$tt" >> "$GITHUB_OUTPUT"
+          if [ "$yt" = "true" ] || [ "$tt" = "true" ]; then
             echo "go=true" >> "$GITHUB_OUTPUT"
           else
             echo "go=false" >> "$GITHUB_OUTPUT"
-            echo "not due yet, skipping this run"
+            echo "neither platform is due, skipping this run"
           fi
 
       - name: Install ffmpeg and the subtitle font
@@ -158,10 +173,12 @@ jobs:
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             echo "dry run - rendered but not uploaded"
             python youtube.py --text
-          else
+          elif [ "${{ steps.gate.outputs.yt }}" = "true" ]; then
             # the gate passed minutes ago; --force stops the same check from
             # rejecting us a second time over the time generation took
             python youtube.py --next --public --force
+          else
+            echo "TikTok's turn only - this one is not going to YouTube"
           fi
 
       # Same file, second platform. Never fatal: TikTok is a draft in an inbox,
@@ -172,8 +189,8 @@ jobs:
       # 365 days after it was issued, and that window does not slide, so around
       # August 2027 this step starts warning while YouTube keeps working. Fix
       # is one `python publish.py --auth` locally plus updating the secret.
-      - name: Mirror it into TikTok drafts
-        if: steps.gate.outputs.go == 'true' && inputs.dry_run != true
+      - name: Send it to TikTok drafts
+        if: steps.gate.outputs.tt == 'true' && inputs.dry_run != true
         continue-on-error: true
         run: python publish.py --next
 

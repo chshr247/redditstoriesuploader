@@ -12,6 +12,7 @@ Default is drafts on purpose: nothing here posts publicly unless you ask.
 
     python publish.py --auth              one-time, gets the refresh token
     python publish.py --next              send the oldest unsent mp4 to drafts
+    python publish.py --due               may another draft go out today?
     python publish.py --status            what is queued, what already went
     python publish.py out/<id>.mp4 [--direct] [--public]
 
@@ -36,8 +37,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from config import (DB_PATH, DECLARE_AI, OUT_DIR, TIKTOK_CLIENT_KEY,
-                    TIKTOK_CLIENT_SECRET, TIKTOK_REFRESH_TOKEN, YT_HASHTAGS,
-                    save_env)
+                    TIKTOK_CLIENT_SECRET, TIKTOK_PER_DAY, TIKTOK_REFRESH_TOKEN,
+                    YT_HASHTAGS, save_env)
 
 API = "https://open.tiktokapis.com/v2"
 AUTH_URL = "https://www.tiktok.com/v2/auth/authorize/"
@@ -295,6 +296,27 @@ def pending() -> list:
                   key=lambda p: p.stat().st_mtime)
 
 
+def sent_today() -> int:
+    """Drafts sent on today's UTC calendar day - same clock youtube.py uses."""
+    from youtube import _utc_date
+
+    today = _utc_date(time.time())
+    with _db() as db:
+        rows = db.execute("SELECT ts FROM tiktok").fetchall()
+    return sum(1 for (ts,) in rows if _utc_date(ts) == today)
+
+
+def due() -> str:
+    """Empty string if another draft may go out today, else why it may not.
+
+    A count and no gap, unlike YouTube. A draft has no publish time: it waits in
+    the inbox until a human posts it, so spacing the deliveries spaces nothing.
+    The only thing worth capping is how many stories a day the pipeline spends.
+    """
+    n = sent_today()
+    return "" if n < TIKTOK_PER_DAY else f"daily allowance reached ({n}/{TIKTOK_PER_DAY})"
+
+
 def upload_next(direct: bool = False, private: bool = True) -> str | None:
     """Send one video. No schedule of its own - a draft is not a post.
 
@@ -340,11 +362,17 @@ if __name__ == "__main__":
             authorize()
         elif "--whoami" in sys.argv:
             print(whoami())
+        elif "--due" in sys.argv:
+            # exit code is the point: the workflow gate asks before it spends
+            reason = due()
+            print(reason or "due")
+            sys.exit(1 if reason else 0)
         elif "--status" in sys.argv:
             with _db() as db:
                 rows = db.execute(
                     "SELECT file, publish_id FROM tiktok ORDER BY ts DESC").fetchall()
-            print(f"{len(rows)} sent, {len(pending())} queued")
+            print(f"{len(rows)} sent, {sent_today()}/{TIKTOK_PER_DAY} today, "
+                  f"{len(pending())} queued")
             for f, pid in rows[:5]:
                 print("  sent  ", f, pid)
             for p in pending()[:10]:
@@ -364,7 +392,7 @@ if __name__ == "__main__":
             print(pid, status(pid))
         else:
             print("usage: python publish.py --auth | --whoami | --status | "
-                  "--next | out/<id>.mp4 [--direct] [--public]")
+                  "--due | --next | out/<id>.mp4 [--direct] [--public]")
     except RuntimeError as e:
         print(f"\n{e}")
         sys.exit(1)
