@@ -333,7 +333,7 @@ def upload_next(direct: bool = False, private: bool = True,
     and part 2 then arrives a day later against a fresh count. Three extra
     drafts on a split day are cheaper than that.
     """
-    from youtube import _meta_for, part_suffix     # local: avoids a cycle
+    from youtube import _meta_for, part_prefix     # local: avoids a cycle
 
     queue = pending()
     if not queue:
@@ -346,7 +346,7 @@ def upload_next(direct: bool = False, private: bool = True,
         log.info("%s", reason)
         return None
 
-    title = (meta.get("title") or mp4.stem) + part_suffix(meta)
+    title = part_prefix(meta) + (meta.get("title") or mp4.stem)
     pid = upload(mp4, title, direct=direct, private=private)
     with _db() as db:
         db.execute("INSERT OR REPLACE INTO tiktok VALUES (?,?,?)",
@@ -413,9 +413,9 @@ if __name__ == "__main__":
             mp4 = Path(sys.argv[1])
             # the real title lives beside the file, written by main.py; the stem
             # is only a post id, which is what the caption used to say
-            from youtube import _meta_for, part_suffix
+            from youtube import _meta_for, part_prefix
             meta = _meta_for(mp4)
-            pid = upload(mp4, (meta.get("title") or mp4.stem) + part_suffix(meta),
+            pid = upload(mp4, part_prefix(meta) + (meta.get("title") or mp4.stem),
                          direct="--direct" in sys.argv,
                          private="--public" not in sys.argv)
             print(pid, status(pid))

@@ -74,29 +74,29 @@ def access_token() -> str:
     return r["access_token"]
 
 
-def part_suffix(meta: dict) -> str:
-    """" - Часть 2/3" for a split story, empty for an ordinary one.
+def part_prefix(meta: dict) -> str:
+    """"Часть 2/3 - " for a split story, empty for an ordinary one.
 
     Only the PUBLISHED text carries the marker. The narrated title card stays
     clean: it is the hook, and three syllables of "часть вторая" in front of it
-    is dead air. In the feed the marker is the one thing telling a viewer there
-    is more, which is why it has to survive the length limit below.
+    is dead air. In the feed the marker leads the title, which is why it has to
+    survive the length limit below.
     """
-    return f" - Часть {meta['part']}/{meta['total']}" if meta.get("total", 0) > 1 else ""
+    return f"Часть {meta['part']}/{meta['total']} - " if meta.get("total", 0) > 1 else ""
 
 
-def title_for(text: str, suffix: str = "") -> str:
+def title_for(text: str, prefix: str = "") -> str:
     """#Shorts is what routes the upload into the Shorts shelf.
 
-    The suffix is trimmed around, never trimmed off: a twelve-word title plus a
+    The prefix is trimmed around, never trimmed off: a twelve-word title plus a
     part marker plus the tag overshoots TITLE_MAX, and the marker is the part a
     viewer needs most.
     """
-    tag = suffix + " #Shorts"
+    tag = " #Shorts"
     text = text.strip()
-    if len(text) + len(tag) > TITLE_MAX:
-        text = text[:TITLE_MAX - len(tag) - 3].rstrip() + "..."
-    return text + tag
+    if len(prefix) + len(text) + len(tag) > TITLE_MAX:
+        text = text[:TITLE_MAX - len(prefix) - len(tag) - 3].rstrip() + "..."
+    return prefix + text + tag
 
 
 def description_for(title: str, body: str = "", hashtags=None) -> str:
@@ -118,7 +118,7 @@ def description_for(title: str, body: str = "", hashtags=None) -> str:
 
 
 def upload(mp4, title: str, private: bool = True, body: str = "",
-           suffix: str = "") -> str:
+           prefix: str = "") -> str:
     """Resumable upload in one PUT. Returns the video id."""
     # Google's docs say an unaudited project can only produce private videos.
     # Measured 2026-07-31 on this project: privacyStatus=public went straight
@@ -130,8 +130,8 @@ def upload(mp4, title: str, private: bool = True, body: str = "",
 
     meta = {
         "snippet": {
-            "title": title_for(title, suffix),
-            "description": description_for(title + suffix, body),
+            "title": title_for(title, prefix),
+            "description": description_for(prefix + title, body),
             "categoryId": CATEGORY_PEOPLE_BLOGS,
         },
         "status": {
@@ -250,14 +250,14 @@ def show_text(mp4: Path | None = None) -> None:
     for p in targets:
         meta = _meta_for(p)
         title = meta.get("title") or p.stem
-        sfx = part_suffix(meta)
+        pfx = part_prefix(meta)
         print("=" * 70)
         print(p.name)
         print("=" * 70)
         print("\nTITLE:")
-        print(title_for(title, sfx))
+        print(title_for(title, pfx))
         print("\nDESCRIPTION:")
-        print(description_for(title + sfx, meta.get("body", "")))
+        print(description_for(pfx + title, meta.get("body", "")))
         print()
 
 
@@ -315,7 +315,7 @@ def upload_next(private: bool = True, force: bool = False) -> str | None:
 
     meta = _meta_for(mp4)
     yt_id = upload(mp4, meta.get("title") or mp4.stem, private=private,
-                   body=meta.get("body", ""), suffix=part_suffix(meta))
+                   body=meta.get("body", ""), prefix=part_prefix(meta))
     with _db() as db:
         db.execute("INSERT OR REPLACE INTO uploaded VALUES (?,?,?)",
                    (mp4.name, yt_id, time.time()))
@@ -388,12 +388,13 @@ if __name__ == "__main__":
         assert title_for("я" * 200).endswith(" #Shorts"), "the tag must survive trimming"
 
         # the part marker: absent for ordinary videos, and never trimmed away
-        assert part_suffix({}) == "" and part_suffix({"part": 1, "total": 1}) == ""
-        sfx = part_suffix({"part": 2, "total": 3})
-        assert sfx == " - Часть 2/3", sfx
-        long = title_for("я" * 200, sfx)
-        assert len(long) <= TITLE_MAX and long.endswith(sfx + " #Shorts"), long
-        assert description_for("Заголовок" + sfx, "Текст.").startswith("Заголовок" + sfx)
+        assert part_prefix({}) == "" and part_prefix({"part": 1, "total": 1}) == ""
+        pfx = part_prefix({"part": 2, "total": 3})
+        assert pfx == "Часть 2/3 - ", pfx
+        long = title_for("я" * 200, pfx)
+        assert len(long) <= TITLE_MAX and long.startswith(pfx), long
+        assert long.endswith(" #Shorts"), long
+        assert description_for(pfx + "Заголовок", "Текст.").startswith(pfx + "Заголовок")
         assert len(description_for("t", "x" * 9000)) <= DESC_MAX
         assert "#Shorts" in description_for("Заголовок", "Первое. Второе. Третье.")
 
