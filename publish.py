@@ -36,8 +36,9 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from config import (DB_PATH, DECLARE_AI, OUT_DIR, TIKTOK_CLIENT_KEY,
-                    TIKTOK_CLIENT_SECRET, TIKTOK_PER_DAY, TIKTOK_REFRESH_TOKEN,
+from config import (DB_PATH, DECLARE_AI, OUT_DIR, PART_GAP_HOURS,
+                    TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET,
+                    TIKTOK_MIN_GAP_HOURS, TIKTOK_PER_DAY, TIKTOK_REFRESH_TOKEN,
                     YT_HASHTAGS, save_env)
 
 API = "https://open.tiktokapis.com/v2"
@@ -306,20 +307,47 @@ def sent_today() -> int:
     return sum(1 for (ts,) in rows if _utc_date(ts) == today)
 
 
-def due() -> str:
-    """Empty string if another draft may go out today, else why it may not.
+def _since_last_h() -> float:
+    """Hours since the last draft was sent, or a large number if none ever was."""
+    with _db() as db:
+        (last,) = db.execute("SELECT MAX(ts) FROM tiktok").fetchone()
+    return (time.time() - last) / 3600 if last else 999
 
-    A count and no gap, unlike YouTube. A draft has no publish time: it waits in
-    the inbox until a human posts it, so spacing the deliveries spaces nothing.
-    The only thing worth capping is how many stories a day the pipeline spends.
+
+def due() -> str:
+    """Empty string if another draft may go out now, else why it may not.
+
+    A count and a gap, same as YouTube. The gap was left out at first on the
+    grounds that a draft has no publish time - it waits in the inbox until a
+    human posts it, so spacing the deliveries spaces nothing. That reasoning
+    skips a step: the human is prompted by the draft landing, and posts it
+    shortly after. Two drafts forty minutes apart are two videos forty minutes
+    apart, which is the thing the gap exists to prevent.
     """
     n = sent_today()
-    return "" if n < TIKTOK_PER_DAY else f"daily allowance reached ({n}/{TIKTOK_PER_DAY})"
+    if n >= TIKTOK_PER_DAY:
+        return f"daily allowance reached ({n}/{TIKTOK_PER_DAY})"
+    if (h := _since_last_h()) < TIKTOK_MIN_GAP_HOURS:
+        return (f"only {h:.1f}h since the last draft, "
+                f"minimum is {TIKTOK_MIN_GAP_HOURS:.1f}h")
+    return ""
 
 
 def _blocked(meta: dict, force: bool = False) -> str:
-    """Why this particular file may not go out today, empty if it may."""
-    return "" if force or meta.get("total", 0) > 1 else due()
+    """Why this particular file may not go out now, empty if it may."""
+    if force:
+        return ""
+    if meta.get("total", 0) > 1:
+        # A part still ignores the count - the inbox must not be left holding
+        # the middle of a story with no beginning - but not the clock. It runs
+        # on the shorter one YouTube gives parts: an answer to a cliffhanger is
+        # worth nothing hours later, and worth nothing minutes later either,
+        # because both halves then sit in the feed as one block.
+        if (h := _since_last_h()) < PART_GAP_HOURS:
+            return (f"only {h:.1f}h since the last draft, "
+                    f"minimum is {PART_GAP_HOURS:.1f}h for a part")
+        return ""
+    return due()
 
 
 def upload_next(direct: bool = False, private: bool = True,
@@ -373,16 +401,30 @@ if __name__ == "__main__":
     # must not end up holding the middle of a story with no beginning.
     # The restore is load-bearing - these run before every CLI command, and a
     # leaked ceiling would leave the gate saying "due" forever.
-    _real_per_day = TIKTOK_PER_DAY
+    _real_per_day, _real_gap = TIKTOK_PER_DAY, TIKTOK_MIN_GAP_HOURS
+    _real_part_gap = PART_GAP_HOURS
     try:
+        TIKTOK_MIN_GAP_HOURS = PART_GAP_HOURS = 0   # the count is these four
         TIKTOK_PER_DAY = 0
         assert _blocked({"part": 2, "total": 2}) == "", "a part ignores the count"
         assert _blocked({}), "an ordinary video obeys it"
         assert _blocked({}, force=True) == "", "--force overrides it"
         TIKTOK_PER_DAY = 10_000
         assert _blocked({}) == "", "room left, nothing to block"
+        # And the gap, which room in the allowance must not be able to buy:
+        # spacing is the half that was missing while this was a count alone.
+        TIKTOK_MIN_GAP_HOURS = 10_000
+        assert "since the last draft" in _blocked({}), "the gap must block too"
+        assert _blocked({}, force=True) == "", "--force overrides the gap"
+        assert _blocked({"part": 2, "total": 2}) == "", "a part keeps its own"
+        # And that own clock is a clock, not an exemption: the thing a part
+        # skips is the count and the ordinary spacing, never spacing itself.
+        PART_GAP_HOURS = 10_000
+        assert "for a part" in _blocked({"part": 2, "total": 2}), "parts are spaced"
+        assert _blocked({"part": 2, "total": 2}, force=True) == "", "--force wins"
     finally:
-        TIKTOK_PER_DAY = _real_per_day
+        TIKTOK_PER_DAY, TIKTOK_MIN_GAP_HOURS = _real_per_day, _real_gap
+        PART_GAP_HOURS = _real_part_gap
     print("chunking, caption and allowance logic ok")
 
     try:
