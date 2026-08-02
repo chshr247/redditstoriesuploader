@@ -1,4 +1,15 @@
-"""Config: .env -> module constants. No classes, no validators."""
+"""Config: .env -> module constants. No classes, no validators.
+
+One process serves ONE channel, the same way one process makes one video. The
+channel is the narration language: `ru` publishes to the Russian YouTube and
+TikTok accounts, `en` to the English ones. They are separate accounts with
+nothing linking them, and every count, cursor and credential below is scoped to
+whichever channel this process is.
+
+Anything a channel owns is read through chan_env(). The default channel keeps
+the bare key names it always had, so the existing .env and the existing repo
+secrets keep working untouched; a second channel is opt-in and explicit.
+"""
 import os
 from pathlib import Path
 
@@ -8,6 +19,49 @@ ROOT = Path(__file__).parent
 ENV_FILE = ROOT / ".env"
 load_dotenv(ENV_FILE)
 
+# The channel is the language. Two knobs for one thing would only let them
+# disagree, so OUTPUT_LANG is it: narration language, prompt set, hashtag
+# buckets, credentials, state - all keyed off this one value.
+CHANNELS = ("ru", "en")
+DEFAULT_CHANNEL = "ru"
+OUTPUT_LANG = os.getenv("OUTPUT_LANG", DEFAULT_CHANNEL)
+CHANNEL = OUTPUT_LANG
+# Non-empty only away from the default channel. That asymmetry is deliberate:
+# the Russian channel was here first and owns YT_REFRESH_TOKEN, out/<id>.mp4 and
+# the untagged rows in seen.db, so nothing about it has to move.
+SUFFIX = "" if CHANNEL == DEFAULT_CHANNEL else f"_{CHANNEL.upper()}"
+
+
+def chan_key(key: str, shared: bool = False) -> str:
+    """The env key this channel actually reads for `key`.
+
+    `shared=True` means one value can serve every channel - an API key, an
+    OAuth client, a subreddit list - so a missing YT_CLIENT_ID_EN quietly falls
+    back to YT_CLIENT_ID.
+
+    Everything else must be per-channel, and for a non-default channel the
+    suffixed name is the ONLY name that counts. Falling back would be worse
+    than failing: YT_REFRESH_TOKEN belongs to one account, so an English video
+    would upload itself to the Russian channel and nothing would look wrong.
+    """
+    if not SUFFIX:
+        return key
+    scoped = key + SUFFIX
+    return scoped if not shared or os.getenv(scoped) else key
+
+
+def chan_env(key: str, default: str = "", shared: bool = False) -> str:
+    return os.getenv(chan_key(key, shared), default)
+
+
+def chan_file(base: str) -> str:
+    """out/ name for this channel: one story renders once per channel.
+
+    The default channel keeps the bare <post_id>.mp4 - renaming it would make
+    every already-uploaded file on disk look unpublished again.
+    """
+    return f"{base}_{CHANNEL}" if SUFFIX else base
+
 
 def save_env(key: str, value: str) -> None:
     """Rewrite one key in .env, leaving everything else alone.
@@ -15,6 +69,9 @@ def save_env(key: str, value: str) -> None:
     Both platforms hand back a fresh refresh token and expect the old one to be
     dropped; printing it and hoping someone copies it by hand is how a pipeline
     silently dies a month later.
+
+    Callers pass the CHANNEL-SCOPED name (chan_key), or a rotated English token
+    would land on the Russian channel's key and log both channels out at once.
     """
     line = f"{key}={value}"
     kept = [l for l in ENV_FILE.read_text("utf-8").splitlines()
@@ -29,15 +86,15 @@ LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
 
 TTS_BACKEND = os.getenv("TTS_BACKEND", "fish")     # fish | edge
 TTS_VOICE = os.getenv("TTS_VOICE", "en-US-BrianMultilingualNeural")   # edge only
-# narration language; the multilingual voices cover both
-OUTPUT_LANG = os.getenv("OUTPUT_LANG", "ru")
 
 # --- Fish Audio (https://fish.audio/app/developers) ---
 FISH_API_KEY = os.getenv("FISH_API_KEY", "")
 FISH_MODEL = os.getenv("FISH_MODEL", "s2.1-pro-free")
-# voice ids from fish.audio/m/<id>, picked to match the narrator's gender
-FISH_VOICES_MALE = [v.strip() for v in os.getenv("FISH_VOICES_MALE", "").split(",") if v.strip()]
-FISH_VOICES_FEMALE = [v.strip() for v in os.getenv("FISH_VOICES_FEMALE", "").split(",") if v.strip()]
+# Voice ids from fish.audio/m/<id>, picked to match the narrator's gender - and
+# per channel, because a voice is chosen by listening to it read one language.
+# The same id on another language is a different performance, usually accented.
+FISH_VOICES_MALE = [v.strip() for v in chan_env("FISH_VOICES_MALE").split(",") if v.strip()]
+FISH_VOICES_FEMALE = [v.strip() for v in chan_env("FISH_VOICES_FEMALE").split(",") if v.strip()]
 FISH_SPEED = float(os.getenv("FISH_SPEED", 1.0))
 # Delivery cue applied to the title card only. The hook is the three seconds
 # that decide whether anyone watches, so it gets read harder than the story.
@@ -96,9 +153,13 @@ TARGET_SEC = int(os.getenv("TARGET_SEC", 75))
 MIN_SEC = int(os.getenv("MIN_SEC", 62))
 
 # --- TikTok (https://developers.tiktok.com/apps) ---
-TIKTOK_CLIENT_KEY = os.getenv("TIKTOK_CLIENT_KEY", "")
-TIKTOK_CLIENT_SECRET = os.getenv("TIKTOK_CLIENT_SECRET", "")
-TIKTOK_REFRESH_TOKEN = os.getenv("TIKTOK_REFRESH_TOKEN", "")
+# One app can hold tokens for several accounts, so the client pair is shared by
+# default and only the token is per-channel. Override TIKTOK_CLIENT_KEY_EN and
+# its secret if the second account ever ends up under its own app.
+TIKTOK_CLIENT_KEY = chan_env("TIKTOK_CLIENT_KEY", shared=True)
+TIKTOK_CLIENT_SECRET = chan_env("TIKTOK_CLIENT_SECRET", shared=True)
+TIKTOK_REFRESH_TOKEN = chan_env("TIKTOK_REFRESH_TOKEN")
+TIKTOK_REFRESH_KEY = chan_key("TIKTOK_REFRESH_TOKEN")   # for errors and rotation
 # Drafts a day, and deliberately above YouTube's 2-3: nothing here is published
 # automatically, so the ceiling is not about flooding a feed - it is how many
 # stories a day the pipeline is allowed to spend. Runs where only this is due
@@ -111,12 +172,18 @@ TIKTOK_PER_DAY = int(os.getenv("TIKTOK_PER_DAY", 4))
 # YouTube's gap because the count here is higher and the day still has to fit:
 # four drafts three hours apart span twelve of the grid's thirteen hours.
 TIKTOK_MIN_GAP_HOURS = float(os.getenv("TIKTOK_MIN_GAP_HOURS", 3))
-HASHTAGS = os.getenv("HASHTAGS", "#reddit #redditstories #storytime #fyp")
+HASHTAGS = chan_env("HASHTAGS", "#reddit #redditstories #storytime #fyp")
 
 # --- YouTube (https://console.cloud.google.com -> OAuth client, type Desktop) ---
-YT_CLIENT_ID = os.getenv("YT_CLIENT_ID", "")
-YT_CLIENT_SECRET = os.getenv("YT_CLIENT_SECRET", "")
-YT_REFRESH_TOKEN = os.getenv("YT_REFRESH_TOKEN", "")
+# The OAuth client belongs to the Cloud project, not to a channel: any Google
+# account may consent to it, so one pair covers both. The refresh token is the
+# opposite - it IS the channel - hence no fallback on that one.
+# While the consent screen sits in "Testing", every Google account behind a
+# channel also has to be listed as a test user, or its --auth simply refuses.
+YT_CLIENT_ID = chan_env("YT_CLIENT_ID", shared=True)
+YT_CLIENT_SECRET = chan_env("YT_CLIENT_SECRET", shared=True)
+YT_REFRESH_TOKEN = chan_env("YT_REFRESH_TOKEN")
+YT_REFRESH_KEY = chan_key("YT_REFRESH_TOKEN")
 # EXTRA generic tags, added to the pool in tags.py - not the pool itself any
 # more. tags.py owns the topic buckets and matches them against the text, and
 # anything in here that a topic can earn (#семья, #работа, #отношения) is
@@ -124,8 +191,11 @@ YT_REFRESH_TOKEN = os.getenv("YT_REFRESH_TOKEN", "")
 # a story about a boss. What is left is the broad stuff, and it still counts.
 # The quotes .env needs around a "#..." value are literal in a CI variable, so
 # strip them here rather than publish a hashtag that starts with a quote mark.
+# Per channel: Russian tags under an English video reach nobody who can read
+# them. An unset YT_HASHTAGS_EN falls through to HASHTAGS, whose default is
+# already English.
 YT_HASHTAGS = [t for t in (h.strip().strip('"\'')
-                           for h in os.getenv("YT_HASHTAGS", HASHTAGS).split()) if t]
+                           for h in chan_env("YT_HASHTAGS", HASHTAGS).split()) if t]
 # Five hours apart, so three uploads spread across a waking day instead of
 # landing in one block and competing with each other in the same feed.
 YT_MIN_GAP_HOURS = float(os.getenv("YT_MIN_GAP_HOURS", 5))
@@ -154,6 +224,13 @@ BG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 if __name__ == "__main__":
+    assert CHANNEL in CHANNELS, f"OUTPUT_LANG={CHANNEL} is not one of {CHANNELS}"
+    # The point of the suffix rule: away from the default channel, a credential
+    # must be named for its channel or be absent. A silent fallback would put
+    # one channel's videos on the other channel's account.
+    assert chan_key("YT_CLIENT_ID", shared=True) in ("YT_CLIENT_ID", f"YT_CLIENT_ID{SUFFIX}")
+    assert chan_key("YT_REFRESH_TOKEN") == f"YT_REFRESH_TOKEN{SUFFIX}"
+    assert chan_file("abc") == ("abc" if not SUFFIX else f"abc_{CHANNEL}")
     assert SUBREDDITS and all(SUBREDDITS), "SUBREDDITS is empty"
     assert 15 <= TARGET_SEC <= 180, f"TARGET_SEC={TARGET_SEC} out of sane range"
     assert MIN_SEC < TARGET_SEC, "TARGET_SEC must aim above the MIN_SEC floor"
@@ -163,5 +240,9 @@ if __name__ == "__main__":
         f"bands overlap: {MIN_SCORE} < {MAX_SCORE} <= {VIRAL_MIN_SCORE}"
     assert not (set(FACT_SUBREDDITS) & set(SUBREDDITS)), \
         "a sub in both lists is searched twice - keep the fact subs out of SUBREDDITS"
-    print(f"OK: {len(SUBREDDITS)} subs + {len(FACT_SUBREDDITS)} fact subs, "
-          f"{TARGET_SEC}s (floor {MIN_SEC}s), viral from {VIRAL_MIN_SCORE}")
+    print(f"OK: channel {CHANNEL}, {len(SUBREDDITS)} subs + "
+          f"{len(FACT_SUBREDDITS)} fact subs, {TARGET_SEC}s (floor {MIN_SEC}s), "
+          f"viral from {VIRAL_MIN_SCORE}")
+    print(f"    voices: {len(FISH_VOICES_MALE)} male, {len(FISH_VOICES_FEMALE)} female"
+          f"   yt token: {'set' if YT_REFRESH_TOKEN else 'MISSING'} ({YT_REFRESH_KEY})"
+          f"   tiktok token: {'set' if TIKTOK_REFRESH_TOKEN else 'MISSING'}")

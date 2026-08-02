@@ -1,7 +1,8 @@
 # RedditPublications
 
 A personal command-line tool that turns public Reddit posts into short vertical
-videos and uploads them to **the operator's own YouTube channel**.
+videos and uploads them to **the operator's own YouTube channels** — one per
+narration language, each authorised on its own.
 
 It is not a hosted service, has no user accounts, no web interface and no other
 users. It runs locally, on demand, on one machine.
@@ -23,7 +24,7 @@ users. It runs locally, on demand, on one machine.
 |---|---|
 | Endpoint used | `videos.insert` only |
 | OAuth scope | `https://www.googleapis.com/auth/youtube.upload` |
-| Authorised account | the operator's own channel, one account |
+| Authorised account | the operator's own channels only; each holds its own refresh token and is authorised separately |
 | Data read from the API | none — the client never reads channel, viewer or analytics data |
 | Data stored | the upload's video id and timestamp, in a local SQLite file, so the same file is not uploaded twice |
 | Volume | a handful of uploads per day, rate-limited in code |

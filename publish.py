@@ -37,10 +37,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import tags as tags_          # `tags` is the local variable in caption()
-from config import (DB_PATH, DECLARE_AI, OUT_DIR, PART_GAP_HOURS,
-                    TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET,
-                    TIKTOK_MIN_GAP_HOURS, TIKTOK_PER_DAY, TIKTOK_REFRESH_TOKEN,
-                    save_env)
+from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL, OUT_DIR,
+                    PART_GAP_HOURS, TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET,
+                    TIKTOK_MIN_GAP_HOURS, TIKTOK_PER_DAY, TIKTOK_REFRESH_KEY,
+                    TIKTOK_REFRESH_TOKEN, save_env)
 
 API = "https://open.tiktokapis.com/v2"
 AUTH_URL = "https://www.tiktok.com/v2/auth/authorize/"
@@ -97,7 +97,7 @@ def access_token() -> str:
     """Short-lived token from the long-lived refresh token in .env."""
     for name, val in [("TIKTOK_CLIENT_KEY", TIKTOK_CLIENT_KEY),
                       ("TIKTOK_CLIENT_SECRET", TIKTOK_CLIENT_SECRET),
-                      ("TIKTOK_REFRESH_TOKEN", TIKTOK_REFRESH_TOKEN)]:
+                      (TIKTOK_REFRESH_KEY, TIKTOK_REFRESH_TOKEN)]:
         if not val:
             raise RuntimeError(f"{name} is empty - see the OAuth note in publish.py")
 
@@ -112,9 +112,12 @@ def access_token() -> str:
     # Measured: the same token comes back every time. But the docs only promise
     # it "may" be unchanged, so save a new one if it ever appears - the whole
     # cost of being wrong here is a dead pipeline discovered a day later.
+    # Under this channel's own key: the two accounts are unrelated, and writing
+    # a rotated English token over TIKTOK_REFRESH_TOKEN would take the Russian
+    # account offline the next time its token was needed.
     if r.get("refresh_token") and r["refresh_token"] != TIKTOK_REFRESH_TOKEN:
-        save_env("TIKTOK_REFRESH_TOKEN", r["refresh_token"])
-        log.info("refresh token rotated, saved to .env")
+        save_env(TIKTOK_REFRESH_KEY, r["refresh_token"])
+        log.info("refresh token rotated, saved to .env as %s", TIKTOK_REFRESH_KEY)
     return r["access_token"]
 
 
@@ -182,8 +185,8 @@ def authorize() -> None:
     if "refresh_token" not in r:
         raise RuntimeError(f"no refresh_token in the response: {r}")
 
-    save_env("TIKTOK_REFRESH_TOKEN", r["refresh_token"])
-    print("\nrefresh token saved to .env")
+    save_env(TIKTOK_REFRESH_KEY, r["refresh_token"])
+    print(f"\nrefresh token saved to .env as {TIKTOK_REFRESH_KEY}")
     print(f"scopes granted: {r.get('scope')}")
 
 
@@ -293,14 +296,24 @@ def _db():
     db = sqlite3.connect(DB_PATH)
     db.execute("CREATE TABLE IF NOT EXISTS tiktok("
                "file TEXT PRIMARY KEY, publish_id TEXT, ts REAL)")
+    # Which TikTok account it went to. The two are unrelated accounts with a
+    # daily count each, so every query below is scoped - see the same note in
+    # youtube.py. Rows written before the second channel existed are the
+    # default channel's, which is where they went.
+    if "channel" not in {c[1] for c in db.execute("PRAGMA table_info(tiktok)")}:
+        db.execute("ALTER TABLE tiktok ADD COLUMN channel TEXT")
+        db.execute("UPDATE tiktok SET channel=?", (DEFAULT_CHANNEL,))
     return db
 
 
 def pending() -> list:
-    """Rendered videos not yet sent to TikTok, oldest first."""
+    """This channel's rendered videos not yet sent to TikTok, oldest first."""
+    from youtube import _mine          # local: avoids a cycle
+
     with _db() as db:
         done = {r[0] for r in db.execute("SELECT file FROM tiktok")}
-    return sorted((p for p in OUT_DIR.glob("*.mp4") if p.name not in done),
+    return sorted((p for p in OUT_DIR.glob("*.mp4")
+                   if p.name not in done and _mine(p)),
                   key=lambda p: p.stat().st_mtime)
 
 
@@ -310,14 +323,16 @@ def sent_today() -> int:
 
     today = _utc_date(time.time())
     with _db() as db:
-        rows = db.execute("SELECT ts FROM tiktok").fetchall()
+        rows = db.execute("SELECT ts FROM tiktok WHERE channel=?",
+                          (CHANNEL,)).fetchall()
     return sum(1 for (ts,) in rows if _utc_date(ts) == today)
 
 
 def _since_last_h() -> float:
     """Hours since the last draft was sent, or a large number if none ever was."""
     with _db() as db:
-        (last,) = db.execute("SELECT MAX(ts) FROM tiktok").fetchone()
+        (last,) = db.execute("SELECT MAX(ts) FROM tiktok WHERE channel=?",
+                             (CHANNEL,)).fetchone()
     return (time.time() - last) / 3600 if last else 999
 
 
@@ -385,8 +400,8 @@ def upload_next(direct: bool = False, private: bool = True,
     pid = upload(mp4, title, direct=direct, private=private,
                  body=meta.get("body", ""), kind=meta.get("kind", "story"))
     with _db() as db:
-        db.execute("INSERT OR REPLACE INTO tiktok VALUES (?,?,?)",
-                   (mp4.name, pid, time.time()))
+        db.execute("INSERT OR REPLACE INTO tiktok VALUES (?,?,?,?)",
+                   (mp4.name, pid, time.time(), CHANNEL))
     if not direct:
         print("\nCAPTION:\n" + caption(title, body=meta.get("body", ""),
                                        kind=meta.get("kind", "story")) + "\n")
@@ -405,15 +420,20 @@ if __name__ == "__main__":
     assert caption("Короткий").splitlines()[0] == "Короткий"
     assert len(caption("x" * 3000)) <= TITLE_MAX
     assert len({caption("Один и тот же") for _ in range(30)}) > 5, "tags must rotate"
-    # the body is matched too, not just the title - it is where most of the
-    # topic words are, and passing it is the whole reason caption() takes it
-    assert set(caption("Заголовок", body="Свекровь въехала в квартиру.").split()) \
-        & set(tags_.TOPIC_TAGS)
+    # The body is matched too, not just the title - it is where most of the
+    # topic words are, and passing it is the whole reason caption() takes it.
+    # Fixtures in this channel's language: caption() reads its own buckets.
+    _TOPIC, _FACT = {
+        "ru": ("Свекровь въехала в квартиру.", "Кровь синеет из-за меди."),
+        "en": ("My mother-in-law moved into the apartment.",
+               "The blue comes from copper."),
+    }[CHANNEL]
+    assert set(caption("Заголовок", body=_TOPIC).split()) & tags_.TOPIC_TAGS[CHANNEL]
     # ...and a fact carries nothing from the story pool that is not also a
     # fact tag - #рекомендации belongs to both, #драма to exactly one
-    _story_only = set(tags_.GENERIC["story"]) - set(tags_.GENERIC["fact"])
-    assert not (set(caption("Факт", body="Кровь синеет из-за меди.",
-                            kind="fact").split()) & _story_only)
+    _story_only = (set(tags_.GENERIC[CHANNEL]["story"])
+                   - set(tags_.GENERIC[CHANNEL]["fact"]))
+    assert not (set(caption("Факт", body=_FACT, kind="fact").split()) & _story_only)
 
     # A spent allowance stops an ordinary video and never a part: the inbox
     # must not end up holding the middle of a story with no beginning.
@@ -457,10 +477,11 @@ if __name__ == "__main__":
             sys.exit(1 if reason else 0)
         elif "--status" in sys.argv:
             with _db() as db:
-                rows = db.execute(
-                    "SELECT file, publish_id FROM tiktok ORDER BY ts DESC").fetchall()
-            print(f"{len(rows)} sent, {sent_today()}/{TIKTOK_PER_DAY} today, "
-                  f"{len(pending())} queued")
+                rows = db.execute("SELECT file, publish_id FROM tiktok "
+                                  "WHERE channel=? ORDER BY ts DESC",
+                                  (CHANNEL,)).fetchall()
+            print(f"channel {CHANNEL}: {len(rows)} sent, "
+                  f"{sent_today()}/{TIKTOK_PER_DAY} today, {len(pending())} queued")
             for f, pid in rows[:5]:
                 print("  sent  ", f, pid)
             for p in pending()[:10]:
