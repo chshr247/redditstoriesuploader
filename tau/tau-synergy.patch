@@ -20,10 +20,19 @@ index c6b02c2..f7d7291 100644
  
  def do_show(args) -> None:
 diff --git a/tiktok_uploader/Browser.py b/tiktok_uploader/Browser.py
-index eff183d..1cabed4 100644
+index eff183d..71412f4 100644
 --- a/tiktok_uploader/Browser.py
 +++ b/tiktok_uploader/Browser.py
-@@ -39,9 +39,12 @@ class Browser:
+@@ -1,7 +1,7 @@
+ from .cookies import load_cookies_from_file, save_cookies_to_file
+ from fake_useragent import UserAgent, FakeUserAgentError
+ import undetected_chromedriver as uc
+-import subprocess, threading, os
++import subprocess, threading, os, re
+ 
+ 
+ WITH_PROXIES = False
+@@ -39,9 +39,22 @@ class Browser:
              Browser.__instance = self
          self.user_agent = ""
          options = uc.ChromeOptions()
@@ -33,9 +42,19 @@ index eff183d..1cabed4 100644
 +        # The session cookie is minted here. Minting it on the real IP and
 +        # then uploading through a proxy in another country is a signal in
 +        # itself, so login goes through the same exit as everything else.
++        #
++        # Chrome's --proxy-server takes no credentials: everything between
++        # :// and @ is dropped, and a proxy that wants a password answers
++        # with a dialog no driver can fill. For an authenticated proxy,
++        # log in through an antidetect browser and import the cookie -
++        # tau/cookies_from_dolphin.py in the calling project does that.
 +        proxy = os.getenv('TIKTOK_PROXY', '')
 +        if proxy:
-+            options.add_argument(f'--proxy-server={proxy}')
++            bare = re.sub(r'^(\w+://)[^@/]*@', r'\1', proxy)
++            if bare != proxy:
++                print('[!] Chrome ignores proxy credentials; it will ask '
++                      'for them in a dialog. Import a cookie instead.')
++            options.add_argument(f'--proxy-server={bare}')
          self._driver = uc.Chrome(options=options, version_main=_get_chrome_major_version())
          self.with_random_user_agent()
  
@@ -118,10 +137,32 @@ index 8c6a7f9..091d0c2 100644
  
    async init() {
 diff --git a/tiktok_uploader/tiktok.py b/tiktok_uploader/tiktok.py
-index d321b56..b936e9c 100644
+index d321b56..87993af 100644
 --- a/tiktok_uploader/tiktok.py
 +++ b/tiktok_uploader/tiktok.py
-@@ -283,16 +283,17 @@ def upload_video(session_user, video, title, schedule_time=0, allow_comment=1, a
+@@ -78,11 +78,16 @@ def login(login_name: str):
+ 
+ # Local Code...
+ def upload_video(session_user, video, title, schedule_time=0, allow_comment=1, allow_duet=0, allow_stitch=0, visibility_type=0, brand_organic_type=0, branded_content_type=0, ai_label=0, proxy=None):
+-	try:
+-		user_agent = UserAgent().random
+-	except FakeUserAgentError as e:
+-		user_agent = _UA
+-		print("[-] Could not get random user agent, using default")
++	# Pin it to the browser that logged in. A random UA on an upload whose
++	# session cookie came from a real profile advertises two browsers on one
++	# session, which is the opposite of what the profile is for.
++	user_agent = os.getenv("TIKTOK_UA", "")
++	if not user_agent:
++		try:
++			user_agent = UserAgent().random
++		except FakeUserAgentError as e:
++			user_agent = _UA
++			print("[-] Could not get random user agent, using default")
+ 
+ 	cookies = load_cookies_from_file(f"tiktok_session-{session_user}")
+ 	session_id = next((c["value"] for c in cookies if c["name"] == 'sessionid'), None)
+@@ -283,16 +288,17 @@ def upload_video(session_user, video, title, schedule_time=0, allow_comment=1, a
  				"playlist_id": "",
  				"tcm_params": "{\"commerce_toggle_info\":{}}",
  				"sound_exemption": 0,
@@ -143,7 +184,7 @@ index d321b56..b936e9c 100644
  				}
  			}
  		],
-@@ -324,7 +325,7 @@ def upload_video(session_user, video, title, schedule_time=0, allow_comment=1, a
+@@ -324,7 +330,7 @@ def upload_video(session_user, video, title, schedule_time=0, allow_comment=1, a
  		# /tiktok/web/project/post/v1/
  		js_path = os.path.join(os.path.dirname(__file__), "tiktok-signature", "browser.js")
  		sig_url = f"https://www.tiktok.com/api/v1/web/project/post/?app_name=tiktok_web&channel=tiktok_web&device_platform=web&aid=1988&msToken={mstoken}"
@@ -152,7 +193,7 @@ index d321b56..b936e9c 100644
  		if signatures is None:
  			print("[-] Failed to generate signatures")
  			return False
-@@ -376,6 +377,10 @@ def upload_video(session_user, video, title, schedule_time=0, allow_comment=1, a
+@@ -376,6 +382,10 @@ def upload_video(session_user, video, title, schedule_time=0, allow_comment=1, a
  	if not uploaded:
  		print("[-] Could not upload video")
  		return False
@@ -163,7 +204,7 @@ index d321b56..b936e9c 100644
  	# Check if video uploaded successfully (Tiktok has changed endpoint for this)
  	# url = f"https://www.tiktok.com/api/v1/web/project/list/?aid=1988"
  	#
-@@ -400,7 +405,7 @@ def upload_to_tiktok(video_file, session):
+@@ -400,7 +410,7 @@ def upload_to_tiktok(video_file, session):
  	url = "https://www.tiktok.com/api/v1/video/upload/auth/?aid=1988"
  	r = session.get(url)
  	if not assert_success(url, r):
@@ -172,7 +213,7 @@ index d321b56..b936e9c 100644
  
  	aws_auth = AWSSigV4(
  		"vod",
-@@ -423,7 +428,7 @@ def upload_to_tiktok(video_file, session):
+@@ -423,7 +433,7 @@ def upload_to_tiktok(video_file, session):
  
  	r = session.get(url, auth=aws_auth)
  	if not assert_success(url, r):
