@@ -30,10 +30,9 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-import source
 import tags as tags_          # `tags` is the local variable in description_for
 from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL, OUT_DIR,
-                    PART_GAP_HOURS, YT_CLIENT_ID, YT_CLIENT_SECRET,
+                    YT_CLIENT_ID, YT_CLIENT_SECRET,
                     YT_MIN_GAP_HOURS, YT_REFRESH_KEY, YT_REFRESH_TOKEN, save_env)
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -79,38 +78,13 @@ def access_token() -> str:
     return r["access_token"]
 
 
-# The word in front of "2/3" on a split story, in the channel's own language.
-# The file's channel decides it, not the process: --text on an old file has to
-# print what that file was made as.
-PART_WORD = {"ru": "Часть", "en": "Part"}
-
-
-def part_prefix(meta: dict) -> str:
-    """"Часть 2/3 - " for a split story, empty for an ordinary one.
-
-    Only the PUBLISHED text carries the marker. The narrated title card stays
-    clean: it is the hook, and three syllables of "часть вторая" in front of it
-    is dead air. In the feed the marker leads the title, which is why it has to
-    survive the length limit below.
-    """
-    if meta.get("total", 0) <= 1:
-        return ""
-    word = PART_WORD.get(meta.get("channel", DEFAULT_CHANNEL), PART_WORD["en"])
-    return f"{word} {meta['part']}/{meta['total']} - "
-
-
-def title_for(text: str, prefix: str = "") -> str:
-    """#Shorts is what routes the upload into the Shorts shelf.
-
-    The prefix is trimmed around, never trimmed off: a twelve-word title plus a
-    part marker plus the tag overshoots TITLE_MAX, and the marker is the part a
-    viewer needs most.
-    """
+def title_for(text: str) -> str:
+    """#Shorts is what routes the upload into the Shorts shelf."""
     tag = " #Shorts"
     text = text.strip()
-    if len(prefix) + len(text) + len(tag) > TITLE_MAX:
-        text = text[:TITLE_MAX - len(prefix) - len(tag) - 3].rstrip() + "..."
-    return prefix + text + tag
+    if len(text) + len(tag) > TITLE_MAX:
+        text = text[:TITLE_MAX - len(tag) - 3].rstrip() + "..."
+    return text + tag
 
 
 def description_for(title: str, body: str = "", hashtags=None,
@@ -137,7 +111,7 @@ def description_for(title: str, body: str = "", hashtags=None,
 
 
 def upload(mp4, title: str, private: bool = True, body: str = "",
-           prefix: str = "", kind: str = "story") -> str:
+           kind: str = "story") -> str:
     """Resumable upload in one PUT. Returns the video id."""
     # Google's docs say an unaudited project can only produce private videos.
     # Measured 2026-07-31 on this project: privacyStatus=public went straight
@@ -149,8 +123,8 @@ def upload(mp4, title: str, private: bool = True, body: str = "",
 
     meta = {
         "snippet": {
-            "title": title_for(title, prefix),
-            "description": description_for(prefix + title, body, kind=kind),
+            "title": title_for(title),
+            "description": description_for(title, body, kind=kind),
             "categoryId": CATEGORY_PEOPLE_BLOGS,
         },
         "status": {
@@ -261,18 +235,31 @@ def _mine(mp4: Path) -> bool:
     return _meta_for(mp4).get("channel", DEFAULT_CHANNEL) == CHANNEL
 
 
+def _split(mp4: Path) -> bool:
+    """Is this file one part of a story told across several videos?
+
+    Splitting is TikTok's alone. There a story arrives as "1/3", "2/3", "3/3"
+    an hour and a half apart and that reads as a serial; on a Shorts feed the
+    same three land as one video and two follow-ups nobody asked for, hours
+    after the hook, against an allowance of three uploads a day - so a split
+    story would spend a whole day publishing one post. Parts are therefore
+    invisible to this queue from the moment they are rendered, and the whole
+    of the part bookkeeping lives in publish.py.
+    """
+    return _meta_for(mp4).get("total", 0) > 1
+
+
 def pending() -> list:
     """This channel's rendered videos that have not been uploaded, oldest first.
 
-    Parts of one story cannot get out of order: source.next_part() hands out
-    part N+1 only after part N is uploaded, so at most one part of a given story
-    is ever in this list. Which of the queued files goes first is decided in
-    upload_next(), not here.
+    Parts of a split story are not among them - see _split(). Nothing else
+    filters them out later, so a part rendered by a TikTok run simply sits in
+    out/ as far as YouTube is concerned, and never blocks the queue behind it.
     """
     with _db() as db:
         done = {r[0] for r in db.execute("SELECT file FROM uploaded")}
     return sorted((p for p in OUT_DIR.glob("*.mp4")
-                   if p.name not in done and _mine(p)),
+                   if p.name not in done and _mine(p) and not _split(p)),
                   key=lambda p: p.stat().st_mtime)
 
 
@@ -289,14 +276,13 @@ def show_text(mp4: Path | None = None) -> None:
     for p in targets:
         meta = _meta_for(p)
         title = meta.get("title") or p.stem
-        pfx = part_prefix(meta)
         print("=" * 70)
         print(p.name)
         print("=" * 70)
         print("\nTITLE:")
-        print(title_for(title, pfx))
+        print(title_for(title))
         print("\nDESCRIPTION:")
-        print(description_for(pfx + title, meta.get("body", ""),
+        print(description_for(title, meta.get("body", ""),
                               kind=meta.get("kind", "story")))
         print()
 
@@ -320,13 +306,9 @@ def due() -> str:
     s = status()
     if s["today"] >= s["allowed"]:
         return f"daily allowance reached ({s['today']}/{s['allowed']})"
-    # The continuation of a split story runs on its own, much shorter clock:
-    # five hours between a cliffhanger and its answer loses whoever saw the
-    # first half. Asked before anything is rendered, same as the rest of due().
-    gap = PART_GAP_HOURS if source.next_part() else YT_MIN_GAP_HOURS
-    if s["since_last_h"] < gap:
+    if s["since_last_h"] < YT_MIN_GAP_HOURS:
         return (f"only {s['since_last_h']:.1f}h since the last upload, "
-                f"minimum is {gap:.1f}h")
+                f"minimum is {YT_MIN_GAP_HOURS:.1f}h")
     return ""
 
 
@@ -345,28 +327,12 @@ def upload_next(private: bool = True, force: bool = False) -> str | None:
         return None
 
     mp4 = queue[0]
-    # The awaited part owns this slot. due() shortened the gap on its account,
-    # so an older ordinary video sitting in out/ must not spend it instead and
-    # leave the story's middle waiting another day.
-    nxt = source.next_part()
-    if nxt:
-        mp4 = next((p for p in queue
-                    if _meta_for(p).get("post_id") == nxt["post_id"]
-                    and _meta_for(p).get("part") == nxt["n"]), mp4)
-
     meta = _meta_for(mp4)
     yt_id = upload(mp4, meta.get("title") or mp4.stem, private=private,
-                   body=meta.get("body", ""), prefix=part_prefix(meta),
-                   kind=meta.get("kind", "story"))
+                   body=meta.get("body", ""), kind=meta.get("kind", "story"))
     with _db() as db:
         db.execute("INSERT OR REPLACE INTO uploaded VALUES (?,?,?,?)",
                    (mp4.name, yt_id, time.time(), CHANNEL))
-    # Cleared here and nowhere earlier: an upload that fails has to leave the
-    # part pending, or the story loses its middle - the mp4 is already gone.
-    if meta.get("total", 0) > 1:
-        source.finish_part(meta["post_id"], meta["part"])
-        log.info("part %d of %d done for %s", meta["part"], meta["total"],
-                 meta["post_id"])
     return yt_id
 
 
@@ -433,18 +399,25 @@ if __name__ == "__main__":
         assert len(title_for("я" * 200)) <= TITLE_MAX
         assert title_for("я" * 200).endswith(" #Shorts"), "the tag must survive trimming"
 
-        # the part marker: absent for ordinary videos, and never trimmed away
-        assert part_prefix({}) == "" and part_prefix({"part": 1, "total": 1}) == ""
-        pfx = part_prefix({"part": 2, "total": 3, "channel": "ru"})
-        assert pfx == "Часть 2/3 - ", pfx
-        # the marker speaks the language of the FILE, not of this process
-        assert part_prefix({"part": 2, "total": 3, "channel": "en"}) == "Part 2/3 - "
-        # a file from before channels existed is the default channel's
-        assert part_prefix({"part": 2, "total": 3}) == "Часть 2/3 - "
-        long = title_for("я" * 200, pfx)
-        assert len(long) <= TITLE_MAX and long.startswith(pfx), long
-        assert long.endswith(" #Shorts"), long
-        assert description_for(pfx + "Заголовок", "Текст.").startswith(pfx + "Заголовок")
+        # A split story never reaches this platform. Asserted on the predicate
+        # pending() actually calls, against a real meta file - a check on the
+        # shape of the dict would pass while the queue kept offering parts.
+        import tempfile
+        with tempfile.TemporaryDirectory() as _tmp:
+            _whole = Path(_tmp) / "whole.mp4"
+            _part = Path(_tmp) / "part.mp4"
+            for _f, _meta in [(_whole, {"channel": CHANNEL}),
+                              (_part, {"channel": CHANNEL, "part": 2, "total": 3})]:
+                _f.write_bytes(b"")
+                _f.with_suffix(".meta.json").write_text(
+                    json.dumps(_meta), "utf-8")
+            assert not _split(_whole), "an ordinary video belongs to YouTube"
+            assert _split(_part), "a part of a split story does not"
+            # and a file from before splitting existed carries no `total` at all
+            _bare = Path(_tmp) / "bare.mp4"
+            _bare.write_bytes(b"")
+            assert not _split(_bare)
+
         assert len(description_for("t", "x" * 9000)) <= DESC_MAX
         assert "#Shorts" in description_for("Заголовок", "Первое. Второе. Третье.")
 
@@ -504,9 +477,6 @@ if __name__ == "__main__":
                   f"today, {s['total']} uploaded, {len(pending())} queued")
             for p in pending()[:10]:
                 print("  ", p.name)
-            if nxt := source.next_part():
-                print(f"next: {nxt['post_id']} part {nxt['n']} of {nxt['total']}"
-                      f" (gap {PART_GAP_HOURS:.1f}h)")
         elif "--due" in sys.argv:
             # exit code is the point: lets a scheduler check before it spends
             reason = due()

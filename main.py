@@ -3,22 +3,24 @@
     python main.py        one video
     python main.py 5      five
 
-A long post can become two or three videos instead of one. The whole split is
-written in a single LLM call and parked in seen.db; one part is rendered per
-run, in the run that publishes it, because on a CI runner out/ does not survive
-to the next one.
+A long post can become two or three videos instead of one, and that is a TikTok
+arrangement only - YouTube is never offered a part, it always gets whole
+stories. The whole split is written in a single LLM call and parked in seen.db;
+one part is rendered per run, in the run that publishes it, because on a CI
+runner out/ does not survive to the next one.
 """
 import json
 import logging
 import sys
 from pathlib import Path
 
+import publish
 import render
 import script
 import source
 import voice
-import youtube
-from config import CHANNEL, MIN_SEC, OUT_DIR, VIRAL_MIN_SCORE, chan_file
+from config import (CHANNEL, MIN_SEC, OUT_DIR, TIKTOK_PER_DAY, VIRAL_MIN_SCORE,
+                    chan_file)
 
 log = logging.getLogger("main")
 
@@ -111,21 +113,28 @@ def make_split(post: dict, n: int) -> Path:
 
 
 def _room() -> int:
-    """YouTube uploads still available to this run.
+    """TikTok sends still available to this run.
+
+    Splitting is TikTok's and only TikTok's - YouTube never sees a part, see
+    youtube._split() - so this is the only allowance the decision answers to.
 
     A split story must not straddle the night: the parts are spaced by hours,
     and a part 2 landing the next morning is a different video to everyone who
     saw part 1. So the whole story has to fit in what is left of today.
 
-    Zero when YouTube is not due right now, which is what a TikTok-only run is.
-    Splitting there would queue a part that only youtube.upload_next() can
-    clear, so the story's middle would sit in the queue until YouTube's turn
-    comes round - blocking every later video behind it for hours.
+    Zero when TikTok is not due right now, paused included. Splitting there
+    would queue a part that only publish.upload_next() can clear, so the
+    story's middle would sit in the queue behind a platform that is not
+    running - blocking every later video for as long as that lasts.
+
+    A part is exempt from TikTok's daily count once it exists, so this ceiling
+    is stricter than what the parts will actually be allowed. Deliberately: it
+    caps how much of the day one story may lay claim to, which is the question
+    being asked here.
     """
-    if youtube.due():
+    if publish.due():
         return 0
-    s = youtube.status()
-    return max(0, s["allowed"] - s["today"])
+    return max(0, TIKTOK_PER_DAY - publish.sent_today())
 
 
 def main(count: int = 1) -> int:
@@ -133,7 +142,7 @@ def main(count: int = 1) -> int:
 
     # A story already split owns the next slot: its middle must not queue behind
     # a fresh video, and in CI the mp4 dies with the runner, so the part is
-    # rendered now and cleared only once youtube.py has actually uploaded it.
+    # rendered now and cleared only once publish.py has actually sent it.
     part = source.next_part()
     if part:
         log.info("continuing %s: part %d of %d", part["post_id"], part["n"],

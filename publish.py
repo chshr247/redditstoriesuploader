@@ -51,6 +51,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+import source
 import tags as tags_          # `tags` is the local variable in caption()
 from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL,
                     LOCAL_DB_PATH, OUT_DIR,
@@ -211,6 +212,27 @@ def authorize() -> None:
     save_env(TIKTOK_REFRESH_KEY, r["refresh_token"])
     print(f"\nrefresh token saved to .env as {TIKTOK_REFRESH_KEY}")
     print(f"scopes granted: {r.get('scope')}")
+
+
+# The word in front of "2/3" on a split story, in the channel's own language.
+# The file's channel decides it, not the process: a file rendered by the other
+# channel has to be captioned as what it was made as.
+PART_WORD = {"ru": "Часть", "en": "Part"}
+
+
+def part_prefix(meta: dict) -> str:
+    """"Часть 2/3 - " for a split story, empty for an ordinary one.
+
+    Lives here rather than in youtube.py because splitting is TikTok's alone -
+    see youtube._split(). Only the PUBLISHED caption carries the marker: the
+    narrated title card stays clean, it is the hook and three syllables of
+    "часть вторая" in front of it is dead air. In the feed the marker leads the
+    title, which is why caption() must not trim it away.
+    """
+    if meta.get("total", 0) <= 1:
+        return ""
+    word = PART_WORD.get(meta.get("channel", DEFAULT_CHANNEL), PART_WORD["en"])
+    return f"{word} {meta['part']}/{meta['total']} - "
 
 
 def caption(title: str, hashtags=None, body: str = "",
@@ -390,12 +412,14 @@ def _upload_api(mp4, title: str, direct: bool = False, private: bool = True,
     spans = _plan(size)
     token = access_token()
 
-    source = {"source": "FILE_UPLOAD", "video_size": size,
-              "chunk_size": spans[0][1] - spans[0][0] + 1,
-              "total_chunk_count": len(spans)}
+    # `src`, not `source`: this module imports the source module at the top now,
+    # and a local of that name would hide it from anything added here later.
+    src = {"source": "FILE_UPLOAD", "video_size": size,
+           "chunk_size": spans[0][1] - spans[0][0] + 1,
+           "total_chunk_count": len(spans)}
 
     if direct:
-        body = {"source_info": source, "post_info": {
+        body = {"source_info": src, "post_info": {
             "title": caption(title, body=body, kind=kind),
             "privacy_level": "SELF_ONLY" if private else "PUBLIC_TO_EVERYONE",
             # TikTok's rules are their own - see DECLARE_AI in config.py
@@ -403,7 +427,7 @@ def _upload_api(mp4, title: str, direct: bool = False, private: bool = True,
         }}
         url = f"{API}/post/publish/video/init/"
     else:
-        body = {"source_info": source}
+        body = {"source_info": src}
         url = f"{API}/post/publish/inbox/video/init/"
 
     try:
@@ -558,12 +582,36 @@ def due() -> str:
     """
     if not TIKTOK_ENABLED:
         return f"TikTok is paused for this channel ({chan_key('TIKTOK_ENABLED')}=0)"
+    # The awaited middle of a story answers to its own clock and to no count.
+    # It has to be asked HERE and not only in _blocked(), because this is the
+    # gate CI consults before anything is rendered: a run refused here renders
+    # nothing, and the part is then never made at all. YouTube used to hold this
+    # clock; it no longer sees parts, so nothing else would open a slot for one.
+    return _due_part() if source.next_part() else _due_ordinary()
+
+
+def _due_ordinary() -> str:
+    """The count and the gap an ordinary video answers to."""
     n = sent_today()
     if n >= TIKTOK_PER_DAY:
         return f"daily allowance reached ({n}/{TIKTOK_PER_DAY})"
     if (h := _since_last_h()) < TIKTOK_MIN_GAP_HOURS:
         return (f"only {h:.1f}h since the last draft, "
                 f"minimum is {TIKTOK_MIN_GAP_HOURS:.1f}h")
+    return ""
+
+
+def _due_part() -> str:
+    """The clock the middle of a story runs on: no count, and a shorter gap.
+
+    A part ignores the count - the inbox must not be left holding the middle of
+    a story with no beginning - but not the clock. An answer to a cliffhanger is
+    worth nothing hours later, and worth nothing minutes later either, because
+    both halves then sit in the feed as one block.
+    """
+    if (h := _since_last_h()) < PART_GAP_HOURS:
+        return (f"only {h:.1f}h since the last draft, "
+                f"minimum is {PART_GAP_HOURS:.1f}h for a part")
     return ""
 
 
@@ -577,31 +625,48 @@ def _blocked(meta: dict, force: bool = False) -> str:
         return f"TikTok is paused for this channel ({chan_key('TIKTOK_ENABLED')}=0)"
     if force:
         return ""
+    # Keyed on what this FILE turned out to be, never on what due() sees
+    # pending. A part queued in sqlite whose mp4 did not survive the run - a
+    # failed render, a dead runner - would otherwise lend its count exemption
+    # to whatever ordinary video happens to be next in the queue, and push it
+    # past a spent allowance.
+    return _due_part() if meta.get("total", 0) > 1 else _due_ordinary()
+
+
+def _clear_part(meta: dict) -> None:
+    """Mark a part published, once the send has actually happened.
+
+    Called here and nowhere earlier: a send that fails has to leave the part
+    pending, or the story loses its middle - on CI the mp4 is already gone with
+    the runner and the text in sqlite is the only way back.
+
+    Note for the tau backend: the row saying the video went out lives in the
+    untracked local db, but the part queue is in seen.db, which CI rewrites.
+    A part cleared on this machine can therefore be un-cleared by the next
+    pull, and would then be rendered and posted a second time. It has not bitten
+    yet - CI publishes to TikTok through the api backend - but a channel moved
+    to tau end to end needs the parts table moved with it.
+    """
     if meta.get("total", 0) > 1:
-        # A part still ignores the count - the inbox must not be left holding
-        # the middle of a story with no beginning - but not the clock. It runs
-        # on the shorter one YouTube gives parts: an answer to a cliffhanger is
-        # worth nothing hours later, and worth nothing minutes later either,
-        # because both halves then sit in the feed as one block.
-        if (h := _since_last_h()) < PART_GAP_HOURS:
-            return (f"only {h:.1f}h since the last draft, "
-                    f"minimum is {PART_GAP_HOURS:.1f}h for a part")
-        return ""
-    return due()
+        source.finish_part(meta["post_id"], meta["part"])
+        log.info("part %d of %d done for %s", meta["part"], meta["total"],
+                 meta["post_id"])
 
 
 def upload_next(direct: bool = False, private: bool = True,
                 force: bool = False) -> str | None:
     """Send one video, if today's allowance still has room for it.
 
-    The allowance is checked here and not at the gate, because only here is it
-    known WHAT the file is - and a part of a split story ignores it. Skipping a
-    part leaves the inbox with the middle of a story and no beginning: the run
-    that made part 1 can hit a spent allowance while YouTube still had room,
-    and part 2 then arrives a day later against a fresh count. Three extra
-    drafts on a split day are cheaper than that.
+    The allowance is checked here and not only at the gate, because only here is
+    it known WHAT the file is - and a part of a split story ignores it. Skipping
+    a part leaves the inbox with the middle of a story and no beginning, and
+    part 2 then arrives a day later against a fresh count. Three extra drafts on
+    a split day are cheaper than that.
+
+    This is also the only place a part is ever cleared from the queue now.
+    YouTube used to do it, back when a split story went to both platforms.
     """
-    from youtube import _meta_for, part_prefix     # local: avoids a cycle
+    from youtube import _meta_for                 # local: avoids a cycle
 
     queue = pending()
     if not queue:
@@ -609,6 +674,14 @@ def upload_next(direct: bool = False, private: bool = True,
         return None
 
     mp4 = queue[0]
+    # The awaited part owns this slot. due() shortened the gap on its account,
+    # so an older ordinary video sitting in out/ must not spend it instead and
+    # leave the story's middle waiting another day.
+    if nxt := source.next_part():
+        mp4 = next((p for p in queue
+                    if _meta_for(p).get("post_id") == nxt["post_id"]
+                    and _meta_for(p).get("part") == nxt["n"]), mp4)
+
     meta = _meta_for(mp4)
     if reason := _blocked(meta, force):
         log.info("%s", reason)
@@ -623,6 +696,7 @@ def upload_next(direct: bool = False, private: bool = True,
         db.execute("INSERT OR REPLACE INTO tiktok(file, publish_id, ts, channel,"
                    " backend) VALUES (?,?,?,?,?)",
                    (mp4.name, pid, time.time(), CHANNEL, TIKTOK_BACKEND))
+    _clear_part(meta)
     # Only worth printing where it is the only copy that exists. A draft gets
     # no caption from the API, so this print IS the caption and the workflow
     # forwards it to be pasted by hand; the tau backend already sent it with
@@ -654,6 +728,18 @@ if __name__ == "__main__":
     assert all(a[1] + 1 == b[0] for a, b in zip(p, p[1:])), "gap between chunks"
     assert caption("Короткий").splitlines()[0] == "Короткий"
     assert len(caption("x" * 3000)) <= TITLE_MAX
+
+    # The part marker, which lives on this platform and nowhere else now:
+    # absent for ordinary videos, and never trimmed off a long title.
+    assert part_prefix({}) == "" and part_prefix({"part": 1, "total": 1}) == ""
+    _pfx = part_prefix({"part": 2, "total": 3, "channel": "ru"})
+    assert _pfx == "Часть 2/3 - ", _pfx
+    # the marker speaks the language of the FILE, not of this process
+    assert part_prefix({"part": 2, "total": 3, "channel": "en"}) == "Part 2/3 - "
+    # a file from before channels existed is the default channel's
+    assert part_prefix({"part": 2, "total": 3}) == "Часть 2/3 - "
+    _long = caption(_pfx + "я" * 3000)
+    assert len(_long) <= TITLE_MAX and _long.startswith(_pfx), _long[:80]
     assert len({caption("Один и тот же") for _ in range(30)}) > 5, "tags must rotate"
     # The body is matched too, not just the title - it is where most of the
     # topic words are, and passing it is the whole reason caption() takes it.
@@ -701,6 +787,20 @@ if __name__ == "__main__":
         assert _blocked({"part": 2, "total": 2}) == "", "a part ignores the count"
         assert _blocked({}), "an ordinary video obeys it"
         assert _blocked({}, force=True) == "", "--force overrides it"
+
+        # A part PENDING in sqlite opens the pre-render gate on its own, and
+        # that exemption must not leak to the file actually being sent. The
+        # part's mp4 can be missing - a failed render, or a runner that died
+        # with out/ on it - leaving the queue holding an ordinary video while
+        # next_part() still answers yes.
+        _real_next = source.next_part
+        try:
+            source.next_part = lambda: {"post_id": "x", "n": 2, "total": 3}
+            assert due() == "", "the gate opens for the pending part"
+            assert _blocked({}), "but an ordinary file still obeys the count"
+            assert _blocked({"part": 2, "total": 3}) == "", "the part itself does not"
+        finally:
+            source.next_part = _real_next
         TIKTOK_PER_DAY = 10_000
         assert _blocked({}) == "", "room left, nothing to block"
         # And the gap, which room in the allowance must not be able to buy:
@@ -773,6 +873,11 @@ if __name__ == "__main__":
                 print("  sent  ", f, pid, f"({backend or 'api'})")
             for p in pending()[:10]:
                 print("  queued", p.name)
+            # The split-story queue is this platform's alone, so it is reported
+            # here - youtube.py --status used to carry this line.
+            if nxt := source.next_part():
+                print(f"next: {nxt['post_id']} part {nxt['n']} of {nxt['total']}"
+                      f" (gap {PART_GAP_HOURS:.1f}h)")
         elif "--next" in sys.argv:
             print(upload_next(direct="--direct" in sys.argv,
                               private=not _public(),
@@ -781,7 +886,7 @@ if __name__ == "__main__":
             mp4 = Path(sys.argv[1])
             # the real title lives beside the file, written by main.py; the stem
             # is only a post id, which is what the caption used to say
-            from youtube import _meta_for, part_prefix
+            from youtube import _meta_for
             meta = _meta_for(mp4)
             pid = upload(mp4, part_prefix(meta) + (meta.get("title") or mp4.stem),
                          direct="--direct" in sys.argv,
@@ -798,6 +903,10 @@ if __name__ == "__main__":
                 db.execute("INSERT OR REPLACE INTO tiktok(file, publish_id, ts,"
                            " channel, backend) VALUES (?,?,?,?,?)",
                            (mp4.name, pid, time.time(), CHANNEL, TIKTOK_BACKEND))
+            # Same reason the row above is written: this path skips the gate,
+            # not the bookkeeping. A part sent by hand and left in the queue
+            # would be rendered and sent again by the next --next.
+            _clear_part(meta)
             # A tau post has no status to fetch, and asking is an error rather
             # than an empty answer - see status().
             print(pid, "(posted; the API has no status for a tau id)"

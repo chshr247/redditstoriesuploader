@@ -146,8 +146,9 @@ jobs:
       # third upload still fits. Only the day-2 allowance of 2 hid it. At 3.5
       # the same three span seven hours and the slack goes from two to five.
       YT_MIN_GAP_HOURS: "3.5"
-      # The parts of one split story ignore the five hours and use this instead:
-      # three parts at five-hour spacing would not fit inside one day's slots.
+      # Spacing between the parts of one split story. A TikTok knob now - only
+      # that platform is ever offered a part - and below TIKTOK_MIN_GAP_HOURS
+      # because three parts at the ordinary spacing would not fit inside a day.
       PART_GAP_HOURS: "1.5"
 
     steps:
@@ -322,9 +323,10 @@ jobs:
       # is one `python publish.py --auth` locally plus updating the secret.
       # Runs on every passing gate, not only on tt: publish.py weighs its own
       # allowance against what the file turned out to be, and a part of a split
-      # story is sent whether or not the count is spent. A YouTube-due run that
-      # makes part 1 while TikTok is exhausted would otherwise put the middle of
-      # a story into the inbox tomorrow with no beginning in front of it.
+      # story is sent whether or not the count is spent. Skipping one would put
+      # the middle of a story into the inbox tomorrow with no beginning in front
+      # of it - and this is the ONLY step that can send a part at all, since
+      # YouTube no longer takes them.
       - name: Send it to TikTok drafts
         if: steps.gate.outputs.go == 'true' && inputs.dry_run != true
         continue-on-error: true
