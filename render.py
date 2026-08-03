@@ -22,6 +22,7 @@ FONT = SUBTITLE_FONT       # libass silently falls back if it is missing
 FONT_SIZE = 110
 POP_MS = 120               # scale-up duration of a word appearing
 HOLD_MAX = 0.18            # how long a card may outlive its own audio
+SKIP_HEAD = 30.0           # seconds of every background clip that are off limits
 
 log = logging.getLogger(__name__)
 
@@ -171,6 +172,30 @@ def _pick_bg(key: str = "", channel: str = CHANNEL) -> "Path":
     return clips[(seed + offset) % len(clips)]
 
 
+def _seek(bg_dur: float, dur: float, name: str = "") -> float:
+    """Where inside the background clip to start, at random.
+
+    Random so consecutive videos don't share footage, and never inside the
+    first SKIP_HEAD seconds: a background clip opens on an intro, a title card
+    or a menu, the one stretch of it that looks like a clip off YouTube.
+
+    The window is [SKIP_HEAD, bg_dur - dur], so the narration also fits before
+    the end and -stream_loop never fires - that is what makes the head skip a
+    guarantee for the whole video rather than only for its first frame.
+    """
+    latest = bg_dur - dur
+    if latest >= SKIP_HEAD:
+        return round(random.uniform(SKIP_HEAD, latest), 2)
+    if bg_dur > SKIP_HEAD:
+        # too short to fit the narration after the head; start right past the
+        # head anyway and let it loop, which re-seeks here rather than to 0
+        log.warning("%s is only %.0fs - looping from %.0fs", name, bg_dur, SKIP_HEAD)
+        return SKIP_HEAD
+    log.warning("%s is only %.0fs - shorter than the %.0fs head skip",
+                name, bg_dur, SKIP_HEAD)
+    return 0.0
+
+
 def render(mp3, words: list[dict], name: str, bg=None,
            title: str = "", title_end: float = 0, key: str = ""):
     """Burn subtitles over a background clip and mux the narration.
@@ -185,9 +210,7 @@ def render(mp3, words: list[dict], name: str, bg=None,
     out = OUT_DIR / f"{name}.mp4"
     build_ass(words, ass, title, title_end)
 
-    # start at a random point so consecutive videos don't share footage
-    bg_dur = _dur(bg)
-    seek = round(random.uniform(0, max(0, bg_dur - dur)), 2) if bg_dur > dur else 0
+    seek = _seek(_dur(bg), dur, bg.name)
 
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
@@ -196,9 +219,13 @@ def render(mp3, words: list[dict], name: str, bg=None,
         "-filter_complex",
         # 720p sources get upscaled ~2.7x to cover 1080 wide, so lanczos over
         # the default bilinear is a visible win for one flag. setsar guards
-        # against clips with non-square pixels.
+        # against clips with non-square pixels. Every background is mirrored;
+        # hflip sits before subtitles so the footage flips and the burnt-in
+        # subtitles do not. Whatever writing the SOURCE carries does flip -
+        # a creator watermark comes out backwards, which is the one thing that
+        # makes the mirroring obvious. See DOCS.ru.md.
         f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
-        f"crop={W}:{H},setsar=1,subtitles={ass.name}[v]",
+        f"crop={W}:{H},setsar=1,hflip,subtitles={ass.name}[v]",
         "-map", "[v]", "-map", "1:a", "-t", f"{dur:.3f}", "-r", str(FPS),
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p",
@@ -216,6 +243,18 @@ if __name__ == "__main__":
     assert _ts(0) == "0:00:00.00"
     assert _ts(65.43) == "0:01:05.43"
     assert _ts(3661.5) == "1:01:01.50"
+
+    # The head is off limits and the tail must still hold the whole narration,
+    # both across the range and not just on average - a bound that only holds
+    # for the mean is the bound that ships the menu screen once a week.
+    picks = [_seek(600, 60) for _ in range(2000)]
+    assert all(SKIP_HEAD <= s <= 540 for s in picks), (min(picks), max(picks))
+    assert len(set(picks)) > 100, "seek is not actually random"
+    assert min(picks) < 60 and max(picks) > 500, (min(picks), max(picks))
+    # clip with no room for both: head still wins, looping covers the rest
+    assert _seek(100, 90, "(expected warning)") == SKIP_HEAD
+    assert _seek(20, 60, "(expected warning)") == 0   # shorter than the head skip
+    assert _seek(90.0, 60.0) == SKIP_HEAD   # exactly enough room, no randomness left
 
     mp3 = OUT_DIR / "_selftest.mp3"
     assert mp3.exists(), "run `python voice.py` first"
