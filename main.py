@@ -36,8 +36,8 @@ def _render(title: str, body: str, gender: str, key: str, sub: str,
     would write over each other in out/ and count as one row in `uploaded`.
     """
     name = chan_file(key)
-    mp3, words, title_end = voice.speak_parts(title, body, name, gender=gender,
-                                              fish_voice=fish_voice)
+    mp3, words, title_end, title_words = voice.speak_parts(
+        title, body, name, gender=gender, fish_voice=fish_voice)
 
     # Word counts only approximate duration - the voice paced 167-214 wpm across
     # runs. Cheaper to re-synthesize slower than to ask the model for more words.
@@ -46,7 +46,7 @@ def _render(title: str, body: str, gender: str, key: str, sub: str,
         slow = min((MIN_SEC + 2) / total - 1, MAX_SLOWDOWN)
         log.info("%.1fs is under the %ds floor, re-voicing at -%.0f%%",
                  total, MIN_SEC, slow * 100)
-        mp3, words, title_end = voice.speak_parts(
+        mp3, words, title_end, title_words = voice.speak_parts(
             title, body, name, rate=f"-{slow * 100:.0f}%",
             speed=round(1 - slow, 2), gender=gender, fish_voice=fish_voice)
         total = voice.duration(mp3)
@@ -55,7 +55,8 @@ def _render(title: str, body: str, gender: str, key: str, sub: str,
 
     # keyed on the story, not the file: that is what keeps the two channels'
     # versions of one story off the same background clip
-    out = render.render(mp3, words, name, title=title, title_end=title_end, key=key)
+    out = render.render(mp3, words, name, title=title, title_end=title_end,
+                        key=key, title_words=title_words)
     # publishing runs separately and later, so the text has to survive on disk.
     # The channel goes in with it - the part marker's language and which
     # channel's queue the file belongs to are both read back from here.

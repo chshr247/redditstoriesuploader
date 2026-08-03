@@ -277,7 +277,9 @@ def speak_parts(title: str, body: str, name: str, gap: float = 0.0,
     what an ordinary story wants; a story split across several videos passes the
     id it was queued with, or the second half arrives in someone else's voice.
 
-    Returns (mp3, story_and_question_words_offset_to_the_track, title_end_sec).
+    Returns (mp3, story_and_question_words_offset_to_the_track, title_end_sec,
+    title_words). The last are NOT offset: they time the title card, which
+    starts at zero, while the rest are offset past it.
     """
     # one voice for the whole video - the takes must not swap narrators
     fish_voice = fish_voice or pick_voice(gender)
@@ -289,8 +291,10 @@ def speak_parts(title: str, body: str, name: str, gap: float = 0.0,
         # already shouted, so a warning here would only be a second voice.
         log.info("%s: no closing question, narrating the body as one take", name)
 
-    t_mp3, _ = speak(_cued(title, FISH_TITLE_CUE), f"{name}_title",
-                     rate=rate, speed=speed, fish_voice=fish_voice)
+    # the title's own timings are what light the card up word by word - they
+    # were always computed here and thrown away
+    t_mp3, t_words = speak(_cued(title, FISH_TITLE_CUE), f"{name}_title",
+                           rate=rate, speed=speed, fish_voice=fish_voice)
     b_mp3, b_words = speak(story, f"{name}_body", rate=rate, speed=speed,
                            fish_voice=fish_voice)
     parts, words = [t_mp3, b_mp3], list(b_words)
@@ -323,7 +327,7 @@ def speak_parts(title: str, body: str, name: str, gap: float = 0.0,
              duration(b_mp3),
              f" + question {duration(parts[-1]):.1f}s" if cta else "",
              duration(merged))
-    return merged, words, title_end
+    return merged, words, title_end, t_words
 
 
 if __name__ == "__main__":
