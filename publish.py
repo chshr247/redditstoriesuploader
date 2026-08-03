@@ -52,7 +52,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import tags as tags_          # `tags` is the local variable in caption()
-from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL, OUT_DIR,
+from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL,
+                    LOCAL_DB_PATH, OUT_DIR,
                     PART_GAP_HOURS, TIKTOK_BACKEND, TIKTOK_CLIENT_KEY,
                     TIKTOK_CLIENT_SECRET, TIKTOK_ENABLED, TIKTOK_MIN_GAP_HOURS,
                     TIKTOK_PER_DAY, TIKTOK_PROXY, TIKTOK_PUBLIC,
@@ -445,11 +446,55 @@ def status(publish_id: str) -> dict:
 
 # --------------------------------------------------------------------- queue
 
+def _db_path() -> Path:
+    """Which file holds this channel's TikTok state.
+
+    The api backend runs on CI, and CI commits seen.db back to the repo, so
+    that is where its rows belong. The tau backend runs on somebody's desk,
+    writing into a file CI rewrites twice an hour - and the moment a pull is
+    resolved in CI's favour, the row saying a video went out is gone, the file
+    returns to pending(), and the next --next posts it again. Publicly, now.
+
+    Observed rather than predicted: it happened on the first merge to main.
+    """
+    return LOCAL_DB_PATH if TIKTOK_BACKEND == "tau" else DB_PATH
+
+
+def _adopt(db) -> None:
+    """Move this channel's existing rows into the local file, once.
+
+    Switching a channel to tau must not make its history look unsent, or every
+    already-published video is a candidate to go out again.
+    """
+    if not DB_PATH.exists():
+        return
+    src = sqlite3.connect(DB_PATH)
+    try:
+        cols = {c[1] for c in src.execute("PRAGMA table_info(tiktok)")}
+    except sqlite3.Error:
+        return
+    if "file" not in cols:
+        return
+    # A db written before the backend column existed is all api by definition.
+    backend = "backend" if "backend" in cols else "'api'"
+    rows = src.execute(
+        "SELECT file, publish_id, ts, channel, " + backend +
+        " FROM tiktok WHERE channel=?", (CHANNEL,)).fetchall()
+    src.close()
+    if rows:
+        db.executemany("INSERT OR IGNORE INTO tiktok(file, publish_id, ts,"
+                       " channel, backend) VALUES (?,?,?,?,?)", rows)
+        log.info("adopted %d row(s) for channel %s into %s",
+                 len(rows), CHANNEL, LOCAL_DB_PATH.name)
+
+
 def _db():
     # Separate table from youtube's `uploaded`: the two platforms are not in
     # step. A video can sit in the TikTok inbox for days before it is published
     # by hand, and a failed TikTok run must not hide the video from YouTube.
-    db = sqlite3.connect(DB_PATH)
+    path = _db_path()
+    first = path is LOCAL_DB_PATH and not path.exists()
+    db = sqlite3.connect(path)
     db.execute("CREATE TABLE IF NOT EXISTS tiktok("
                "file TEXT PRIMARY KEY, publish_id TEXT, ts REAL)")
     # Which TikTok account it went to. The two are unrelated accounts with a
@@ -466,6 +511,8 @@ def _db():
     if "backend" not in cols:
         db.execute("ALTER TABLE tiktok ADD COLUMN backend TEXT")
         db.execute("UPDATE tiktok SET backend='api'")
+    if first:
+        _adopt(db)
     return db
 
 
@@ -679,6 +726,12 @@ if __name__ == "__main__":
     assert not _CREATION_ID.search("see creation_id=abc in the docs"), \
         "the line must start the line, or a caption could forge one"
     assert not _CREATION_ID.search("[-] Publish failed to Tiktok")
+
+    # The state of a channel CI does not publish must not live in the file CI
+    # rewrites. This is the assertion that would have caught the merge that
+    # dropped a real post's row and put the video back in the queue.
+    assert (_db_path() == LOCAL_DB_PATH) == (TIKTOK_BACKEND == "tau"), _db_path()
+    assert LOCAL_DB_PATH != DB_PATH, "the local file must not BE the tracked one"
 
     # A tau id is not a publish_id and must not be sent to the API as one.
     try:

@@ -7,3 +7,8 @@ out/
 assets/bg/
 .env.*
 !.env.example
+# State the local TikTok poster writes. Deliberately NOT tracked: seen.db
+# is rewritten by every CI run, so a row put there by this machine lives
+# until the next pull - and a lost "this went out" row means it goes out
+# again. Nothing here needs to travel; one machine writes it and reads it.
+seen_local_*.db
