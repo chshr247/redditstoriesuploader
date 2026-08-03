@@ -197,6 +197,15 @@ HASHTAGS = chan_env("HASHTAGS", "#reddit #redditstories #storytime #fyp")
 #        caption and all. Against TikTok's ToS and at the account's risk (see
 #        todo.md section 11), so it is opt-in per channel and never the default.
 TIKTOK_BACKEND = chan_env("TIKTOK_BACKEND", "api").strip().lower()
+# Whether this channel's videos go up visible to everyone. Off by default, and
+# it lives here rather than in the scheduler's command line on purpose: a
+# forgotten --public is invisible, because a private video looks exactly like
+# no video at all. Days of uploads can land in a hole nobody is looking at.
+# Naming the intent per channel makes it survive rebuilding the scheduled task.
+# --public still forces it on for one run; there is no flag to force it off,
+# because a channel that publishes and a run that must not is not a real case.
+TIKTOK_PUBLIC = chan_env("TIKTOK_PUBLIC", "0").strip().lower() in (
+    "1", "true", "yes", "on")
 # Checkout of the fork - see tau/README.md. Deliberately not vendored: it wants
 # playwright, moviepy and undetected-chromedriver from git, and none of those
 # may share this venv. Shared, because it is a path to code and not a
@@ -311,4 +320,5 @@ if __name__ == "__main__":
     print(f"    tiktok backend: {TIKTOK_BACKEND}"
           + (f" as {TIKTOK_TAU_USER}, proxy "
              f"{'set' if TIKTOK_PROXY else 'NONE - real IP'}"
-             if TIKTOK_BACKEND == "tau" else ""))
+             if TIKTOK_BACKEND == "tau" else "")
+          + f", {'PUBLIC' if TIKTOK_PUBLIC else 'private'}")
