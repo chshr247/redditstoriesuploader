@@ -188,6 +188,46 @@ TIKTOK_PER_DAY = int(os.getenv("TIKTOK_PER_DAY", 4))
 TIKTOK_MIN_GAP_HOURS = float(os.getenv("TIKTOK_MIN_GAP_HOURS", 3))
 HASHTAGS = chan_env("HASHTAGS", "#reddit #redditstories #storytime #fyp")
 
+# Which transport actually sends the file. The queue above does not care - the
+# count, the gap, the pause and the part exemption are the same either way.
+#   api  the official Content Posting API: a draft in the app inbox that a
+#        human publishes. Sanctioned, runs on CI, carries no caption.
+#   tau  our patched fork of makiisthenes/TiktokAutoUploader, driven as a
+#        subprocess: signs in with saved browser cookies and posts for real,
+#        caption and all. Against TikTok's ToS and at the account's risk (see
+#        todo.md section 11), so it is opt-in per channel and never the default.
+TIKTOK_BACKEND = chan_env("TIKTOK_BACKEND", "api").strip().lower()
+# Whether this channel's videos go up visible to everyone. Off by default, and
+# it lives here rather than in the scheduler's command line on purpose: a
+# forgotten --public is invisible, because a private video looks exactly like
+# no video at all. Days of uploads can land in a hole nobody is looking at.
+# Naming the intent per channel makes it survive rebuilding the scheduled task.
+# --public still forces it on for one run; there is no flag to force it off,
+# because a channel that publishes and a run that must not is not a real case.
+TIKTOK_PUBLIC = chan_env("TIKTOK_PUBLIC", "0").strip().lower() in (
+    "1", "true", "yes", "on")
+# Checkout of the fork - see tau/README.md. Deliberately not vendored: it wants
+# playwright, moviepy and undetected-chromedriver from git, and none of those
+# may share this venv. Shared, because it is a path to code and not a
+# credential; the account and the exit IP below are what must never be.
+TIKTOK_TAU_DIR = chan_env("TIKTOK_TAU_DIR", shared=True)
+# Interpreter of that checkout's own venv. Empty means "guess it from the dir".
+TIKTOK_TAU_PYTHON = chan_env("TIKTOK_TAU_PYTHON", shared=True)
+# The name the fork's cookie was saved under (`cli.py login -n <name>`), which
+# is to say: the account. Per channel by the same rule as the refresh token - a
+# silent fallback would post the English video to the Russian account.
+TIKTOK_TAU_USER = chan_env("TIKTOK_TAU_USER")
+# The user agent of the browser profile that minted that cookie. Left empty the
+# fork picks a RANDOM one per upload, so the session is presented by a
+# different browser than the one that logged in - which is exactly the tell an
+# antidetect profile exists to avoid. Per channel: two profiles, two agents.
+TIKTOK_TAU_UA = chan_env("TIKTOK_TAU_UA")
+# One exit IP per account, and NOT shared for exactly that reason: two accounts
+# reaching TikTok from one address is the single thing a proxy is here to
+# prevent. Read by the fork's login browser and its signer too, so it covers
+# the cookie and the signature, not just the upload.
+TIKTOK_PROXY = chan_env("TIKTOK_PROXY")
+
 # --- YouTube (https://console.cloud.google.com -> OAuth client, type Desktop) ---
 # The OAuth client belongs to the Cloud project, not to a channel: any Google
 # account may consent to it, so one pair covers both. The refresh token is the
@@ -254,9 +294,31 @@ if __name__ == "__main__":
         f"bands overlap: {MIN_SCORE} < {MAX_SCORE} <= {VIRAL_MIN_SCORE}"
     assert not (set(FACT_SUBREDDITS) & set(SUBREDDITS)), \
         "a sub in both lists is searched twice - keep the fact subs out of SUBREDDITS"
+    assert TIKTOK_BACKEND in ("api", "tau"), \
+        f"{chan_key('TIKTOK_BACKEND')}={TIKTOK_BACKEND} is not api or tau"
+    # A typo in the backend name would be caught above; a missing account would
+    # not be caught until a video was already rendered and the run was spending
+    # its allowance on it. The proxy is deliberately NOT required: running the
+    # fork without one is a bad idea, not a broken config, and publish.py says
+    # so out loud on every send.
+    if TIKTOK_BACKEND == "tau":
+        assert TIKTOK_TAU_DIR, f"{chan_key('TIKTOK_TAU_DIR', True)} is unset"
+        assert TIKTOK_TAU_USER, f"{chan_key('TIKTOK_TAU_USER')} is unset"
+        # A rotating exit IP is worse than none: the upload is a dozen requests
+        # plus a page load, and this gateway hands out a new address per
+        # request unless the login carries a session id.
+        assert "dataimpulse" not in TIKTOK_PROXY or "sessid." in TIKTOK_PROXY, \
+            (f"{chan_key('TIKTOK_PROXY')} has no sessid. - DataImpulse rotates "
+             "the IP per request without one, so every step of one upload "
+             "would come from a different address")
     print(f"OK: channel {CHANNEL}, {len(SUBREDDITS)} subs + "
           f"{len(FACT_SUBREDDITS)} fact subs, {TARGET_SEC}s (floor {MIN_SEC}s), "
           f"viral from {VIRAL_MIN_SCORE}")
     print(f"    voices: {len(FISH_VOICES_MALE)} male, {len(FISH_VOICES_FEMALE)} female"
           f"   yt token: {'set' if YT_REFRESH_TOKEN else 'MISSING'} ({YT_REFRESH_KEY})"
           f"   tiktok token: {'set' if TIKTOK_REFRESH_TOKEN else 'MISSING'}")
+    print(f"    tiktok backend: {TIKTOK_BACKEND}"
+          + (f" as {TIKTOK_TAU_USER}, proxy "
+             f"{'set' if TIKTOK_PROXY else 'NONE - real IP'}"
+             if TIKTOK_BACKEND == "tau" else "")
+          + f", {'PUBLIC' if TIKTOK_PUBLIC else 'private'}")
