@@ -1,0 +1,183 @@
+diff --git a/cli.py b/cli.py
+index c6b02c2..f7d7291 100644
+--- a/cli.py
++++ b/cli.py
+@@ -178,11 +178,15 @@ def do_upload(args) -> None:
+             sys.exit(1)
+ 
+     # schedule_time=0 — we bypass TikTok's server-side scheduling entirely.
+-    tiktok.upload_video(
++    ok = tiktok.upload_video(
+         args.users, args.video, args.title, 0,
+         args.comment, args.duet, args.stitch, args.visibility,
+         args.brandorganic, args.brandcontent, args.ailabel, args.proxy,
+     )
++    # A failed upload used to exit 0, which makes this CLI unusable as a
++    # step in anything: the caller had no way to tell the two apart.
++    if not ok:
++        sys.exit(1)
+ 
+ 
+ def do_show(args) -> None:
+diff --git a/tiktok_uploader/Browser.py b/tiktok_uploader/Browser.py
+index eff183d..1cabed4 100644
+--- a/tiktok_uploader/Browser.py
++++ b/tiktok_uploader/Browser.py
+@@ -39,9 +39,12 @@ class Browser:
+             Browser.__instance = self
+         self.user_agent = ""
+         options = uc.ChromeOptions()
+-        # Proxies not supported on login.
+-        # if WITH_PROXIES:
+-        #     options.add_argument('--proxy-server={}'.format(PROXIES[0]))
++        # The session cookie is minted here. Minting it on the real IP and
++        # then uploading through a proxy in another country is a signal in
++        # itself, so login goes through the same exit as everything else.
++        proxy = os.getenv('TIKTOK_PROXY', '')
++        if proxy:
++            options.add_argument(f'--proxy-server={proxy}')
+         self._driver = uc.Chrome(options=options, version_main=_get_chrome_major_version())
+         self.with_random_user_agent()
+ 
+diff --git a/tiktok_uploader/bot_utils.py b/tiktok_uploader/bot_utils.py
+index 0172bd8..fa583d3 100644
+--- a/tiktok_uploader/bot_utils.py
++++ b/tiktok_uploader/bot_utils.py
+@@ -5,8 +5,14 @@ from requests_auth_aws_sigv4 import AWSSigV4
+ user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+ 
+ 
+-def subprocess_jsvmp(js, user_agent, url):
+-	proc = subprocess.Popen(['node', js, url, user_agent], stdout=subprocess.PIPE)
++def subprocess_jsvmp(js, user_agent, url, proxy=None):
++	# The signer opens a real page on tiktok.com to compute the signature.
++	# Left unproxied it publishes the caller's true IP alongside the msToken
++	# of the very session the proxy is there to detach it from.
++	argv = ['node', js, url, user_agent]
++	if proxy:
++		argv.append(proxy)
++	proc = subprocess.Popen(argv, stdout=subprocess.PIPE)
+ 	return proc.stdout.read().decode('utf-8')
+ 
+ 
+diff --git a/tiktok_uploader/tiktok-signature/browser.js b/tiktok_uploader/tiktok-signature/browser.js
+index d724798..ef0371e 100644
+--- a/tiktok_uploader/tiktok-signature/browser.js
++++ b/tiktok_uploader/tiktok-signature/browser.js
+@@ -3,10 +3,11 @@ const Signer = require("./index");
+ 
+ var url = process.argv[2];
+ var userAgent = process.argv[3];
++var proxy = process.argv[4];  // optional, forwarded by subprocess_jsvmp
+ 
+ (async function main() {
+   try {
+-    const signer = new Signer(url, userAgent);
++    const signer = new Signer(url, userAgent, null, proxy);
+     await signer.init();
+ 
+     const sign = await signer.sign(url);
+diff --git a/tiktok_uploader/tiktok-signature/index.js b/tiktok_uploader/tiktok-signature/index.js
+index 8c6a7f9..091d0c2 100644
+--- a/tiktok_uploader/tiktok-signature/index.js
++++ b/tiktok_uploader/tiktok-signature/index.js
+@@ -2,6 +2,15 @@ const { createCipheriv } = require("crypto");
+ const { devices, chromium } = require("playwright-chromium");
+ const Utils = require("./utils");
+ const iPhone11 = devices["iPhone 11 Pro"];
++// Playwright wants credentials split out of the URL.
++function parseProxy(proxy) {
++  const u = new URL(proxy);
++  const out = { server: `${u.protocol}//${u.host}` };
++  if (u.username) out.username = decodeURIComponent(u.username);
++  if (u.password) out.password = decodeURIComponent(u.password);
++  return out;
++}
++
+ class Signer {
+   userAgent =
+     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.109 Safari/537.36";
+@@ -18,7 +27,7 @@ class Signer {
+   // Password for xttparams AES encryption
+   password = "webapp1.0+202106";
+ 
+-  constructor(default_url, userAgent, browser) {
++  constructor(default_url, userAgent, browser, proxy) {
+     if (default_url) {
+       this.default_url = default_url;
+     }
+@@ -39,6 +48,10 @@ class Signer {
+       ignoreDefaultArgs: ["--mute-audio", "--hide-scrollbars"],
+       ignoreHTTPSErrors: true,
+     };
++
++    if (proxy) {
++      this.options.proxy = parseProxy(proxy);
++    }
+   }
+ 
+   async init() {
+diff --git a/tiktok_uploader/tiktok.py b/tiktok_uploader/tiktok.py
+index d321b56..b936e9c 100644
+--- a/tiktok_uploader/tiktok.py
++++ b/tiktok_uploader/tiktok.py
+@@ -283,16 +283,17 @@ def upload_video(session_user, video, title, schedule_time=0, allow_comment=1, a
+ 				"playlist_id": "",
+ 				"tcm_params": "{\"commerce_toggle_info\":{}}",
+ 				"sound_exemption": 0,
++				"aigc_info": {"aigc_label_type": ai_label},
+ 				"anchors": [],
+ 				"vedit_common_info": {
+ 					"draft": "",
+ 					"video_id": video_id
+ 				},
+ 				"privacy_setting_info": {
+-					"visibility_type": 0,
+-					"allow_duet": 1,
+-					"allow_stitch": 1,
+-					"allow_comment": 1
++					"visibility_type": visibility_type,
++					"allow_duet": allow_duet,
++					"allow_stitch": allow_stitch,
++					"allow_comment": allow_comment
+ 				}
+ 			}
+ 		],
+@@ -324,7 +325,7 @@ def upload_video(session_user, video, title, schedule_time=0, allow_comment=1, a
+ 		# /tiktok/web/project/post/v1/
+ 		js_path = os.path.join(os.path.dirname(__file__), "tiktok-signature", "browser.js")
+ 		sig_url = f"https://www.tiktok.com/api/v1/web/project/post/?app_name=tiktok_web&channel=tiktok_web&device_platform=web&aid=1988&msToken={mstoken}"
+-		signatures = subprocess_jsvmp(js_path, user_agent, sig_url)
++		signatures = subprocess_jsvmp(js_path, user_agent, sig_url, proxy)
+ 		if signatures is None:
+ 			print("[-] Failed to generate signatures")
+ 			return False
+@@ -376,6 +377,10 @@ def upload_video(session_user, video, title, schedule_time=0, allow_comment=1, a
+ 	if not uploaded:
+ 		print("[-] Could not upload video")
+ 		return False
++	# Truthy and identifying: api/services/tiktok_adapter.py does bool() on
++	# this, and an external driver needs a handle for the post it just made.
++	print(f"creation_id={creation_id}")
++	return creation_id
+ 	# Check if video uploaded successfully (Tiktok has changed endpoint for this)
+ 	# url = f"https://www.tiktok.com/api/v1/web/project/list/?aid=1988"
+ 	#
+@@ -400,7 +405,7 @@ def upload_to_tiktok(video_file, session):
+ 	url = "https://www.tiktok.com/api/v1/video/upload/auth/?aid=1988"
+ 	r = session.get(url)
+ 	if not assert_success(url, r):
+-		return False
++		raise RuntimeError(f"upload step failed: {url}")
+ 
+ 	aws_auth = AWSSigV4(
+ 		"vod",
+@@ -423,7 +428,7 @@ def upload_to_tiktok(video_file, session):
+ 
+ 	r = session.get(url, auth=aws_auth)
+ 	if not assert_success(url, r):
+-		return False
++		raise RuntimeError(f"upload step failed: {url}")
+ 
+ 	# upload chunks
+ 	upload_node = r.json()["Result"]["InnerUploadAddress"]["UploadNodes"][0]
