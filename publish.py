@@ -724,6 +724,16 @@ if __name__ == "__main__":
                          private="--public" not in sys.argv,
                          body=meta.get("body", ""),
                          kind=meta.get("kind", "story"))
+            # Record it, exactly as upload_next() does. This path skips the
+            # gate on purpose - it is the by-hand escape hatch - but skipping
+            # the gate is not the same as leaving no trace: an unrecorded file
+            # stays in pending() and the next --next sends it a second time.
+            # Cheap when that meant a duplicate draft, not cheap at all now
+            # that a tau send is a published video.
+            with _db() as db:
+                db.execute("INSERT OR REPLACE INTO tiktok(file, publish_id, ts,"
+                           " channel, backend) VALUES (?,?,?,?,?)",
+                           (mp4.name, pid, time.time(), CHANNEL, TIKTOK_BACKEND))
             # A tau post has no status to fetch, and asking is an error rather
             # than an empty answer - see status().
             print(pid, "(posted; the API has no status for a tau id)"
