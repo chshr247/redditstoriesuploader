@@ -227,7 +227,21 @@ def render(mp3, words: list[dict], name: str, bg=None,
         f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
         f"crop={W}:{H},setsar=1,hflip,subtitles={ass.name}[v]",
         "-map", "[v]", "-map", "1:a", "-t", f"{dur:.3f}", "-r", str(FPS),
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        # The ceiling is the point, not the CRF. crf 23 alone let high-motion
+        # backgrounds run to 7.1 Mbit/s - a 1.4 min video came out 72 MB - and
+        # the upload is the constraint here: the tau backend posts through a
+        # residential proxy measured at 0.75 Mbit/s, so 72 MB is thirteen
+        # minutes on one connection and it does not survive them. Measured
+        # 2026-08-03: the only file that ever got through was the smallest.
+        # maxrate/bufsize cap the peak without touching resolution - 1080x1920
+        # is kept whole - and bring the same clip to 26.9 MB, five minutes.
+        # TikTok re-encodes everything anyway, so the bits above this ceiling
+        # were never going to reach a viewer.
+        # preset medium rather than veryfast because at a CAPPED bitrate the
+        # preset is what buys quality: same 26.9 MB, SSIM 0.965 against 0.955,
+        # for about 30 seconds more per render.
+        "-c:v", "libx264", "-preset", "medium", "-crf", "26",
+        "-maxrate", "2500k", "-bufsize", "5000k",
         "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p",
         str(out.name),
     ]
