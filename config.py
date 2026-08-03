@@ -272,6 +272,14 @@ SUBTITLE_FONT = os.getenv("SUBTITLE_FONT", "Arial Black")
 BG_DIR = ROOT / "assets" / "bg"      # background clips, 1080x1920
 OUT_DIR = ROOT / "out"               # audio, .ass, finished mp4
 DB_PATH = ROOT / "seen.db"           # sqlite: post_ids already turned into videos
+# State written by a machine that is NOT CI, and therefore kept where CI cannot
+# reach it. seen.db is committed back to the repo by every run - that is the
+# point of tracking it - so a row this machine writes there survives exactly
+# until the next pull. Losing a row that says "this video went out" is not a
+# lost record, it is the video going out a second time.
+# Untracked on purpose, and it never needs to travel: the machine that writes
+# it is the only one that reads it. Per channel, like everything else here.
+LOCAL_DB_PATH = ROOT / f"seen_local_{CHANNEL}.db"
 
 OUT_DIR.mkdir(exist_ok=True)
 BG_DIR.mkdir(parents=True, exist_ok=True)
