@@ -87,7 +87,16 @@ def _wpm() -> int:
     return WPM.get(OUTPUT_LANG, WPM["en"])
 
 
-TAG = re.compile(r"\[[^\]\n]{1,60}\]")
+# How much may sit inside one bracket. A cue past this ceiling is not a cue:
+# it survives plain(), lands in the word count and gets burned into the
+# subtitles. 60 was enough while only the closing question merged a cue with a
+# delivery constraint - 32 chars of constraint left room for any mood. The
+# title merges too now, and its constraint is 52, so a mood as ordinary as
+# "surprised" came to 63 and the merge was dropped instead, silently costing
+# the hook the delivery that was tuned for it. 80 clears the longest
+# documented tag against the longest constraint with room to spare.
+CUE_MAX = 80
+TAG = re.compile(rf"\[[^\]\n]{{1,{CUE_MAX}}}\]")
 ACCENT = "́"                      # combining acute: за́мок vs замо́к
 # Measured against Fish on 2026-08-02: the engine ignores the mark completely -
 # "за́мок" and "замо́к" synthesize identically. The prompt no longer asks for
@@ -122,7 +131,7 @@ def speakers(s: str) -> list[str | None]:
     out: list[str | None] = []
     pending = None          # speaker named by the most recent cue
     current = None          # speaker of the quote we are inside of
-    for token in re.split(r"(\[[^\]\n]{1,60}\])", s):
+    for token in re.split(rf"(\[[^\]\n]{{1,{CUE_MAX}}}\])", s):
         if not token:
             continue
         if token.startswith("[") and token.endswith("]"):
@@ -153,7 +162,7 @@ def speakers(s: str) -> list[str | None]:
 # missing, and every such story costs a rewrite.
 TERMINAL = ".!?…»”"
 SENTENCE = re.compile(
-    rf"(?<=[{re.escape(TERMINAL)}])\s+(?=(?:\[[^\]\n]{{1,60}}\]\s*)*[«„“A-ZА-ЯЁ])")
+    rf"(?<=[{re.escape(TERMINAL)}])\s+(?=(?:\[[^\]\n]{{1,{CUE_MAX}}}\]\s*)*[«„“A-ZА-ЯЁ])")
 
 
 def split_cta(body: str) -> tuple[str, str]:
@@ -341,12 +350,49 @@ def _title_fault(title: str, lang: str = "") -> str:
         return ("the TITLE is two sentences - it must be exactly one, with the "
                 f"turn made on a comma with {_TURN_WORDS[lang]} instead of a "
                 "full stop")
+    return _title_cue_fault(title, t)
+
+
+def _title_cue_fault(title: str, plain_title: str) -> str:
+    """Empty when the title's markup is right. `plain_title` is plain(title).
+
+    An optional mood cue in front, one [emphasis] inside, nothing else. The
+    mark is what the rule is really about: the card is on screen for three
+    seconds against a thumb already moving, and a title read flat gives that
+    thumb nothing to catch on.
+
+    Where it sits is half the point. Not the last word - the title is narrated
+    under FISH_TITLE_CUE, whose job is to keep the engine off the final word,
+    and the two would be pulling against each other. Not the second half
+    either: by then the scroll has been decided, so a peak there is spent on
+    people who already stayed.
+    """
+    marked = [t for t in TAG.findall(title) if t.lower().startswith("[emphasis")]
+    lead = LEAD_CUE.match(title.strip())
+    others = [t for t in TAG.findall(title[lead.end():] if lead else title)
+              if not t.lower().startswith("[emphasis")]
+    if others:
+        return ("the TITLE carries a cue inside the line - only the mood cue in "
+                "front of it and one [emphasis] belong there")
+    if len(marked) != 1:
+        return ("the TITLE needs exactly one [emphasis], in front of the word "
+                "it turns on")
+    after = title[title.lower().index("[emphasis"):]
+    left = len(plain(after).split())
+    if left < 2:
+        return ("the TITLE marks its LAST word - the narration holds that word "
+                "flat, so move the [emphasis] onto the word the title turns on")
+    words = len(plain_title.split())
+    if left <= words / 2:
+        return ("the TITLE marks a word in its second half - move the "
+                "[emphasis] into the first half, where it is heard before the "
+                "viewer has decided to scroll")
     return ""
 
 
 # The mood cue in front of the question. [emphasis] is not a mood, so a
 # question that opens with one still counts as having no opening cue.
-LEAD_CUE = re.compile(r"^\[(?!emphasis\b)[^\]\n]{1,60}\]", re.IGNORECASE)
+LEAD_CUE = re.compile(rf"^\[(?!emphasis\b)[^\]\n]{{1,{CUE_MAX}}}\]", re.IGNORECASE)
 
 
 def _cta_fault(cta: str) -> str:
@@ -447,9 +493,12 @@ def _split(raw: str, fallback_gender: str = "male") -> tuple[str, str, str]:
         head, _, body = rest.strip().partition("\n")
         title = head
         log.warning("no TITLE: tag, taking the first line")
-    # the title is burned on screen, so it must never carry a cue; the body
-    # keeps them and gets stripped later, once, for subtitles and alignment
-    return gender, strip_tags(_clean(title)).rstrip(" .,:;-"), _clean(body)
+    # The title keeps its cues, exactly as the body does. It is burned on
+    # screen, but nothing burns it raw: build_ass() runs plain() over it, the
+    # card's word timings come from the aligner, which works on plain text, and
+    # the meta file publishing reads is written plain. Stripping here instead
+    # cost the title card the only delivery the model could give it.
+    return gender, _clean(title).rstrip(" .,:;-"), _clean(body)
 
 
 def _parse_parts(raw: str, post: dict, parts: int,
@@ -578,8 +627,9 @@ if __name__ == "__main__":
     assert strip_tags("[voice dropping, almost a whisper] Всё.") == "Всё."
     assert strip_tags("без тегов") == "без тегов"
     assert _words("[nervous] раз два три") == 3, "cues must not eat the word budget"
-    gt, tt, bt = _split("NARRATOR: male\nTITLE: [sad] Мой заголовок\n\n[calm] Тело истории.")
-    assert tt == "Мой заголовок", tt
+    gt, tt, bt = _split("NARRATOR: male\nTITLE: [sad] Мой [emphasis] заголовок\n\n[calm] Тело истории.")
+    assert tt == "[sad] Мой [emphasis] заголовок", tt
+    assert plain(tt) == "Мой заголовок", "the card sees none of it"
     assert "[calm]" in bt, "body must keep its cues"
 
     # only "label, delivery" names a speaker. A bare cue is delivery, and with
@@ -613,11 +663,35 @@ if __name__ == "__main__":
     # Both languages are checked on every run, whichever channel this process
     # is. A rule that only holds for the channel you happen to be testing is
     # how the English side would ship with its numeral check switched off.
+    def _marked(title: str) -> str:
+        """Give a fixture the [emphasis] every title now carries.
+
+        These cases are about what the WORDS of a title may be, and none of
+        them should have to restate the markup rule to say it. Second word:
+        inside the first half, and neither the opening word nor the last one.
+        """
+        w = title.split()
+        if "[emphasis]" in title or len(w) < 3:
+            return title
+        return " ".join(w[:1] + ["[emphasis]"] + w[1:])
+
     def ru(title: str) -> str:
-        return _title_fault(title, "ru")
+        return _title_fault(_marked(title), "ru")
 
     def en(title: str) -> str:
-        return _title_fault(title, "en")
+        return _title_fault(_marked(title), "en")
+
+    # the markup rule itself, on a title whose words are beyond reproach
+    GOOD_TITLE = "Соседка [emphasis] прислала мне счёт на 80000 за потоп"
+    assert not _title_fault(GOOD_TITLE, "ru"), _title_fault(GOOD_TITLE, "ru")
+    assert not _title_fault(f"[angry] {GOOD_TITLE}", "ru")
+    assert _title_fault(GOOD_TITLE.replace("[emphasis] ", ""), "ru"), "no mark"
+    assert _title_fault("Соседка прислала мне счёт за свой [emphasis] потоп", "ru"), \
+        "the last word is what FISH_TITLE_CUE holds flat"
+    assert _title_fault("Соседка прислала мне счёт на [emphasis] 80000 за потоп", "ru"), \
+        "second half - the scroll has already been decided"
+    assert _title_fault("[angry] Соседка [surprised] прислала [emphasis] счёт на 80000", "ru"), \
+        "a cue inside the line"
 
     # a title has to show a moment, not describe a stance
     assert ru("Не используйте меня для воспитания детей"), "the plea shape must be caught"
@@ -765,10 +839,10 @@ if __name__ == "__main__":
     # a two-part answer must come apart cleanly: one NARRATOR at the top, a
     # title and a cliffhanger question in each half
     RAW2 = ("NARRATOR: female\n"
-            "TITLE: Свекровь потребовала ключи, а я сменила замки\n\n"
+            "TITLE: Свекровь [emphasis] потребовала ключи, а я сменила замки\n\n"
             "Тело первой части. И тут я услышала её шаги на лестнице.\n"
             "---\n"
-            "TITLE: Свекровь пришла с полицией, а ключи были уже другие\n\n"
+            "TITLE: Свекровь [emphasis] пришла с полицией, а ключи были другие\n\n"
             "Тело второй части. [doubtful] А вы бы её [emphasis] пустили в дом?")
     g4, p4, f4 = _parse_parts(RAW2, {"title": "", "text": ""}, 2, 6)
     assert g4 == "female" and len(p4) == 2, (g4, p4)

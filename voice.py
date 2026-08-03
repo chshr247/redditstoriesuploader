@@ -203,8 +203,8 @@ def speak(text: str, name: str, voice: str = TTS_VOICE, rate: str = RATE,
     return mp3, words
 
 
-CUE_MAX = 60                                  # the ceiling on script.TAG
-LEAD_CUE = re.compile(r"^\[([^\]\n]{1,60})\]\s*")
+CUE_MAX = script.CUE_MAX                      # the ceiling on script.TAG
+LEAD_CUE = re.compile(rf"^\[([^\]\n]{{1,{CUE_MAX}}})\]\s*")
 
 
 def _cued(text: str, cue: str) -> str:

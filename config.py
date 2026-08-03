@@ -109,9 +109,10 @@ FISH_SPEED = float(os.getenv("FISH_SPEED", 1.0))
 # The "even weight" half is not decoration: urgency alone makes the engine
 # punch the final word, which turns every hook into the same rising jab and
 # gives away that the line was written to be a hook.
-# KEEP CUES UNDER 60 CHARACTERS. That is the ceiling on script.py's TAG
-# pattern; a longer one is not recognised as a cue, so it survives into the
-# word count and gets burned into the subtitles instead of steering the voice.
+# KEEP CUES UNDER script.CUE_MAX CHARACTERS, and remember the model's own mood
+# cue is merged INTO this one, so the two share the budget. Past that ceiling a
+# cue is not recognised as a cue: it survives into the word count and gets
+# burned into the subtitles instead of steering the voice.
 FISH_TITLE_CUE = os.getenv(
     "FISH_TITLE_CUE",
     "[urgent hook, even weight, no stress on the last word]")
