@@ -9,7 +9,9 @@ import json
 import logging
 import random
 import re
+import statistics
 import subprocess
+from pathlib import Path
 
 import safety
 import script
@@ -23,6 +25,11 @@ FONT_SIZE = 110
 POP_MS = 120               # scale-up duration of a word appearing
 HOLD_MAX = 0.18            # how long a card may outlive its own audio
 SKIP_HEAD = 30.0           # seconds of every background clip that are off limits
+PROBE_FPS = 4              # frames sampled per second when mapping a clip's motion
+HOOK_WINDOW = 3            # seconds a seek is judged on: the hook, and nothing after it
+MOTION_DIR = BG_DIR / ".motion"   # one json per clip, next to the footage it describes
+CUT_MIN_GAP = 90.0         # how far the post-title footage must be from the opening
+CUT_TRIES = 40             # draws allowed to find that gap before the cut is dropped
 
 log = logging.getLogger(__name__)
 
@@ -172,7 +179,102 @@ def _pick_bg(key: str = "", channel: str = CHANNEL) -> "Path":
     return clips[(seed + offset) % len(clips)]
 
 
-def _seek(bg_dur: float, dur: float, name: str = "") -> float:
+def _motion(clip: Path) -> list[float] | None:
+    """Mean scene-change score for every whole second of `clip`, or None.
+
+    A satisfying compilation is not uniformly satisfying: it has peaks, and it
+    has a minute of someone slowly unwrapping something. _seek() puts the hook
+    on a peak instead of taking whatever the dice gave, and to do that it has
+    to know which second is which.
+
+    Frames are sampled at PROBE_FPS and scaled to 160px wide before scoring.
+    The question here is "how much is going on around here", not where the cuts
+    are, and decoding twenty minutes of 1080p60 in full buys nothing for it -
+    measured 44x realtime this way, so about 25 seconds per clip, once.
+
+    Cached next to the footage, keyed on size and mtime. In CI that cache lives
+    or dies with the backgrounds cache it sits inside; a miss costs one clip's
+    measurement, not all three, because only the chosen clip is ever measured.
+
+    None on any failure, never an exception: a background that cannot be
+    measured is one that falls back to the old uniform seek, not a dead render.
+    """
+    try:
+        st = clip.stat()
+    except OSError:
+        return None
+    stamp = {"size": st.st_size, "mtime": int(st.st_mtime)}
+    cache = MOTION_DIR / f"{clip.stem}.json"
+    if cache.exists():
+        try:
+            got = json.loads(cache.read_text("utf-8"))
+            # size+mtime, not a content hash: re-reading twenty minutes of video
+            # to decide whether to re-read twenty minutes of video is absurd
+            if all(got.get(k) == v for k, v in stamp.items()):
+                return got["seconds"]
+            log.info("%s changed, measuring its motion again", clip.name)
+        except (json.JSONDecodeError, KeyError, OSError):
+            log.warning("%s: motion cache unreadable, measuring again", clip.name)
+
+    log.info("measuring motion in %s (once, then cached)", clip.name)
+    try:
+        # file=- puts the metadata on stdout, which sidesteps the Windows drive
+        # colon that a file= path would smuggle into the filter description
+        proc = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(clip), "-an", "-vf",
+             f"fps={PROBE_FPS},scale=160:-2,select='gt(scene,0)',"
+             "metadata=print:file=-", "-f", "null", "-"],
+            capture_output=True, text=True, check=True, timeout=600)
+    except (subprocess.SubprocessError, OSError) as e:
+        log.warning("could not measure %s (%s) - falling back to a plain seek",
+                    clip.name, e)
+        return None
+
+    # the filter prints two lines per frame: the frame, then its score
+    seconds: dict[int, list[float]] = {}
+    at = None
+    for line in proc.stdout.splitlines():
+        m = re.search(r"pts_time:([\d.]+)", line)
+        if m:
+            at = int(float(m.group(1)))
+            continue
+        m = re.search(r"lavfi\.scene_score=([\d.]+)", line)
+        if m and at is not None:
+            seconds.setdefault(at, []).append(float(m.group(1)))
+    if not seconds:
+        log.warning("%s: no scene scores came back - falling back", clip.name)
+        return None
+
+    # a gap-free list indexed by second, so callers can slice it by time
+    out = [statistics.fmean(seconds.get(s, [0.0]))
+           for s in range(max(seconds) + 1)]
+    try:
+        MOTION_DIR.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps({**stamp, "seconds": out}), "utf-8")
+    except OSError as e:
+        log.warning("could not cache motion for %s (%s)", clip.name, e)
+    return out
+
+
+def _live(scores: list[float], lo: float, hi: float) -> list[int]:
+    """Seconds in [lo, hi] whose next HOOK_WINDOW is livelier than this clip's median.
+
+    The median rather than a fixed threshold: scene scores are not comparable
+    between clips - a fast-cut compilation sits an order of magnitude above a
+    single slow shot - so "lively" can only mean lively FOR THIS CLIP.
+    """
+    starts = range(int(lo) + 1, int(hi) + 1)
+    windows = {s: statistics.fmean(scores[s:s + HOOK_WINDOW])
+               for s in starts if len(scores[s:s + HOOK_WINDOW]) == HOOK_WINDOW}
+    if len(windows) < 10:
+        # too few to have a meaningful middle; let the caller draw uniformly
+        return []
+    bar = statistics.median(windows.values())
+    return [s for s, v in windows.items() if v > bar]
+
+
+def _seek(bg_dur: float, dur: float, name: str = "",
+          scores: list[float] | None = None) -> float:
     """Where inside the background clip to start, at random.
 
     Random so consecutive videos don't share footage, and never inside the
@@ -182,9 +284,19 @@ def _seek(bg_dur: float, dur: float, name: str = "") -> float:
     The window is [SKIP_HEAD, bg_dur - dur], so the narration also fits before
     the end and -stream_loop never fires - that is what makes the head skip a
     guarantee for the whole video rather than only for its first frame.
+
+    Given `scores` from _motion(), the draw narrows to the livelier half of
+    that window. Uniform, roughly half the videos open on the slow stretch of
+    a compilation, and those are three seconds the hook does not get back.
+    Still a DRAW over the good seconds, not the single best one: three clips
+    serve every video this channel makes, and a clip that always opens at its
+    one peak is a repeat the viewer notices.
     """
     latest = bg_dur - dur
     if latest >= SKIP_HEAD:
+        live = _live(scores, SKIP_HEAD, latest) if scores else []
+        if live:
+            return float(random.choice(live))
         return round(random.uniform(SKIP_HEAD, latest), 2)
     if bg_dur > SKIP_HEAD:
         # too short to fit the narration after the head; start right past the
@@ -194,6 +306,36 @@ def _seek(bg_dur: float, dur: float, name: str = "") -> float:
     log.warning("%s is only %.0fs - shorter than the %.0fs head skip",
                 name, bg_dur, SKIP_HEAD)
     return 0.0
+
+
+def _cut(bg_dur: float, dur: float, title_end: float, name: str,
+         scores: list[float] | None, first: float) -> float | None:
+    """Where the footage jumps to when the title card leaves, or None for no cut.
+
+    A whole video off one unbroken stretch of one clip is what makes these read
+    as a conveyor. The eye re-engages at a cut, and there is exactly one moment
+    worth spending that on: the title card going away and the story starting.
+    Before it the viewer is reading, after it they are listening, and the
+    footage changing underneath says so.
+
+    The second stretch is drawn the same way as the first, so it is livelier
+    than this clip's median too, and it must land CUT_MIN_GAP away from where
+    the video opened - two seeks thirty seconds apart in a compilation of long
+    takes are the same shot, and the cut lands as a glitch instead.
+
+    None whenever there is nothing to gain or no room to do it safely: no title
+    card to cut on, a story too short to have two parts, or a clip that could
+    not offer a far enough second window in CUT_TRIES draws.
+    """
+    if title_end <= 0 or dur - title_end < HOOK_WINDOW:
+        return None
+    for _ in range(CUT_TRIES):
+        pick = _seek(bg_dur, dur - title_end, name, scores)
+        if abs(pick - first) >= CUT_MIN_GAP:
+            return pick
+    log.info("%s: no second window %.0fs clear of %.0fs, leaving the cut out",
+             name, CUT_MIN_GAP, first)
+    return None
 
 
 def render(mp3, words: list[dict], name: str, bg=None,
@@ -210,23 +352,43 @@ def render(mp3, words: list[dict], name: str, bg=None,
     out = OUT_DIR / f"{name}.mp4"
     build_ass(words, ass, title, title_end)
 
-    seek = _seek(_dur(bg), dur, bg.name)
+    scores = _motion(bg)
+    bg_dur = _dur(bg)
+    seek = _seek(bg_dur, dur, bg.name, scores)
+    cut = _cut(bg_dur, dur, title_end, bg.name, scores, seek)
+
+    # 720p sources get upscaled ~2.7x to cover 1080 wide, so lanczos over the
+    # default bilinear is a visible win for one flag. setsar guards against
+    # clips with non-square pixels. Every background is mirrored; hflip sits
+    # before subtitles so the footage flips and the burnt-in subtitles do not.
+    # Whatever writing the SOURCE carries does flip - a creator watermark comes
+    # out backwards, which is the one thing that makes the mirroring obvious.
+    # See DOCS.ru.md.
+    # fps is pinned per branch rather than left to -r: concat below refuses to
+    # join streams that disagree about it, and with one branch it costs nothing.
+    chain = (f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
+             f"crop={W}:{H},setsar=1,hflip,fps={FPS}")
+    if cut is None:
+        inputs = ["-ss", str(seek), "-stream_loop", "-1", "-i", str(bg)]
+        video, audio = f"[0:v]{chain},subtitles={ass.name}[v]", "1:a"
+    else:
+        # Two reads of the same file, joined where the title card leaves and
+        # the story starts. Subtitles go on AFTER the join, so the word cards
+        # run across it untouched and only the footage cuts.
+        inputs = ["-ss", str(seek), "-t", f"{title_end:.3f}",
+                  "-stream_loop", "-1", "-i", str(bg),
+                  "-ss", str(cut), "-stream_loop", "-1", "-i", str(bg)]
+        video = (f"[0:v]{chain}[hook];[1:v]{chain}[rest];"
+                 f"[hook][rest]concat=n=2:v=1:a=0[cat];"
+                 f"[cat]subtitles={ass.name}[v]")
+        audio = "2:a"
 
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
-        "-ss", str(seek), "-stream_loop", "-1", "-i", str(bg),
+        *inputs,
         "-i", str(mp3),
-        "-filter_complex",
-        # 720p sources get upscaled ~2.7x to cover 1080 wide, so lanczos over
-        # the default bilinear is a visible win for one flag. setsar guards
-        # against clips with non-square pixels. Every background is mirrored;
-        # hflip sits before subtitles so the footage flips and the burnt-in
-        # subtitles do not. Whatever writing the SOURCE carries does flip -
-        # a creator watermark comes out backwards, which is the one thing that
-        # makes the mirroring obvious. See DOCS.ru.md.
-        f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
-        f"crop={W}:{H},setsar=1,hflip,subtitles={ass.name}[v]",
-        "-map", "[v]", "-map", "1:a", "-t", f"{dur:.3f}", "-r", str(FPS),
+        "-filter_complex", video,
+        "-map", "[v]", "-map", audio, "-t", f"{dur:.3f}", "-r", str(FPS),
         # The ceiling is the point, not the CRF. crf 23 alone let high-motion
         # backgrounds run to 7.1 Mbit/s - a 1.4 min video came out 72 MB - and
         # the upload is the constraint here: the tau backend posts through a
@@ -247,7 +409,8 @@ def render(mp3, words: list[dict], name: str, bg=None,
     ]
     # run inside OUT_DIR: the subtitles filter chokes on Windows drive colons
     subprocess.run(cmd, cwd=OUT_DIR, check=True)
-    log.info("%s: %.1f sec from %s at %.1fs", out.name, dur, bg.name, seek)
+    log.info("%s: %.1f sec from %s at %.1fs%s", out.name, dur, bg.name, seek,
+             f", cutting to %.1fs at %.1fs" % (cut, title_end) if cut else "")
     return out
 
 
@@ -269,6 +432,38 @@ if __name__ == "__main__":
     assert _seek(100, 90, "(expected warning)") == SKIP_HEAD
     assert _seek(20, 60, "(expected warning)") == 0   # shorter than the head skip
     assert _seek(90.0, 60.0) == SKIP_HEAD   # exactly enough room, no randomness left
+
+    # One loud stretch in an otherwise quiet clip: every live second must come
+    # from it, and every seek must come from the live seconds. A window starting
+    # up to HOOK_WINDOW-1 early still overlaps the loud part, so the band opens
+    # that much before it.
+    quiet = [0.01] * 600
+    quiet[100:200] = [0.5] * 100
+    live = _live(quiet, SKIP_HEAD, 540)
+    assert live, "a clip with an obvious peak produced no live seconds"
+    assert all(100 - HOOK_WINDOW < s < 200 for s in live), (min(live), max(live))
+    seeks = {_seek(600, 60, scores=quiet) for _ in range(200)}
+    assert seeks <= {float(s) for s in live}, sorted(seeks - {float(s) for s in live})
+    assert len(seeks) > 20, "the draw collapsed onto a handful of seconds"
+    # A clip that is lively everywhere has no better half to prefer, and must
+    # hand the choice back rather than narrow it to nothing.
+    assert _live([0.02] * 600, SKIP_HEAD, 540) == []
+    assert _live(quiet, SKIP_HEAD, 40) == []      # too short a window to have a middle
+    # ...and the fallback is the old behaviour, untouched
+    flat = [_seek(600, 60, scores=[0.02] * 600) for _ in range(200)]
+    assert len(set(flat)) > 100 and all(SKIP_HEAD <= s <= 540 for s in flat)
+
+    # The cut is far from the opening or it is not made at all, and the second
+    # stretch still has to hold everything after the title card.
+    cuts = [_cut(1100, 75, 3.0, "bg", None, 100.0) for _ in range(200)]
+    assert all(c is None or abs(c - 100.0) >= CUT_MIN_GAP for c in cuts)
+    assert all(c is None or SKIP_HEAD <= c <= 1100 - 72 for c in cuts)
+    assert sum(c is not None for c in cuts) > 190, "the cut is being dropped too often"
+    # Nothing to cut on, and nothing to cut into
+    assert _cut(1100, 75, 0, "bg", None, 100.0) is None      # no title card
+    assert _cut(1100, 75, 74.0, "bg", None, 100.0) is None   # nothing after the card
+    # A clip with no window CUT_MIN_GAP clear of the opening gives up quietly
+    assert _cut(200, 75, 3.0, "(expected info)", None, 60.0) is None
 
     mp3 = OUT_DIR / "_selftest.mp3"
     assert mp3.exists(), "run `python voice.py` first"
@@ -320,6 +515,14 @@ if __name__ == "__main__":
         bg = _pick_bg()
     except RuntimeError:
         bg = None
+
+    if bg:
+        # Measures the clip for real the first time and caches it; the second
+        # call must come back from that cache rather than decode again, which
+        # is the whole reason the cache exists.
+        first = _motion(bg)
+        assert first is None or (len(first) > 1 and all(s >= 0 for s in first))
+        assert _motion(bg) == first, "the motion cache did not round-trip"
     if bg is None:
         bg = OUT_DIR / "_testbg.mp4"
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
