@@ -110,6 +110,14 @@ def speakers(s: str) -> list[str | None]:
     both jobs done at once - no second syntax to remember and nothing extra to
     strip. The list lines up with plain(s).split() one for one, which is the
     same list the aligner produces.
+
+    Only a cue with a COMMA names anyone, which is the shape the prompt asks
+    for: label, comma, delivery. A bare cue is delivery alone and leaves the
+    pending label untouched - "[husband, angry] [emphasis] «Ужин»" is the
+    husband, not a speaker called "emphasis". That mattered once [emphasis]
+    started appearing on a key word in every sentence: a bare cue read as a
+    label would take a colour of its own and shift every real speaker's colour
+    after it, see render._styles().
     """
     out: list[str | None] = []
     pending = None          # speaker named by the most recent cue
@@ -118,8 +126,9 @@ def speakers(s: str) -> list[str | None]:
         if not token:
             continue
         if token.startswith("[") and token.endswith("]"):
-            label = re.split(r"[,\s]", token[1:-1].strip(), 1)[0].lower()
-            pending = re.sub(r"\W", "", label) or None
+            if "," in token:
+                label = token[1:-1].split(",", 1)[0].strip().lower()
+                pending = re.sub(r"\W", "", label) or None
             continue
         for word in token.split():
             opens = any(c in word for c in "«„“")
@@ -343,18 +352,33 @@ LEAD_CUE = re.compile(r"^\[(?!emphasis\b)[^\]\n]{1,60}\]", re.IGNORECASE)
 def _cta_fault(cta: str) -> str:
     """Empty when the closing question is marked up for delivery.
 
-    A leading mood cue and nothing else. Marking one word for stress mid-line
-    was tried and measured: the tagged word came back no longer, and sometimes
-    shorter, than the same word untagged. It changes nothing about how the
-    question is read, so it is not allowed to sit there looking like it does.
+    A leading mood cue, then exactly one [emphasis] and nothing else. The mark
+    was kept out of the question for a while: measured on its own it came back
+    no longer, and sometimes shorter, than the same word untagged. That was a
+    duration test, and duration is a poor proxy - the question now carries it
+    like every other sentence.
+
+    Not on the LAST word, though. The question is synthesized under
+    FISH_CTA_CUE, whose whole job is to keep the engine off the final word, and
+    a mark there is asking for one thing and its opposite in the same take.
     """
-    m = LEAD_CUE.match(cta.strip())
+    cta = cta.strip()
+    m = LEAD_CUE.match(cta)
     if not m:
         return ("the closing question must open with a mood cue before its "
                 "first word, like \"[doubtful] А как бы...\"")
-    if TAG.search(cta.strip()[m.end():]):
+    rest = cta[m.end():]
+    marks = TAG.findall(rest)
+    if [t for t in marks if not t.lower().startswith("[emphasis")]:
         return ("the closing question carries a cue inside the line - the "
-                "opening mood cue is the only markup it may have")
+                "opening mood cue and one [emphasis] are all it may have")
+    if len(marks) != 1:
+        return ("the closing question needs exactly one [emphasis], in front of "
+                "the word it turns on")
+    after = rest[rest.lower().index("[emphasis") :]
+    if len(strip_tags(after).split()) < 2:
+        return ("the closing question marks its LAST word - move the [emphasis] "
+                "onto the word the question turns on, further back in the line")
     return ""
 
 
@@ -558,6 +582,19 @@ if __name__ == "__main__":
     assert tt == "Мой заголовок", tt
     assert "[calm]" in bt, "body must keep its cues"
 
+    # only "label, delivery" names a speaker. A bare cue is delivery, and with
+    # [emphasis] now landing in almost every sentence one WILL sit in front of a
+    # quote sooner or later - it must not become a speaker of its own.
+    def _who(s):
+        return list(zip(plain(s).split(), speakers(s)))
+    assert _who("Он спустился. [husband, angry] «Ужин»")[-1][1] == "husband"
+    assert _who("Он спустился. [husband, angry] [emphasis] «Ужин»")[-1][1] == "husband", \
+        "a bare cue must not steal the label"
+    assert _who("Он спустился. [emphasis] «Ужин»")[-1][1] == "other", \
+        "an unnamed quote is other, never the cue's own word"
+    # emphasis inside the narration colours nothing at all
+    assert set(speakers("Она вернула [emphasis] сорок тысяч.")) == {None}
+
     # an accent the model writes anyway must never reach the screen
     marked = f"Он сорвал замо{ACCENT}к с двери."
     assert plain(marked) == "Он сорвал замок с двери.", plain(marked)
@@ -663,7 +700,7 @@ if __name__ == "__main__":
     assert c == "Would you have stayed?", c
     assert s.endswith("“Are you serious?”"), s
     assert not _ending_fault('He left. [me, cold] “Dinner is on the table.” '
-                             "[doubtful] Would you have said that?")
+                             "[doubtful] Would you have [emphasis] said that to him?")
     assert not _ending_fault('...And I froze. [angry] “Get out of my house.”',
                              final=False), "a part may end on a line of dialogue"
 
@@ -689,7 +726,7 @@ if __name__ == "__main__":
     assert _words(s) + _words(c) == _words(full), (s, c)
 
     # the closing question is what proves the text reached its end
-    GOOD_CTA = "[doubtful] А как бы вы поступили на моём месте?"
+    GOOD_CTA = "[doubtful] А как бы вы [emphasis] поступили на моём месте?"
     assert not _ending_fault(f"Я собрал вещи и ушёл. {GOOD_CTA}")
     assert _ending_fault("Я собрал вещи и ушёл."), "a story with no CTA is unfinished"
     assert _ending_fault("Он открыл дверь и"), "a cut-off narration must be caught"
@@ -708,14 +745,17 @@ if __name__ == "__main__":
         "a rhetorical question is the same shape and is out too"
     assert _ending_fault("", final=False)
 
-    # a leading mood cue, and nothing else on the line
+    # a leading mood cue, one [emphasis], and nothing else on the line
     assert not _cta_fault(GOOD_CTA)
-    assert not _cta_fault("[thoughtful] А вы бы простили его?")
-    assert _cta_fault("А вы бы простили его?"), "no mood cue"
-    assert _cta_fault("[emphasis]А вы бы простили его?"), "emphasis is not a mood"
-    # marking one word for stress was measured and does nothing - keep it out
-    assert _cta_fault("[doubtful] А вы бы [emphasis]простили его?"), "cue inside the line"
+    assert not _cta_fault("[thoughtful] А вы бы [emphasis] простили его?")
+    assert _cta_fault("А вы бы [emphasis] простили его?"), "no mood cue"
+    assert _cta_fault("[emphasis] А вы бы простили его?"), "emphasis is not a mood"
+    assert _cta_fault("[doubtful] А как бы вы поступили?"), "no emphasis at all"
+    assert _cta_fault("[doubtful] А вы бы [emphasis] простили [emphasis] его?"), \
+        "one mark, not two"
     assert _cta_fault("[doubtful] А вы бы простили [quietly] его?"), "second cue"
+    assert _cta_fault("[doubtful] А вы бы его [emphasis] простили?"), \
+        "the last word is what FISH_CTA_CUE holds flat"
 
     # how many videos a post is worth, by source length alone
     assert part_count({"text": "x" * 500}) == 1
@@ -729,7 +769,7 @@ if __name__ == "__main__":
             "Тело первой части. И тут я услышала её шаги на лестнице.\n"
             "---\n"
             "TITLE: Свекровь пришла с полицией, а ключи были уже другие\n\n"
-            "Тело второй части. [doubtful] А вы бы её пустили?")
+            "Тело второй части. [doubtful] А вы бы её [emphasis] пустили в дом?")
     g4, p4, f4 = _parse_parts(RAW2, {"title": "", "text": ""}, 2, 6)
     assert g4 == "female" and len(p4) == 2, (g4, p4)
     assert p4[0][0].startswith("Свекровь потребовала"), p4[0]
@@ -743,7 +783,7 @@ if __name__ == "__main__":
                            "[curious] Как думаете, что было дальше?")
     _, _, f7 = _parse_parts(RAW_BAD, {"title": "", "text": ""}, 2, 6)
     assert any(f.startswith("part 1") and "not the last" in f for f in f7), f7
-    RAW_BAD2 = RAW2.replace("[doubtful] А вы бы её пустили?", "И она ушла.")
+    RAW_BAD2 = RAW2.replace("[doubtful] А вы бы её [emphasis] пустили в дом?", "И она ушла.")
     _, _, f8 = _parse_parts(RAW_BAD2, {"title": "", "text": ""}, 2, 6)
     assert any(f.startswith("part 2") and "question" in f for f in f8), f8
     # one part where two were asked for is a fault, not a silent single video
