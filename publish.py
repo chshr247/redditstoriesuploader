@@ -55,7 +55,8 @@ import tags as tags_          # `tags` is the local variable in caption()
 from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL, OUT_DIR,
                     PART_GAP_HOURS, TIKTOK_BACKEND, TIKTOK_CLIENT_KEY,
                     TIKTOK_CLIENT_SECRET, TIKTOK_ENABLED, TIKTOK_MIN_GAP_HOURS,
-                    TIKTOK_PER_DAY, TIKTOK_PROXY, TIKTOK_REFRESH_KEY,
+                    TIKTOK_PER_DAY, TIKTOK_PROXY, TIKTOK_PUBLIC,
+                    TIKTOK_REFRESH_KEY,
                     TIKTOK_REFRESH_TOKEN, TIKTOK_TAU_DIR, TIKTOK_TAU_PYTHON,
                     TIKTOK_TAU_UA, TIKTOK_TAU_USER, chan_key, save_env)
 
@@ -585,6 +586,16 @@ def upload_next(direct: bool = False, private: bool = True,
     return pid
 
 
+def _public() -> bool:
+    """Does this run publish visibly? The channel decides, --public overrides.
+
+    A single source for the question, because it is asked from two CLI branches
+    and getting different answers out of them is the kind of bug that shows up
+    as "where did last Tuesday go".
+    """
+    return TIKTOK_PUBLIC or "--public" in sys.argv
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -711,7 +722,7 @@ if __name__ == "__main__":
                 print("  queued", p.name)
         elif "--next" in sys.argv:
             print(upload_next(direct="--direct" in sys.argv,
-                              private="--public" not in sys.argv,
+                              private=not _public(),
                               force="--force" in sys.argv))
         elif len(sys.argv) > 1 and sys.argv[1].endswith(".mp4"):
             mp4 = Path(sys.argv[1])
@@ -721,7 +732,7 @@ if __name__ == "__main__":
             meta = _meta_for(mp4)
             pid = upload(mp4, part_prefix(meta) + (meta.get("title") or mp4.stem),
                          direct="--direct" in sys.argv,
-                         private="--public" not in sys.argv,
+                         private=not _public(),
                          body=meta.get("body", ""),
                          kind=meta.get("kind", "story"))
             # Record it, exactly as upload_next() does. This path skips the
