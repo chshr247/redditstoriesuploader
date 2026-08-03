@@ -120,10 +120,16 @@ jobs:
       # here rather than in config.py so changing it is a variable, not a push.
       TIKTOK_MIN_GAP_HOURS: ${{ vars.TIKTOK_MIN_GAP_HOURS || '3' }}
       SUBREDDITS: ${{ vars.SUBREDDITS }}
+      # The English channel reads its own list when there is one: the two
+      # audiences are not there for the same thing, and this one is there to
+      # laugh. Unset arrives empty, config.py reads that as absent and both
+      # channels go back to sharing SUBREDDITS.
+      SUBREDDITS_EN: ${{ vars.SUBREDDITS_EN }}
       # Fact subs, narrated from their own prompt. Defaulted here rather than
       # left to config.py so the pair can be changed without a push, and so an
       # unset variable does not silently drop the fact videos.
       FACT_SUBREDDITS: ${{ vars.FACT_SUBREDDITS || 'YouShouldKnow' }}
+      FACT_SUBREDDITS_EN: ${{ vars.FACT_SUBREDDITS_EN }}
       # The day's one loud video, taken from above MAX_SCORE. A knob because
       # the right floor depends on which subs are in the list: 40k is roughly
       # 200 usable posts across the six above, and raising it thins that fast.
