@@ -1,0 +1,7 @@
+# A patch is matched against the bytes of the files it applies to. With
+# core.autocrlf=true git would check this one out with CRLF endings, and
+# `git apply` would then fail on every LF source line it is supposed to match -
+# on Linux always, and on a Windows checkout of an LF repo too. Keep it as it
+# was written.
+*.patch -text
+*.diff  -text
