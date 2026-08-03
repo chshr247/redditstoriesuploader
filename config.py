@@ -208,6 +208,11 @@ TIKTOK_TAU_PYTHON = chan_env("TIKTOK_TAU_PYTHON", shared=True)
 # is to say: the account. Per channel by the same rule as the refresh token - a
 # silent fallback would post the English video to the Russian account.
 TIKTOK_TAU_USER = chan_env("TIKTOK_TAU_USER")
+# The user agent of the browser profile that minted that cookie. Left empty the
+# fork picks a RANDOM one per upload, so the session is presented by a
+# different browser than the one that logged in - which is exactly the tell an
+# antidetect profile exists to avoid. Per channel: two profiles, two agents.
+TIKTOK_TAU_UA = chan_env("TIKTOK_TAU_UA")
 # One exit IP per account, and NOT shared for exactly that reason: two accounts
 # reaching TikTok from one address is the single thing a proxy is here to
 # prevent. Read by the fork's login browser and its signer too, so it covers
@@ -290,6 +295,13 @@ if __name__ == "__main__":
     if TIKTOK_BACKEND == "tau":
         assert TIKTOK_TAU_DIR, f"{chan_key('TIKTOK_TAU_DIR', True)} is unset"
         assert TIKTOK_TAU_USER, f"{chan_key('TIKTOK_TAU_USER')} is unset"
+        # A rotating exit IP is worse than none: the upload is a dozen requests
+        # plus a page load, and this gateway hands out a new address per
+        # request unless the login carries a session id.
+        assert "dataimpulse" not in TIKTOK_PROXY or "sessid." in TIKTOK_PROXY, \
+            (f"{chan_key('TIKTOK_PROXY')} has no sessid. - DataImpulse rotates "
+             "the IP per request without one, so every step of one upload "
+             "would come from a different address")
     print(f"OK: channel {CHANNEL}, {len(SUBREDDITS)} subs + "
           f"{len(FACT_SUBREDDITS)} fact subs, {TARGET_SEC}s (floor {MIN_SEC}s), "
           f"viral from {VIRAL_MIN_SCORE}")

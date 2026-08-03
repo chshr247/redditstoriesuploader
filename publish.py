@@ -57,7 +57,7 @@ from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL, OUT_DIR,
                     TIKTOK_CLIENT_SECRET, TIKTOK_ENABLED, TIKTOK_MIN_GAP_HOURS,
                     TIKTOK_PER_DAY, TIKTOK_PROXY, TIKTOK_REFRESH_KEY,
                     TIKTOK_REFRESH_TOKEN, TIKTOK_TAU_DIR, TIKTOK_TAU_PYTHON,
-                    TIKTOK_TAU_USER, chan_key, save_env)
+                    TIKTOK_TAU_UA, TIKTOK_TAU_USER, chan_key, save_env)
 
 API = "https://open.tiktokapis.com/v2"
 AUTH_URL = "https://www.tiktok.com/v2/auth/authorize/"
@@ -316,6 +316,12 @@ def _upload_tau(mp4, title: str, private: bool = True, body: str = "",
         log.warning("%s is unset: this posts from the real IP, and every "
                     "channel on this machine shares it",
                     chan_key("TIKTOK_PROXY"))
+    if not TIKTOK_TAU_UA:
+        # Same shape of problem: it works, and it works while presenting a
+        # browser the account has never been seen in.
+        log.warning("%s is unset: the fork will invent a random user agent, "
+                    "so this upload will not look like the browser that "
+                    "logged in", chan_key("TIKTOK_TAU_UA"))
 
     text = caption(title, body=body, kind=kind)
     cmd = [_tau_python(), "cli.py", "upload",
@@ -336,6 +342,11 @@ def _upload_tau(mp4, title: str, private: bool = True, body: str = "",
     env = {**os.environ}
     if TIKTOK_PROXY:
         env["TIKTOK_PROXY"] = TIKTOK_PROXY
+    if TIKTOK_TAU_UA:
+        # Read by the patched upload_video in place of a random one, and by the
+        # signer, so the signature is computed under the agent it is signing
+        # for rather than a second unrelated browser.
+        env["TIKTOK_UA"] = TIKTOK_TAU_UA
     # We read the child as UTF-8. On Windows a piped python writes cp1252 by
     # default, and the one thing we would want to read is the failure it prints
     # - which contains the caption, in Cyrillic. Without this the id still
