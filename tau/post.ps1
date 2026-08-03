@@ -35,9 +35,14 @@ $env:PYTHONIOENCODING = "utf-8"
 
 $Log = Join-Path $Root "out\post.log"
 
+# -Encoding utf8 is not optional. Tee-Object writes UTF-16 in PS 5.1 and
+# Add-Content defaults to the ANSI codepage, while the redirect below appends
+# python's raw UTF-8 bytes - so without saying so, one log file ends up in two
+# encodings and reads as garbage in whichever tool opens it.
 function Say($msg) {
-    "{0}  {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg |
-        Tee-Object -FilePath $Log -Append
+    $line = "{0}  {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg
+    Write-Output $line
+    Add-Content -Path $Log -Value $line -Encoding utf8
 }
 
 # Redirection happens in cmd, NOT in PowerShell. `2>&1` on a native exe here
