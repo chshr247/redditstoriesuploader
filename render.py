@@ -33,7 +33,18 @@ CUT_TRIES = 40             # draws allowed to find that gap before the cut is dr
 
 log = logging.getLogger(__name__)
 
-CARD_FONT_SIZE = 62
+CARD_FONT_SIZE = 82
+# ASS stores colour as &HAABBGGRR. The card is near-black on near-white, so the
+# accent cannot come from SPEAKER_COLOURS below - those are picked to sit on
+# video and yellow on a white card is invisible. Deep red reads on paper white.
+CARD_TEXT = "&H00101010"
+CARD_BOX = "&H00F2F2F2"
+CARD_ACCENT = "&H001A1ACC"
+# What prompts.py guarantees every title rests on: a figure, or a line somebody
+# actually said. Those two are findable; the third (a named stake) is not.
+# Both quote shapes, because the channels use different ones - «» and “”.
+ACCENT = re.compile(r"\d+|«[^»]*»|“[^”]*”")
+CARD_POP_MS = 70           # how fast the card's highlight moves onto a word
 
 # ASS stores colour as &HAABBGGRR - byte order reversed from RGB. Narrator stays
 # white; each speaker takes the next colour the first time they say anything.
@@ -61,7 +72,7 @@ ScaledBorderAndShadow: yes
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Main,{FONT},{FONT_SIZE},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,8,3,5,80,80,0,1
 {SPEECH_STYLES}
-Style: Card,{FONT},{CARD_FONT_SIZE},&H00101010,&H000000FF,&H00F2F2F2,&H00F2F2F2,-1,0,0,0,100,100,0,0,3,24,0,5,120,120,0,1
+Style: Card,{FONT},{CARD_FONT_SIZE},{CARD_TEXT},&H000000FF,{CARD_BOX},{CARD_BOX},-1,0,0,0,100,100,0,0,3,24,0,5,120,120,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -75,6 +86,73 @@ def _ts(sec: float) -> str:
     m, cs = divmod(cs, 6000)
     s, cs = divmod(cs, 100)
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+
+def _sung(words: list[dict], title_end: float) -> list[tuple[float, float, str]]:
+    """(start, end, card text) per word: the whole title, that word lit.
+
+    This is what the card is for. A static block of text is read in about a
+    second and then sits there for two more with nothing happening on it, which
+    is most of the hook spent on a still image. Lighting the word being spoken
+    puts movement exactly where the eye already is, and unlike _accent() it
+    fires on EVERY title rather than the one in five that carries a figure.
+
+    The whole title stays on screen throughout - this is not a word-by-word
+    reveal. A viewer who reads faster than the narrator speaks has to be able
+    to finish early; that is what a title card is for, and hiding the end of it
+    would trade the hook for a gimmick.
+
+    One Dialogue event per word rather than one animated line. An ASS override
+    block applies from where it sits to the END of the line, so per-word \\t
+    animations are inherited by every word after them and accumulate - the
+    first attempt lit the whole tail of the title instead of one word. Static
+    colour on separate events has no such reach.
+
+    Timings come from the title's own take, so the highlight follows the actual
+    voice rather than an estimate: a word the narrator lingers on stays lit.
+    """
+    clean = []
+    for i, w in enumerate(words):
+        text = safety.mask(re.sub(r"[{}\\]", "", w["word"]))
+        if i == len(words) - 1:
+            # _cued() ends the take on a full stop so the title does not run
+            # into the story; the card never showed that stop and still must not
+            text = re.sub(r"[.!?]+$", "", text)
+        if text:
+            clean.append((w["start"], text))
+    if not clean:
+        return []
+
+    out = []
+    for i, (start, _) in enumerate(clean):
+        end = clean[i + 1][0] if i + 1 < len(clean) else title_end
+        if end <= start:
+            continue
+        lit = " ".join(
+            f"{{\\c{CARD_ACCENT}&}}{t}{{\\c{CARD_TEXT}&}}" if n == i else t
+            for n, (_, t) in enumerate(clean))
+        out.append((start, end, lit))
+    # a card that starts before the first word would flash uncoloured, so the
+    # first event simply opens with the card rather than waiting for it
+    if out:
+        out[0] = (0.0, out[0][1], out[0][2])
+    return out
+
+
+def _accent(text: str) -> str:
+    """Colour the figure or the quoted line the title is built on.
+
+    A digit is the one thing the eye catches while scrolling, and until now it
+    was set in exactly the same near-black as the prepositions around it. The
+    title rule in prompts.py already guarantees one of these is present, so
+    this reads what the prompt promised rather than guessing at emphasis.
+
+    Returns the text unchanged when neither is there - a title resting on a
+    named stake has nothing to colour, and colouring a random word instead
+    would tell the eye to catch the wrong thing.
+    """
+    return ACCENT.sub(
+        lambda m: f"{{\\c{CARD_ACCENT}&}}{m.group(0)}{{\\c{CARD_TEXT}&}}", text)
 
 
 def _styles(words: list[dict]) -> dict:
@@ -119,15 +197,26 @@ def _group(words: list[dict], min_chars: int = 3, max_words: int = 2,
     return out
 
 
-def build_ass(words: list[dict], path, title: str = "", title_end: float = 0) -> None:
+def build_ass(words: list[dict], path, title: str = "", title_end: float = 0,
+              title_words: list[dict] | None = None) -> None:
     """Title card for the intro, then one word card at a time."""
     lines = [ASS_HEADER]
     if title and title_end > 0:
-        # the title reaches here straight from the model, cues and stray
-        # accents and all - plain() is what keeps both off the card
-        safe = safety.mask(script.plain(re.sub(r"[{}\\]", "", title)))
-        lines.append(f"Dialogue: 0,{_ts(0)},{_ts(title_end)},Card,,0,0,0,,"
-                     r"{\fscx85\fscy85\t(0,180,\fscx100\fscy100)}" + safe)
+        # the scale-up belongs to the card appearing, so it rides the first
+        # event only - later ones are already at full size
+        pop = r"{\fscx85\fscy85\t(0,180,\fscx100\fscy100)}"
+        cards = _sung(title_words, title_end) if title_words else []
+        if not cards:
+            # No timings for the title - an older render, or an aligner that
+            # came back empty. The card still has to carry emphasis, so it
+            # falls back to colouring the figure or the quoted line.
+            # the title reaches here straight from the model, cues and stray
+            # accents and all - plain() is what keeps both off the card
+            cards = [(0.0, title_end,
+                      _accent(safety.mask(script.plain(re.sub(r"[{}\\]", "", title)))))]
+        for i, (start, end, text) in enumerate(cards):
+            lines.append(f"Dialogue: 0,{_ts(start)},{_ts(end)},Card,,0,0,0,,"
+                         + (pop if i == 0 else "") + text)
     styles = _styles(words)
     words = _group(words)
     for i, w in enumerate(words):
@@ -347,7 +436,8 @@ def _cut(bg_dur: float, dur: float, title_end: float, name: str,
 
 
 def render(mp3, words: list[dict], name: str, bg=None,
-           title: str = "", title_end: float = 0, key: str = ""):
+           title: str = "", title_end: float = 0, key: str = "",
+           title_words: list[dict] | None = None):
     """Burn subtitles over a background clip and mux the narration.
 
     `key` identifies the STORY rather than the file: out/<id>_en.mp4 and
@@ -358,7 +448,7 @@ def render(mp3, words: list[dict], name: str, bg=None,
     dur = _dur(mp3)
     ass = OUT_DIR / f"{name}.ass"
     out = OUT_DIR / f"{name}.mp4"
-    build_ass(words, ass, title, title_end)
+    build_ass(words, ass, title, title_end, title_words)
 
     scores = _motion(bg)
     bg_dur = _dur(bg)
@@ -489,6 +579,43 @@ if __name__ == "__main__":
 
     def _w(t, s, e):
         return {"word": t, "start": s, "end": e}
+
+    # The accent must find what prompts.py promised, and nothing else. Colour
+    # is reset to the Card style's own primary, so the two are asserted equal
+    # here - drift between them would tint the rest of the title.
+    assert f",{CARD_TEXT}," in ASS_HEADER, "the card style stopped using CARD_TEXT"
+    assert _accent("счёт на 80000 за потоп").count(CARD_ACCENT) == 1
+    assert _accent("счёт на 80000 за потоп").endswith("за потоп")
+    assert "80000" in _accent("счёт на 80000 за потоп")
+    assert _accent("сказала «этот ребёнок не наш»").count(CARD_ACCENT) == 1
+    assert _accent("said “that baby isn't ours”").count(CARD_ACCENT) == 1
+    # a title resting on a named stake has nothing to catch, and must be left be
+    assert _accent("Мать парня звала меня на обед") == "Мать парня звала меня на обед"
+    # every override we open is closed again, or the rest of the card changes colour
+    for t in ("счёт на 80000 за потоп", "сказала «этот ребёнок не наш»"):
+        assert _accent(t).count(CARD_ACCENT) == _accent(t).count(CARD_TEXT)
+
+    # The card lights up word by word, and every word gets both edges: one
+    # animation onto the accent, one back. A word that only got the first would
+    # stay lit and the card would fill up red instead of tracking the voice.
+    tw = [_w("Соседка", 0.0, 0.4), _w("прислала", 0.4, 0.9), _w("счёт.", 0.9, 1.4)]
+    cards = _sung(tw, 1.6)
+    assert len(cards) == len(tw), cards
+    # exactly ONE word is lit at a time. The first attempt animated a single
+    # line and every word inherited the ones before it, so the whole tail of
+    # the title lit up at once - this is the assertion that would have caught it.
+    for start, end, text in cards:
+        assert text.count(CARD_ACCENT) == 1, text
+    # the whole title stays on screen the whole time - this is not a reveal
+    for _, _, text in cards:
+        assert all(w["word"].rstrip(".") in text for w in tw), text
+    assert [round(s, 2) for s, _, _ in cards] == [0.0, 0.4, 0.9]
+    assert [round(e, 2) for _, e, _ in cards] == [0.4, 0.9, 1.6]
+    # the lit word walks forward, and the cued full stop never reaches the card
+    assert cards[0][2].startswith(f"{{\\c{CARD_ACCENT}&}}Соседка")
+    assert cards[2][2].endswith(f"{{\\c{CARD_ACCENT}&}}счёт{{\\c{CARD_TEXT}&}}")
+    # timings absent: the card must still render, via the figure/quote accent
+    assert _sung([], 3.0) == []
 
     wide = _group([_w("через", 0, 1), _w("двадцать", 1, 2), _w("минут", 2, 3)])
     assert all(len(c["word"]) <= 14 for c in wide), wide
