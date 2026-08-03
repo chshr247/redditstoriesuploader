@@ -128,7 +128,14 @@ FISH_CTA_CUE = os.getenv("FISH_CTA_CUE", "[calm, no stress on the last word]")
 # base is enough - we use its timings, never its text.
 WHISPER_SIZE = os.getenv("WHISPER_SIZE", "base")
 
-SUBREDDITS = [s.strip() for s in os.getenv("SUBREDDITS", "tifu").split(",") if s.strip()]
+# Per channel, and shared=True because one list CAN serve both: the posts are
+# English either way, and the Russian channel retells them. What differs is what
+# each audience is there for - the Russian channel runs on drama and recognition,
+# the English one on being funny - so SUBREDDITS_EN leans on the subs where the
+# story is meant to be laughed at. Unset it and both channels read the same subs
+# again, exactly as before.
+SUBREDDITS = [s.strip() for s in
+              chan_env("SUBREDDITS", "tifu", shared=True).split(",") if s.strip()]
 # Subs that carry facts rather than personal stories. Searched alongside the
 # rest, but tagged: script.py writes a fact with a different prompt, because the
 # story prompt SKIPs anything that is not somebody's own experience - which is
@@ -138,7 +145,8 @@ SUBREDDITS = [s.strip() for s in os.getenv("SUBREDDITS", "tifu").split(",") if s
 # the obvious candidates and both are useless here - the fact is the title and
 # the body is a link, so there is nothing to narrate for 75 seconds.
 FACT_SUBREDDITS = [s.strip() for s in
-                   os.getenv("FACT_SUBREDDITS", "YouShouldKnow").split(",") if s.strip()]
+                   chan_env("FACT_SUBREDDITS", "YouShouldKnow",
+                            shared=True).split(",") if s.strip()]
 MIN_SCORE = int(os.getenv("MIN_SCORE", 3000))
 # Ceiling, not a typo. Above this a post went viral for Reddit-internal reasons
 # - memes, meta drama, war, death - not because the story is good. The band
@@ -302,6 +310,11 @@ if __name__ == "__main__":
         f"bands overlap: {MIN_SCORE} < {MAX_SCORE} <= {VIRAL_MIN_SCORE}"
     assert not (set(FACT_SUBREDDITS) & set(SUBREDDITS)), \
         "a sub in both lists is searched twice - keep the fact subs out of SUBREDDITS"
+    # The cursor is per (sub, channel), so a sub named twice in one list is not
+    # two sources - it is one source read twice, and _harvest's shuffle just
+    # gives it two tickets in the draw.
+    assert len(set(SUBREDDITS)) == len(SUBREDDITS), \
+        f"{chan_key('SUBREDDITS', True)} repeats a sub"
     assert TIKTOK_BACKEND in ("api", "tau"), \
         f"{chan_key('TIKTOK_BACKEND')}={TIKTOK_BACKEND} is not api or tau"
     # A typo in the backend name would be caught above; a missing account would
