@@ -275,6 +275,37 @@ jobs:
             echo "TikTok's turn only - this one is not going to YouTube"
           fi
 
+      # The tau backend posts from a machine that never sees this runner's
+      # disk, and out/ dies with the job - so without this step the local
+      # poster runs dry while CI keeps making videos it can never reach.
+      #
+      # The meta file is not decoration next to the mp4. _mine() reads
+      # `channel` out of it to decide whose queue a file belongs in, so an mp4
+      # arriving on its own is not a video with a poorer caption - it is a
+      # video the English channel cannot see at all, because a file with no
+      # meta counts as the default channel's.
+      #
+      # Opt in per channel via the TIKTOK_LOCAL_CHANNELS repo variable, same
+      # shape as CHANNELS. Empty by default: a channel whose TikTok is handled
+      # here has nothing to ship and should not spend the quota.
+      - name: Keep the video for the local TikTok poster
+        if: >-
+          steps.gate.outputs.go == 'true' && inputs.dry_run != true &&
+          contains(fromJSON(vars.TIKTOK_LOCAL_CHANNELS || '[]'), matrix.channel)
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-${{ matrix.channel }}-${{ github.run_id }}
+          path: |
+            out/*.mp4
+            out/*.meta.json
+          # One video is ~70 MB and the account's artifact quota is not large.
+          # Three days covers a long weekend with the local machine off; the
+          # ninety-day default would be twenty gigabytes.
+          retention-days: 3
+          # A run can pass the gate and still make nothing - the story pool
+          # comes up dry and main.py exits 0 with a warning.
+          if-no-files-found: ignore
+
       # Same file, second platform. Never fatal: TikTok is a draft in an inbox,
       # YouTube is the published video, and losing the copy must not colour a
       # run that already shipped one.
