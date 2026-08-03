@@ -262,9 +262,17 @@ def _live(scores: list[float], lo: float, hi: float) -> list[int]:
     The median rather than a fixed threshold: scene scores are not comparable
     between clips - a fast-cut compilation sits an order of magnitude above a
     single slow shot - so "lively" can only mean lively FOR THIS CLIP.
+
+    A window is worth only its WEAKEST second. Averaging looks right and is
+    wrong: a scene score spikes on a CUT, so a still shot, a hard cut and
+    another still shot average out well above the median while what the viewer
+    gets is a freeze, a blink and another freeze. Measured on a real clip -
+    seconds 573-575 scored 0.0015, 0.0667, 0.0008, averaged to 0.023 against a
+    median of 0.014, and shipped three frozen seconds under the hook. The
+    question is whether the whole window moves, and only the minimum asks it.
     """
     starts = range(int(lo) + 1, int(hi) + 1)
-    windows = {s: statistics.fmean(scores[s:s + HOOK_WINDOW])
+    windows = {s: min(scores[s:s + HOOK_WINDOW])
                for s in starts if len(scores[s:s + HOOK_WINDOW]) == HOOK_WINDOW}
     if len(windows) < 10:
         # too few to have a meaningful middle; let the caller draw uniformly
@@ -445,6 +453,16 @@ if __name__ == "__main__":
     seeks = {_seek(600, 60, scores=quiet) for _ in range(200)}
     assert seeks <= {float(s) for s in live}, sorted(seeks - {float(s) for s in live})
     assert len(seeks) > 20, "the draw collapsed onto a handful of seconds"
+    # A cut between two still shots is not motion. This shipped once: the mean
+    # over such a window beat the median and put three frozen seconds under a
+    # hook, so the spike must not be able to carry its neighbours.
+    frozen = [0.001] * 600
+    frozen[300:400] = [0.03] * 100          # the one genuinely moving stretch
+    for s in (200, 500):                    # lone cuts in the dead parts
+        frozen[s] = 0.9
+    spiked = _live(frozen, SKIP_HEAD, 540)
+    assert spiked, "the moving stretch was rejected too"
+    assert all(300 - HOOK_WINDOW < s < 400 for s in spiked), sorted(spiked)[:5]
     # A clip that is lively everywhere has no better half to prefer, and must
     # hand the choice back rather than narrow it to nothing.
     assert _live([0.02] * 600, SKIP_HEAD, 540) == []
