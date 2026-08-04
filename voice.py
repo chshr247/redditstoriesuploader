@@ -20,6 +20,7 @@ import urllib.error
 import urllib.request
 
 import edge_tts
+from num2words import num2words
 
 import script
 from config import (FISH_API_KEY, FISH_CTA_CUE, FISH_MODEL, FISH_SPEED,
@@ -76,6 +77,93 @@ def _fish_synth(text: str, mp3_path, speed: float, voice: str = "") -> None:
             mp3_path.write_bytes(r.read())
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"fish {e.code}: {e.read().decode()[:300]}") from None
+
+
+# A bare digit is language-neutral on the page and English in fish's mouth:
+# "после 5 минут" comes back as "после five минут". The engine never gets to
+# guess - numbers are spelled out in OUTPUT_LANG before synthesis. Only the
+# engine's copy is rewritten; the card and the subtitles keep the digits,
+# which is why this lives here and not in script.py.
+#
+# Grouped thousands are matched whole ("20 000" is one number, not 20 and 0).
+# The word before and the word after are looked at but never consumed: the
+# preposition picks the case, the counted noun picks the gender.
+NUMBER = re.compile(
+    r"(?P<prep>[А-Яа-яЁёA-Za-z]+\s+)?(?P<num>\d+(?:[  ]\d{3})+|\d+)"
+    r"(?=(?:\s+(?P<noun>[А-Яа-яЁё]+))?)")
+
+# Russian prepositions that govern one case and one only. The ambiguous ones -
+# в, на, с, за, под, по, через - are left out on purpose: with a quantity they
+# read as accusative, and the accusative of a numeral is its nominative form,
+# which is what num2words already hands back ("в пять часов", "за пять минут").
+PREP_CASE = {
+    "gent": "без до из из-за из-под от у для около возле вокруг кроме после "
+            "среди против вместо ради свыше сверх мимо вдоль насчёт больше "
+            "меньше более менее",
+    "datv": "к ко благодаря вопреки согласно навстречу",
+    "ablt": "над перед пред между",
+    "loct": "о об обо при",
+}
+PREP_CASE = {p: case for case, ps in PREP_CASE.items() for p in ps.split()}
+
+# only these two agree in gender with what they count ("две машины", "одна минута")
+GENDERED = ("один", "два")
+
+_morph = None
+
+
+def _parse(word: str):
+    """pymorphy's reading of a word, preferring the numeral one.
+
+    "сто" and "тысяча" are both nouns to pymorphy as well, and the noun reading
+    declines differently ("сто" stays "сто" where the numeral gives "ста").
+    """
+    global _morph
+    if _morph is None:
+        import pymorphy3
+        _morph = pymorphy3.MorphAnalyzer()
+    parses = _morph.parse(word)
+    return next((p for p in parses if p.tag.POS == "NUMR"), parses[0])
+
+
+def _agree(spelled: str, prep: str, noun: str) -> str:
+    """Decline a spelled-out numeral to fit the phrase around it."""
+    case = PREP_CASE.get(prep.strip().lower())
+    gender = _parse(noun).tag.gender if noun else None
+    if not case and gender not in ("femn", "neut"):
+        return spelled
+
+    words = spelled.split()
+    out = []
+    for i, w in enumerate(words):
+        wants = []
+        # gender lands on the last word only: "двадцать одна", not "двадцатая"
+        if i == len(words) - 1 and w in GENDERED and gender in ("femn", "neut"):
+            wants.append({case, gender} if case else {gender})
+        if case:
+            # outside the nominative these two lose the gender distinction -
+            # "двух" covers all three - and asking for both at once finds
+            # nothing, so the case alone is the fallback
+            wants.append({case})
+        form = next((f for f in (_parse(w).inflect(x) for x in wants) if f), None)
+        out.append(form.word if form else w)
+    return " ".join(out)
+
+
+def spell(text: str) -> str:
+    def one(m):
+        digits = re.sub(r"\D", "", m.group("num"))
+        prep = m.group("prep") or ""
+        # past a sane length it is an id or a phone number, not a quantity, and
+        # num2words starts raising instead of returning
+        if len(digits) > 15:
+            return m.group()
+        spelled = num2words(int(digits), lang=OUTPUT_LANG)
+        if OUTPUT_LANG == "ru":
+            spelled = _agree(spelled, prep, m.group("noun") or "")
+        return prep + spelled
+
+    return NUMBER.sub(one, text)
 
 
 def _norm(w: str) -> str:
@@ -178,7 +266,11 @@ def speak(text: str, name: str, voice: str = TTS_VOICE, rate: str = RATE,
     readable = script.plain(text)
 
     if TTS_BACKEND == "fish":
-        _fish_synth(text, mp3, speed, pick_voice() if fish_voice is None else fish_voice)
+        # the engine hears words, whisper hears words, but `readable` still
+        # carries the digits - difflib just misses those tokens and _fill_gaps
+        # times them from the anchors either side
+        _fish_synth(spell(text), mp3, speed,
+                    pick_voice() if fish_voice is None else fish_voice)
         words = _align(readable, mp3)
     else:
         # edge has no cue syntax and would read the brackets out loud
@@ -341,6 +433,29 @@ if __name__ == "__main__":
     assert filled[1]["start"] == 1.0 and abs(filled[1]["end"] - 3.0) < 0.01
     tail = _fill_gaps([None, None], ["x", "y"], 2.0)
     assert [w["word"] for w in tail] == ["x", "y"] and tail[1]["end"] == 2.0
+
+    # a digit that reaches fish is read in English, so none may survive - and
+    # the spelled form has to fit the phrase, or the fix trades an English
+    # number for a Russian one in the wrong case
+    if OUTPUT_LANG == "ru":
+        for phrase, want in [
+            ("после 5 минут", "после пяти минут"),
+            ("без 2 минут полночь", "без двух минут полночь"),
+            ("у 5 друзей", "у пяти друзей"),
+            ("к 3 часам", "к трём часам"),
+            ("между 2 домами", "между двумя домами"),
+            ("20 000 рублей", "двадцать тысяч рублей"),
+            ("2 машины", "две машины"),
+            ("прошло 21 минута", "прошло двадцать одна минута"),
+            # ambiguous prepositions stay nominative, which is the accusative
+            # they actually want
+            ("в 5 часов", "в пять часов"),
+            ("за 2 недели", "за две недели"),
+        ]:
+            assert spell(phrase) == want, f"{phrase!r} -> {spell(phrase)!r}"
+    assert not re.search(r"\d", spell("Мачеха: 5 минут, 20 000 руб., 1990 год")), \
+        "digits must not reach the engine"
+    assert spell("id 1234567890123456") == "id 1234567890123456", "absurd runs stay"
 
     # A cue must vanish completely on the way to the screen. Both defaults once
     # grew past TAG's 60-char ceiling and were narrated as visible text, so the
