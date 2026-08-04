@@ -276,6 +276,22 @@ def finish_part(post_id: str, n: int) -> None:
                    (post_id, n, OUTPUT_LANG))
 
 
+def drop_parts(post_id: str) -> None:
+    """Give up on the rest of a split story, for this channel only.
+
+    Only a send clears a part - see finish_part - so a part nobody can send is
+    handed back by next_part() every run, for ever: the same file re-rendered
+    while no new story is ever made. Both callers below are that case, one
+    where the render keeps failing and one where the platform is not there.
+
+    The other channel's copy is a different set of rows and may be publishing
+    fine, hence the lang scope.
+    """
+    with _db() as db:
+        db.execute("UPDATE parts SET done=1 WHERE post_id=? AND lang=?",
+                   (post_id, OUTPUT_LANG))
+
+
 MAX_TRIES = 3
 
 
@@ -291,13 +307,10 @@ def fail_part(post_id: str, n: int) -> None:
                    "WHERE post_id=? AND n=? AND lang=?", (post_id, n, OUTPUT_LANG))
         row = db.execute("SELECT tries FROM parts WHERE post_id=? AND n=? AND lang=?",
                          (post_id, n, OUTPUT_LANG)).fetchone()
-        if row and row[0] >= MAX_TRIES:
-            # only this channel's copy of the story is dropped: the other one
-            # may be rendering fine, and its parts are different rows
-            db.execute("UPDATE parts SET done=1 WHERE post_id=? AND lang=?",
-                       (post_id, OUTPUT_LANG))
-            log.error("%s part %d failed %d times - dropping the rest of the "
-                      "story so the queue can move on", post_id, n, row[0])
+    if row and row[0] >= MAX_TRIES:
+        drop_parts(post_id)
+        log.error("%s part %d failed %d times - dropping the rest of the "
+                  "story so the queue can move on", post_id, n, row[0])
 
 
 def multipart_today() -> bool:
