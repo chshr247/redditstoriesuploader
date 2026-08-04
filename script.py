@@ -365,7 +365,10 @@ def _title_cue_fault(title: str, plain_title: str) -> str:
     under FISH_TITLE_CUE, whose job is to keep the engine off the final word,
     and the two would be pulling against each other. Not the second half
     either: by then the scroll has been decided, so a peak there is spent on
-    people who already stayed.
+    people who already stayed. And not the first word, which is stressed by
+    being first: marking it buys no peak and drags the line's weight forward,
+    away from the word the title actually turns on. The prompt has said all
+    three from the start; only two of them were ever checked.
     """
     marked = [t for t in TAG.findall(title) if t.lower().startswith("[emphasis")]
     lead = LEAD_CUE.match(title.strip())
@@ -383,6 +386,13 @@ def _title_cue_fault(title: str, plain_title: str) -> str:
         return ("the TITLE marks its LAST word - the narration holds that word "
                 "flat, so move the [emphasis] onto the word the title turns on")
     words = len(plain_title.split())
+    # Nothing of the title stands in front of the mark, so the mark is on word
+    # one. Checked before the halves below, which would let this through: the
+    # first word is as far into the first half as it is possible to be.
+    if left == words:
+        return ("the TITLE marks its FIRST word - that one is stressed by "
+                "being first, so move the [emphasis] onto the word the title "
+                "turns on")
     if left <= words / 2:
         return ("the TITLE marks a word in its second half - move the "
                 "[emphasis] into the first half, where it is heard before the "
@@ -673,7 +683,12 @@ if __name__ == "__main__":
         w = title.split()
         if "[emphasis]" in title or len(w) < 3:
             return title
-        return " ".join(w[:1] + ["[emphasis]"] + w[1:])
+        # A leading mood cue is not a word. Counting it as one puts the mark in
+        # front of word ONE, which is the thing the docstring above promises
+        # not to do - latent until the first-word check went in and every
+        # cued fixture started failing on its markup instead of its words.
+        at = 2 if w[0].startswith("[") else 1
+        return " ".join(w[:at] + ["[emphasis]"] + w[at:])
 
     def ru(title: str) -> str:
         return _title_fault(_marked(title), "ru")
@@ -688,6 +703,10 @@ if __name__ == "__main__":
     assert _title_fault(GOOD_TITLE.replace("[emphasis] ", ""), "ru"), "no mark"
     assert _title_fault("Соседка прислала мне счёт за свой [emphasis] потоп", "ru"), \
         "the last word is what FISH_TITLE_CUE holds flat"
+    assert _title_fault("[emphasis] Соседка прислала мне счёт на 80000", "ru"), \
+        "the first word is stressed by being first, so the mark buys nothing"
+    assert _title_fault("[angry] [emphasis] Соседка прислала мне счёт на 80000", "ru"), \
+        "the mood cue in front does not make the next word any less the first"
     assert _title_fault("Соседка прислала мне счёт на [emphasis] 80000 за потоп", "ru"), \
         "second half - the scroll has already been decided"
     assert _title_fault("[angry] Соседка [surprised] прислала [emphasis] счёт на 80000", "ru"), \
@@ -846,8 +865,11 @@ if __name__ == "__main__":
             "Тело второй части. [doubtful] А вы бы её [emphasis] пустили в дом?")
     g4, p4, f4 = _parse_parts(RAW2, {"title": "", "text": ""}, 2, 6)
     assert g4 == "female" and len(p4) == 2, (g4, p4)
-    assert p4[0][0].startswith("Свекровь потребовала"), p4[0]
-    assert p4[1][0].startswith("Свекровь пришла"), p4[1]
+    # plain(), because a part keeps its markup all the way to voice.speak_parts
+    # - the cues are what the engine reads - and only meta.json gets it
+    # stripped. Comparing the raw title against unmarked words could never pass.
+    assert plain(p4[0][0]).startswith("Свекровь потребовала"), p4[0]
+    assert plain(p4[1][0]).startswith("Свекровь пришла"), p4[1]
     assert p4[1][1].startswith("Тело второй"), p4[1]
     # the fixture is deliberately far off six words; nothing else may be wrong
     assert all("words" in f for f in f4), f4
