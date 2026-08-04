@@ -19,8 +19,8 @@ import render
 import script
 import source
 import voice
-from config import (CHANNEL, MIN_SEC, OUT_DIR, TIKTOK_PER_DAY, VIRAL_MIN_SCORE,
-                    chan_file)
+from config import (CHANNEL, MIN_SEC, OUT_DIR, TIKTOK_ENABLED, TIKTOK_PER_DAY,
+                    VIRAL_MIN_SCORE, chan_file, chan_key)
 
 log = logging.getLogger("main")
 
@@ -145,6 +145,21 @@ def main(count: int = 1) -> int:
     # a fresh video, and in CI the mp4 dies with the runner, so the part is
     # rendered now and cleared only once publish.py has actually sent it.
     part = source.next_part()
+    # Splitting is TikTok's alone and only a TikTok send clears a part, so a
+    # queue standing in front of a channel whose TikTok is off never drains.
+    # _room() already refuses to CREATE a split there; this is the other half -
+    # a story split before the pause, or before the channel moved off TikTok
+    # entirely. Left alone it is rendered again on every run and published on
+    # none of them, and it holds the slot, so the channel makes nothing else.
+    # Measured on the English channel, 2026-08-04: four runs, four identical
+    # renders of the same part 1, no upload and no new story since.
+    if part and not TIKTOK_ENABLED:
+        log.warning("%s is split across %d parts and TikTok is paused for this "
+                    "channel (%s) - nothing can publish them, dropping the rest "
+                    "of the story", part["post_id"], part["total"],
+                    chan_key("TIKTOK_ENABLED"))
+        source.drop_parts(part["post_id"])
+        part = None
     if part:
         log.info("continuing %s: part %d of %d", part["post_id"], part["n"],
                  part["total"])
