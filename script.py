@@ -14,11 +14,25 @@ language the same way. Every one of those checks exists because a rule in the
 prompt alone was not enough (see todo.md, "причина 3").
 """
 import logging
+import os
 import re
+import sys
 
 from openai import OpenAI
 
-import prompts
+# prompts.py is not in this repo. This one is public and must stay public, so
+# the prompt set lives in a private one cloned to .private/ - by CI with a
+# deploy key, by hand for local work. Nothing else is over there, and putting
+# the directory on the path rather than copying the file out of it keeps one
+# copy to edit instead of two to keep in step.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".private"))
+try:
+    import prompts
+except ImportError:
+    raise SystemExit(
+        "prompts.py not found - clone the private repo into .private/ "
+        "(git clone git@github.com:chshr247/reddit-prompts.git .private)") from None
+
 import safety
 from config import (LLM_BASE_URL, LLM_MODEL, OPENAI_API_KEY, OUTPUT_LANG,
                     TARGET_SEC)

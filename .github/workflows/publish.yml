@@ -259,6 +259,22 @@ jobs:
         if: steps.gate.outputs.go == 'true'
         run: pip install -q -r requirements.txt
 
+      # The prompt set is the one part of this worth stealing, and this repo is
+      # public by necessity - Pages serves the policy pages TikTok and YouTube
+      # review against, and public is what makes these 28 daily runs free. So
+      # prompts.py lives in a private repo and script.py imports it from here.
+      # Behind the gate on purpose: a refused run must not pay for a clone.
+      # The key is a read-only deploy key for that repo alone. Nothing can leak
+      # it - a workflow triggered from a fork gets no secrets at all, and this
+      # one has no pull_request trigger to be started from a fork with.
+      - name: Fetch the prompt set
+        if: steps.gate.outputs.go == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: chshr247/reddit-prompts
+          ssh-key: ${{ secrets.PROMPTS_DEPLOY_KEY }}
+          path: .private
+
       # The gate above already asked, and it asked BEFORE anything was
       # generated on purpose: the rendered file dies with the runner, so a
       # video made now and refused now is a story burned for nothing -
