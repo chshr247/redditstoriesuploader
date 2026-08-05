@@ -31,7 +31,7 @@ try:
 except ImportError:
     raise SystemExit(
         "prompts.py not found - clone the private repo into .private/ "
-        "(git clone git@github.com:chshr247/reddit-prompts.git .private)") from None
+        "(git clone https://github.com/chshr247/reddit-prompts.git .private)") from None
 
 import safety
 from config import (LLM_BASE_URL, LLM_MODEL, OPENAI_API_KEY, OUTPUT_LANG,
