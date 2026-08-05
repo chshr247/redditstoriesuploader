@@ -57,7 +57,7 @@ The prompt set lives in a separate private repository and is not part of this
 one; `script.py` imports it from `.private/`.
 
 ```bash
-git clone git@github.com:chshr247/reddit-prompts.git .private
+git clone https://github.com/chshr247/reddit-prompts.git .private
 pip install -r requirements.txt
 cp .env.example .env      # fill in the keys
 python main.py 3          # render three videos
