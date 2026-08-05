@@ -17,9 +17,9 @@ import urllib.parse
 import urllib.request
 
 import safety
-from config import (DB_PATH, DEFAULT_CHANNEL, FACT_SUBREDDITS, MAX_SCORE,
-                    MIN_COMMENTS, MIN_SCORE, OUTPUT_LANG, SUBREDDITS,
-                    VIRAL_MIN_SCORE, VIRAL_PER_DAY)
+from config import (DB_PATH, DEFAULT_CHANNEL, MAX_SCORE, MIN_COMMENTS,
+                    MIN_SCORE, OUTPUT_LANG, SUBREDDITS, VIRAL_MIN_SCORE,
+                    VIRAL_PER_DAY)
 
 API = "https://api.pullpush.io/reddit/search/submission/"
 UA = "StoryReader/0.1"
@@ -117,6 +117,40 @@ def _clean(s: str) -> str:
     return html.unescape(s).replace("&#x200B;", "").strip()
 
 
+# A story where it is OBVIOUS who was in the wrong is watched once and agreed
+# with. One where the comments cannot decide is argued about, and the argument
+# is the engagement - it is what the closing question is asking for anyway.
+# So the pool is ordered by how contested a post looks before anything is spent
+# on it. Two signals, both already in the response, so neither costs a request:
+#
+#   the post asks for a verdict in so many words - AITA, WIBTA, "was I wrong"
+#   it drew unusually many comments for its score, which on Reddit means people
+#   came to take sides rather than to upvote and move on
+#
+# Ranking, not filtering: an uncontested story is still a story, it just goes
+# behind the contested ones in the pool main.py works through.
+CONTESTED = re.compile(
+    r"\b(?:ai[tw]a|aitah|wibta|yta|nta"
+    r"|am\s+i\s+(?:the\s+)?(?:asshole|ah|jerk|wrong|bad\s+guy|overreacting"
+    r"|being\s+unreasonable|in\s+the\s+wrong)"
+    r"|was\s+i\s+(?:the\s+)?(?:asshole|wrong|in\s+the\s+wrong)"
+    r"|who\s*'?s\s+(?:right|wrong)|did\s+i\s+overreact)\b", re.I)
+
+# What one comment per this many upvotes is worth, i.e. where the ratio signal
+# saturates. Measured over a fetch of the current subs: an ordinary post sits
+# near 1 comment per 40 upvotes, a fight near 1 in 10.
+# ponytail: a flat constant, not a per-sub baseline. Subs whose normal ratio is
+# far off this one would need their own; add that when a sub's stories start
+# crowding out everything else.
+ARGUMENTATIVE = 10
+
+
+def contested(title: str, comments: int, score: int) -> float:
+    """0..2, higher when a post looks like a fight rather than a verdict."""
+    return (bool(CONTESTED.search(title))
+            + min(comments * ARGUMENTATIVE / max(score, 1), 1.0))
+
+
 def _harvest(limit: int, floor: int, ceiling: int) -> list[dict]:
     """Up to `limit` unused posts scored inside [floor, ceiling), best first.
 
@@ -124,19 +158,20 @@ def _harvest(limit: int, floor: int, ceiling: int) -> list[dict]:
     weakest post already used out of ITS OWN band, so a sub whose band is spent
     returns nothing and the next one answers instead. That is what makes the
     viral band survivable at all - no single sub has a year of 40k posts in it.
+
+    "Best" is contested() - the argument, not the score. Every sub is read
+    rather than stopping at the first one that fills the pool: a pool taken from
+    whichever sub was drawn first cannot be ranked, since the ranking's whole
+    job is to choose BETWEEN the subs. That costs one request per sub per run.
     """
     db = _db()
     out = []
     seen = {r[0] for r in db.execute("SELECT id FROM seen WHERE lang=?",
                                      (OUTPUT_LANG,))}
-    # Shuffled, not in order: the loop stops as soon as it has enough, so a
-    # fixed order means the first subreddit answers every single time and the
-    # rest are never read. Twenty-six of the first twenty-seven stories came
-    # from one sub before this line existed.
-    subs = SUBREDDITS + FACT_SUBREDDITS
-    for sub in random.sample(subs, len(subs)):
-        if len(out) >= limit:
-            break
+    # Still shuffled, so that a tie in the ranking does not always fall the same
+    # way - twenty-six of the first twenty-seven stories came from one sub back
+    # when the order was fixed and the loop stopped at the first full pool.
+    for sub in random.sample(SUBREDDITS, len(SUBREDDITS)):
         # Per channel, like the seen set above. A shared cursor would start the
         # second channel wherever the first one has already got to, and every
         # story between the two positions would never be told in that language.
@@ -156,8 +191,11 @@ def _harvest(limit: int, floor: int, ceiling: int) -> list[dict]:
             log.warning("r/%s: source unavailable (%s), skipping", sub, e)
             continue
 
+        found = 0
         for p in posts:
-            if len(out) >= limit:
+            # Capped per sub, or one sub with a hundred usable posts fills the
+            # pool on its own again and the ranking has nothing to choose from.
+            if found >= limit:
                 break
             if p["id"] in seen or p["score"] < floor or not _usable(p):
                 continue
@@ -167,12 +205,17 @@ def _harvest(limit: int, floor: int, ceiling: int) -> list[dict]:
             if hit:
                 log.info("skipping %s (%s)", p["id"], hit)
                 continue
+            found += 1
             out.append({"id": p["id"], "sub": sub, "score": p["score"],
                         "title": title, "text": text,
-                        "kind": "fact" if sub in FACT_SUBREDDITS else "story"})
-        log.info("r/%s: %d candidates out of %d", sub, len(out), len(posts))
+                        "rank": contested(title, p.get("num_comments", 0),
+                                          p["score"])})
+        log.info("r/%s: %d candidates out of %d", sub, found, len(posts))
     db.close()
-    return out
+    # Contested first. main.py walks this list in order and stops once it has
+    # its videos, so the order IS the priority.
+    out.sort(key=lambda p: p["rank"], reverse=True)
+    return out[:limit]
 
 
 def fetch(limit: int = 3) -> list[dict]:
@@ -345,6 +388,20 @@ if __name__ == "__main__":
         assert _usable({**ok, "title": good}), f"false positive: {good!r}"
     assert _clean("don&#39;t") == "don't"
 
+    # the pool is ordered by how much of a fight a post is, and both signals
+    # have to earn their place: the verdict question and the argument ratio
+    assert contested("AITA for kicking out my sister?", 0, 5000) >= 1
+    assert contested("WIBTA if I skipped the wedding", 0, 5000) >= 1
+    assert contested("Am I wrong for locking the door", 0, 5000) >= 1
+    assert contested("My neighbor flooded my flat", 0, 5000) == 0, \
+        "a plain story must not score on the title"
+    # 1 comment per 10 upvotes is a room taking sides; 1 per 100 is a nod
+    assert contested("x", 500, 5000) == 1.0
+    assert contested("x", 50, 5000) < 0.2
+    assert contested("AITA for this", 500, 5000) > contested("x", 500, 5000), \
+        "both signals must add up, not replace each other"
+    assert contested("x", 0, 0) == 0, "a scoreless post must not divide by zero"
+
     # parts come back one at a time, in order, and only once the one before is
     # published. Skipped when a real story is mid-flight - it would shadow the
     # fixture and the ordering check would be testing the wrong rows.
@@ -390,5 +447,8 @@ if __name__ == "__main__":
 
     posts = fetch(3)
     assert posts, "source returned nothing - check network / SUBREDDITS"
+    assert posts == sorted(posts, key=lambda p: p["rank"], reverse=True), \
+        "the contested posts must come first"
     for p in posts:
-        print(f"[{p['score']:>7}] r/{p['sub']} {len(p['text']):>5}ch  {p['title'][:60]}")
+        print(f"[{p['score']:>7}] {p['rank']:.2f} r/{p['sub']} "
+              f"{len(p['text']):>5}ch  {p['title'][:60]}")

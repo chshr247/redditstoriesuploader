@@ -137,17 +137,6 @@ WHISPER_SIZE = os.getenv("WHISPER_SIZE", "base")
 # again, exactly as before.
 SUBREDDITS = [s.strip() for s in
               chan_env("SUBREDDITS", "tifu", shared=True).split(",") if s.strip()]
-# Subs that carry facts rather than personal stories. Searched alongside the
-# rest, but tagged: script.py writes a fact with a different prompt, because the
-# story prompt SKIPs anything that is not somebody's own experience - which is
-# every post in here. They are NOT a third source of stories, they are the same
-# pool with a flag on it, so a sub named twice would just be read twice.
-# Picked for having a readable body: r/todayilearned and r/interestingasfuck are
-# the obvious candidates and both are useless here - the fact is the title and
-# the body is a link, so there is nothing to narrate for 75 seconds.
-FACT_SUBREDDITS = [s.strip() for s in
-                   chan_env("FACT_SUBREDDITS", "YouShouldKnow",
-                            shared=True).split(",") if s.strip()]
 MIN_SCORE = int(os.getenv("MIN_SCORE", 3000))
 # Ceiling, not a typo. Above this a post went viral for Reddit-internal reasons
 # - memes, meta drama, war, death - not because the story is good. The band
@@ -274,16 +263,13 @@ if __name__ == "__main__":
     # story and the day's one exception, and the cursors fight over it.
     assert MIN_SCORE < MAX_SCORE <= VIRAL_MIN_SCORE, \
         f"bands overlap: {MIN_SCORE} < {MAX_SCORE} <= {VIRAL_MIN_SCORE}"
-    assert not (set(FACT_SUBREDDITS) & set(SUBREDDITS)), \
-        "a sub in both lists is searched twice - keep the fact subs out of SUBREDDITS"
     # The cursor is per (sub, channel), so a sub named twice in one list is not
     # two sources - it is one source read twice, and _harvest's shuffle just
     # gives it two tickets in the draw.
     assert len(set(SUBREDDITS)) == len(SUBREDDITS), \
         f"{chan_key('SUBREDDITS', True)} repeats a sub"
-    print(f"OK: channel {CHANNEL}, {len(SUBREDDITS)} subs + "
-          f"{len(FACT_SUBREDDITS)} fact subs, {TARGET_SEC}s (floor {MIN_SEC}s), "
-          f"viral from {VIRAL_MIN_SCORE}")
+    print(f"OK: channel {CHANNEL}, {len(SUBREDDITS)} subs, "
+          f"{TARGET_SEC}s (floor {MIN_SEC}s), viral from {VIRAL_MIN_SCORE}")
     print(f"    voices: {len(FISH_VOICES_MALE)} male, {len(FISH_VOICES_FEMALE)} female"
           f"   yt token: {'set' if YT_REFRESH_TOKEN else 'MISSING'} ({YT_REFRESH_KEY})"
           f"   tiktok token: {'set' if TIKTOK_REFRESH_TOKEN else 'MISSING'}")

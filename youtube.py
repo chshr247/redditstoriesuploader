@@ -87,8 +87,7 @@ def title_for(text: str) -> str:
     return text + tag
 
 
-def description_for(title: str, body: str = "", hashtags=None,
-                    kind: str = "story") -> str:
+def description_for(title: str, body: str = "", hashtags=None) -> str:
     """Teaser built from the story itself, plus tags matched to it.
 
     The first line is the title and nothing else. A rotating opener used to sit
@@ -101,7 +100,7 @@ def description_for(title: str, body: str = "", hashtags=None,
     upload put #отношения under stories about a boss. An explicit `hashtags`
     still overrides it wholesale, which is what the self-test uses.
     """
-    pool = (tags_.pick(title, body, kind) if hashtags is None
+    pool = (tags_.pick(title, body) if hashtags is None
             else random.sample(list(hashtags), min(5, len(hashtags))))
     tags = " ".join(pool[:5] + ["#Shorts"])
 
@@ -110,8 +109,7 @@ def description_for(title: str, body: str = "", hashtags=None,
     return (("\n\n".join(parts)) + "\n\n" + tags)[:DESC_MAX]
 
 
-def upload(mp4, title: str, private: bool = True, body: str = "",
-           kind: str = "story") -> str:
+def upload(mp4, title: str, private: bool = True, body: str = "") -> str:
     """Resumable upload in one PUT. Returns the video id."""
     # Google's docs say an unaudited project can only produce private videos.
     # Measured 2026-07-31 on this project: privacyStatus=public went straight
@@ -124,7 +122,7 @@ def upload(mp4, title: str, private: bool = True, body: str = "",
     meta = {
         "snippet": {
             "title": title_for(title),
-            "description": description_for(title, body, kind=kind),
+            "description": description_for(title, body),
             "categoryId": CATEGORY_PEOPLE_BLOGS,
         },
         "status": {
@@ -282,8 +280,7 @@ def show_text(mp4: Path | None = None) -> None:
         print("\nTITLE:")
         print(title_for(title))
         print("\nDESCRIPTION:")
-        print(description_for(title, meta.get("body", ""),
-                              kind=meta.get("kind", "story")))
+        print(description_for(title, meta.get("body", "")))
         print()
 
 
@@ -329,7 +326,7 @@ def upload_next(private: bool = True, force: bool = False) -> str | None:
     mp4 = queue[0]
     meta = _meta_for(mp4)
     yt_id = upload(mp4, meta.get("title") or mp4.stem, private=private,
-                   body=meta.get("body", ""), kind=meta.get("kind", "story"))
+                   body=meta.get("body", ""))
     with _db() as db:
         db.execute("INSERT OR REPLACE INTO uploaded VALUES (?,?,?,?)",
                    (mp4.name, yt_id, time.time(), CHANNEL))
@@ -432,26 +429,18 @@ if __name__ == "__main__":
         variants = {description_for("Один и тот же", "Одно и то же.") for _ in range(30)}
         assert len(variants) > 5, "descriptions are not varying"
 
-        # The tags answer to the text: a boss story carries work tags, and a
-        # fact carries none of the story pool at all. Written in this channel's
-        # language - description_for() reads the buckets of the channel it runs
-        # on, so a Russian fixture under OUTPUT_LANG=en would match nothing and
-        # the test would be asserting the wrong thing.
-        BOSS, FACT_ = {
-            "ru": (("Начальник вычел из зарплаты за опоздание",
-                    "Директор орал при всём офисе."),
-                   ("У осьминога три сердца", "Кровь синеет из-за меди.")),
-            "en": (("My boss docked my pay for being late",
-                    "The manager yelled at me in front of everyone."),
-                   ("An octopus has three hearts", "The blue comes from copper.")),
+        # The tags answer to the text: a boss story carries work tags. Written
+        # in this channel's language - description_for() reads the buckets of
+        # the channel it runs on, so a Russian fixture under OUTPUT_LANG=en
+        # would match nothing and the test would be asserting the wrong thing.
+        BOSS = {
+            "ru": ("Начальник вычел из зарплаты за опоздание",
+                   "Директор орал при всём офисе."),
+            "en": ("My boss docked my pay for being late",
+                   "The manager yelled at me in front of everyone."),
         }[CHANNEL]
         boss = description_for(*BOSS)
         assert set(boss.split()) & tags_.TOPIC_TAGS[CHANNEL], boss
-        fact = description_for(*FACT_, kind="fact")
-        # #рекомендации is in both pools on purpose; #драма is in one
-        story_only = (set(tags_.GENERIC[CHANNEL]["story"])
-                      - set(tags_.GENERIC[CHANNEL]["fact"]))
-        assert not (set(fact.split()) & story_only), fact
 
         assert daily_allowance(0) == 2 and daily_allowance(6) == 2
         assert daily_allowance(7) == 3 and daily_allowance(365) == 3, "3 is the ceiling"

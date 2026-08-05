@@ -218,8 +218,7 @@ def part_prefix(meta: dict) -> str:
     return f"{word} {meta['part']}/{meta['total']} - "
 
 
-def caption(title: str, hashtags=None, body: str = "",
-            kind: str = "story") -> str:
+def caption(title: str, hashtags=None, body: str = "") -> str:
     """Title plus tags matched to the video, trimmed to TikTok's limit.
 
     Deliberately shorter than the YouTube description: TikTok shows two lines
@@ -229,7 +228,7 @@ def caption(title: str, hashtags=None, body: str = "",
     in youtube.description_for(). `body` is what lets them match on more than
     the title; it sits in the meta file beside the mp4, so it costs nothing.
     """
-    pool = (tags_.pick(title, body, kind) if hashtags is None
+    pool = (tags_.pick(title, body) if hashtags is None
             else random.sample(list(hashtags), min(5, len(hashtags))))
     tags = " ".join(pool[:5])
     text = f"{title.strip()}\n\n{tags}"
@@ -264,7 +263,7 @@ def _send(upload_url: str, path: Path, spans: list) -> None:
 
 
 def upload(mp4, title: str, direct: bool = False, private: bool = True,
-           body: str = "", kind: str = "story") -> str:
+           body: str = "") -> str:
     """Upload the file. Returns publish_id. Drafts unless direct=True."""
     mp4 = Path(mp4)
     size = mp4.stat().st_size
@@ -279,7 +278,7 @@ def upload(mp4, title: str, direct: bool = False, private: bool = True,
 
     if direct:
         body = {"source_info": src, "post_info": {
-            "title": caption(title, body=body, kind=kind),
+            "title": caption(title, body=body),
             "privacy_level": "SELF_ONLY" if private else "PUBLIC_TO_EVERYONE",
             # TikTok's rules are their own - see DECLARE_AI in config.py
             "is_aigc": DECLARE_AI,
@@ -484,7 +483,7 @@ def upload_next(direct: bool = False, private: bool = True,
 
     title = part_prefix(meta) + (meta.get("title") or mp4.stem)
     pid = upload(mp4, title, direct=direct, private=private,
-                 body=meta.get("body", ""), kind=meta.get("kind", "story"))
+                 body=meta.get("body", ""))
     with _db() as db:
         # Named columns rather than positional: the row has grown a field
         # before and the next one should not silently land in the wrong place.
@@ -495,8 +494,7 @@ def upload_next(direct: bool = False, private: bool = True,
     # A draft gets no caption from the API, so this print IS the caption and
     # the workflow forwards it to be pasted by hand.
     if not direct:
-        print("\nCAPTION:\n" + caption(title, body=meta.get("body", ""),
-                                       kind=meta.get("kind", "story")) + "\n")
+        print("\nCAPTION:\n" + caption(title, body=meta.get("body", "")) + "\n")
     return pid
 
 
@@ -537,17 +535,9 @@ if __name__ == "__main__":
     # The body is matched too, not just the title - it is where most of the
     # topic words are, and passing it is the whole reason caption() takes it.
     # Fixtures in this channel's language: caption() reads its own buckets.
-    _TOPIC, _FACT = {
-        "ru": ("Свекровь въехала в квартиру.", "Кровь синеет из-за меди."),
-        "en": ("My mother-in-law moved into the apartment.",
-               "The blue comes from copper."),
-    }[CHANNEL]
+    _TOPIC = {"ru": "Свекровь въехала в квартиру.",
+              "en": "My mother-in-law moved into the apartment."}[CHANNEL]
     assert set(caption("Заголовок", body=_TOPIC).split()) & tags_.TOPIC_TAGS[CHANNEL]
-    # ...and a fact carries nothing from the story pool that is not also a
-    # fact tag - #рекомендации belongs to both, #драма to exactly one
-    _story_only = (set(tags_.GENERIC[CHANNEL]["story"])
-                   - set(tags_.GENERIC[CHANNEL]["fact"]))
-    assert not (set(caption("Факт", body=_FACT, kind="fact").split()) & _story_only)
 
     # A spent allowance stops an ordinary video and never a part: the inbox
     # must not end up holding the middle of a story with no beginning.
@@ -653,8 +643,7 @@ if __name__ == "__main__":
             pid = upload(mp4, part_prefix(meta) + (meta.get("title") or mp4.stem),
                          direct="--direct" in sys.argv,
                          private=not _public(),
-                         body=meta.get("body", ""),
-                         kind=meta.get("kind", "story"))
+                         body=meta.get("body", ""))
             # Record it, exactly as upload_next() does. This path skips the
             # gate on purpose - it is the by-hand escape hatch - but skipping
             # the gate is not the same as leaving no trace: an unrecorded file
