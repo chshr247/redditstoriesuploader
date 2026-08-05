@@ -70,10 +70,7 @@ def make_video(post: dict) -> Path:
     """One post, one video. Marks the post used only once the mp4 exists."""
     gender, written = script.write_script(post)
     title, body = written[0]
-    # kind rides along to publishing time: it decides which hashtag pool the
-    # description draws from, and by then the post itself is long gone.
-    out = _render(title, body, gender, post["id"], post["sub"],
-                  meta={"kind": post.get("kind", "story")})
+    out = _render(title, body, gender, post["id"], post["sub"])
     source.mark_used(post["id"], post["score"], post["sub"])
     return out
 
@@ -103,8 +100,7 @@ def make_split(post: dict, n: int) -> Path:
     if len(written) < 2:
         log.info("model returned one part, publishing %s as a single video", post["id"])
         title, body = written[0]
-        out = _render(title, body, gender, post["id"], post["sub"],
-                      meta={"kind": post.get("kind", "story")})
+        out = _render(title, body, gender, post["id"], post["sub"])
         source.mark_used(post["id"], post["score"], post["sub"])
         return out
 
@@ -207,9 +203,10 @@ def main(count: int = 1, force: bool = False) -> int:
             # day's one story, and a SKIP before any of that has not.
             may_split = not part and not source.multipart_today()
             n = max(1, min(script.part_count(p), _room())) if may_split else 1
-            log.info("r/%s [%d%s] %s %d parts: %s", p["sub"], p["score"],
+            log.info("r/%s [%d%s] contested %.2f, %d parts: %s", p["sub"],
+                     p["score"],
                      " VIRAL" if p["score"] >= VIRAL_MIN_SCORE else "",
-                     p.get("kind", "story"), n, p["title"][:60])
+                     p.get("rank", 0), n, p["title"][:60])
             try:
                 done.append(make_split(p, n) if n > 1 else make_video(p))
             except script.Unsuitable as e:

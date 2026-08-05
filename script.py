@@ -67,9 +67,9 @@ log = logging.getLogger(__name__)
 
 # One set of instructions per channel language, kept in prompts.py: the
 # examples are most of the prompt, and examples in the wrong language teach
-# the wrong thing. MULTI and FACT are still appended to SYSTEM, so an
-# ordinary video keeps hitting the provider's prefix cache on SYSTEM alone.
-SYSTEM, MULTI, FACT = prompts.SYSTEM, prompts.MULTI, prompts.FACT
+# the wrong thing. MULTI is still appended to SYSTEM, so an ordinary video
+# keeps hitting the provider's prefix cache on SYSTEM alone.
+SYSTEM, MULTI = prompts.SYSTEM, prompts.MULTI
 
 # A separator line the model actually produces, and nothing else: the prompt
 # bans markup, so a bare rule can only be the one we asked for.
@@ -88,12 +88,7 @@ def part_count(post: dict) -> int:
 
     A guess, made before spending an LLM call: the model still gets to answer
     with fewer parts if the material is thinner than the character count says.
-
-    A fact is never worth two: splitting one means holding the answer back for
-    hours, and nobody comes back for the second half of a piece of trivia.
     """
-    if post.get("kind") == "fact":
-        return 1
     return min(len(post["text"]) // PART_CHARS + 1, MAX_PARTS)
 
 
@@ -583,8 +578,6 @@ def write_script(post: dict, parts: int = 1) -> tuple[str, list[tuple[str, str]]
     target = _target_words()
     lang = OUTPUT_LANG
     system = SYSTEM[lang].format(lang=LANG_NAME[lang])
-    if post.get("kind") == "fact":
-        system += FACT[lang]    # never both: part_count() keeps facts at one part
     if parts > 1:
         system += MULTI[lang].format(n=parts)
     msgs = [
@@ -904,13 +897,6 @@ if __name__ == "__main__":
                             {"title": "", "text": ""}, 1, 6)
     assert len(p6) == 1, p6
 
-    # a fact is one video whatever its length, and only a fact gets the FACT
-    # block - a story picking it up would be told to write itself in third person
-    long_post = {"text": "x" * (PART_CHARS * 3)}
-    assert part_count(long_post) > 1
-    assert part_count({**long_post, "kind": "fact"}) == 1
-    assert all("Invent NOTHING" not in SYSTEM[l] and "Invent NOTHING" in FACT[l]
-               for l in SYSTEM), "the fact block must not leak into the story prompt"
     # the prompt set has to exist for the channel this process is, or the run
     # dies deep inside write_script() with a KeyError instead of here
     assert OUTPUT_LANG in SYSTEM and OUTPUT_LANG in WEAK_TITLE, OUTPUT_LANG

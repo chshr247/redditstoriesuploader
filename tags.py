@@ -167,26 +167,16 @@ TOPIC_TAGS = {lang: {t for _, tags in buckets for t in tags}
               for lang, buckets in TOPICS.items()}
 
 # What a video gets when nothing matched, and what fills the rest of the slots.
-# Split by kind on purpose: #драма under a fact about octopuses is the exact
-# mismatch this module exists to stop. YT_HASHTAGS is folded into the story
-# side so the repo variable still means something - it is the same kind of tag.
+# YT_HASHTAGS is folded in, so the repo variable still means something - it is
+# the same kind of tag.
 GENERIC = {
-    "ru": {
-        "story": ["#истории", "#реддит", "#жизненно", "#рекомендации", "#сторитайм",
-                  "#ситуация", "#драма", "#реальнаяистория", "#изжизни",
-                  "#историиизжизни", "#чтобывыделали", "#люди"],
-        "fact": ["#факты", "#интересныефакты", "#этоинтересно", "#познавательно",
-                 "#интересное", "#рекомендации", "#фактдня", "#узналсегодня",
-                 "#полезнознать", "#наука"],
-    },
-    "en": {
-        "story": ["#redditstories", "#storytime", "#reddit", "#aita", "#truestory",
-                  "#drama", "#reallife", "#relatable", "#whatwouldyoudo",
-                  "#storytelling", "#people", "#fyp"],
-        "fact": ["#facts", "#didyouknow", "#interestingfacts", "#todayilearned",
-                 "#funfacts", "#learnontiktok", "#knowledge", "#mindblown",
-                 "#science", "#fyp"],
-    },
+    "ru": ["#истории", "#реддит", "#жизненно", "#рекомендации", "#сторитайм",
+           "#ситуация", "#драма", "#реальнаяистория", "#изжизни",
+           "#историиизжизни", "#чтобывыделали", "#люди", "#ктоправ",
+           "#ктовиноват", "#рассудите"],
+    "en": ["#redditstories", "#storytime", "#reddit", "#aita", "#truestory",
+           "#drama", "#reallife", "#relatable", "#whatwouldyoudo",
+           "#storytelling", "#people", "#fyp", "#amithewrongone", "#whosright"],
 }
 
 # Three matched plus two generic. All five matched reads as a tag wall for one
@@ -195,8 +185,7 @@ MATCHED = 3
 HEAD = 2        # how many tags at the front of a bucket count as its centre
 
 
-def pick(title: str, body: str = "", kind: str = "story", n: int = 5,
-         lang: str = "") -> list[str]:
+def pick(title: str, body: str = "", n: int = 5, lang: str = "") -> list[str]:
     """Up to `n` hashtags for one video, best-matching topics first."""
     lang = lang or OUTPUT_LANG
     # ё is written out everywhere in the narration on purpose (see script.py),
@@ -222,12 +211,11 @@ def pick(title: str, body: str = "", kind: str = "story", n: int = 5,
         if i == 0 and len(topic) > HEAD:
             out.append(random.choice(topic[HEAD:]))
 
-    generic = GENERIC[lang]
     filler = [t for t in dict.fromkeys(
-        generic.get(kind, generic["story"])
+        GENERIC[lang]
         # YT_HASHTAGS belongs to the channel this process is, so it is only
         # folded in when the caller asked for that channel's language
-        + (list(YT_HASHTAGS) if kind != "fact" and lang == OUTPUT_LANG else []))
+        + (list(YT_HASHTAGS) if lang == OUTPUT_LANG else []))
         if t not in TOPIC_TAGS[lang]]
     random.shuffle(filler)
     out = list(dict.fromkeys(out))
@@ -267,12 +255,6 @@ if __name__ == "__main__":
     assert len(set(pick("Сосед затопил соседей", "Сосед, сосед, соседка.", lang="ru"))
                & set(bucket("сосед"))) == 2
 
-    # a fact never gets the story pool, matched or not
-    fact = pick("У осьминога три сердца и голубая кровь",
-                "Кровь синеет из-за меди.", kind="fact", lang="ru")
-    assert all(t in GENERIC["ru"]["fact"] for t in fact), fact
-    assert "#драма" not in fact and "#истории" not in fact, fact
-
     # nothing matched is still five usable tags, not an empty line
     blank = pick("Заголовок без темы", "Текст ни о чём", lang="ru")
     assert len(blank) == 5, blank
@@ -304,11 +286,6 @@ if __name__ == "__main__":
                         "The neighbor, the neighbor, that neighbor.", lang="en"))
                & set(bucket("neighbor", "en"))) == 2
 
-    fact_en = pick("An octopus has three hearts and blue blood",
-                   "The blue comes from copper.", kind="fact", lang="en")
-    assert all(t in GENERIC["en"]["fact"] for t in fact_en), fact_en
-    assert "#drama" not in fact_en and "#redditstories" not in fact_en, fact_en
-
     blank_en = pick("A title about nothing", "Text about nothing", lang="en")
     assert len(blank_en) == 5, blank_en
     assert not (set(blank_en) & TOPIC_TAGS["en"]), blank_en
@@ -321,13 +298,11 @@ if __name__ == "__main__":
     assert not (TOPIC_TAGS["ru"] & TOPIC_TAGS["en"]), "the tag pools overlap"
 
     for lang, rows in [
-        ("ru", [("Мать сняла с моей карты 40000 на футбол брата", "", "story"),
-                ("Начальник заставил меня выйти в выходной", "", "story"),
-                ("Сосед перекрыл нам воду на три дня", "", "story"),
-                ("У осьминога три сердца", "", "fact")]),
-        ("en", [("Mom took 40000 off my card for my brother", "", "story"),
-                ("My boss made me come in on my day off", "", "story"),
-                ("The neighbor shut off our water for three days", "", "story"),
-                ("An octopus has three hearts", "", "fact")])]:
-        for t, b, k in rows:
-            print(f"{lang} {k:5} {t[:45]:47} {' '.join(pick(t, b, k, lang=lang))}")
+        ("ru", [("Мать сняла с моей карты 40000 на футбол брата", ""),
+                ("Начальник заставил меня выйти в выходной", ""),
+                ("Сосед перекрыл нам воду на три дня", "")]),
+        ("en", [("Mom took 40000 off my card for my brother", ""),
+                ("My boss made me come in on my day off", ""),
+                ("The neighbor shut off our water for three days", "")])]:
+        for t, b in rows:
+            print(f"{lang} {t[:45]:47} {' '.join(pick(t, b, lang=lang))}")
