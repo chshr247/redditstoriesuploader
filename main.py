@@ -138,7 +138,7 @@ def _room() -> int:
     return max(0, TIKTOK_PER_DAY - publish.sent_today())
 
 
-def main(count: int = 1) -> int:
+def main(count: int = 1, force: bool = False) -> int:
     done, skipped, failed = [], 0, 0
 
     # A story already split owns the next slot: its middle must not queue behind
@@ -160,7 +160,18 @@ def main(count: int = 1) -> int:
                     chan_key("TIKTOK_ENABLED"))
         source.drop_parts(part["post_id"])
         part = None
-    if part:
+    # ...and rendered only in a run that can actually SEND it. Only a TikTok
+    # send clears a part, so a part built against a closed gap is built again
+    # next run and sent on none of them - four identical renders of the same
+    # part 1 on 2026-08-04. It also costs the run its whole video: a part is
+    # never offered to YouTube, so a run spent rendering one publishes nothing
+    # there, and while a split story waits out its gap YouTube stops entirely.
+    # `part` stays set either way below - a story mid-flight still blocks a
+    # second split, whether or not its next part is rendered this run.
+    if part and not force and (reason := publish.due()):
+        log.info("%s part %d of %d waits (%s) - an ordinary story this run",
+                 part["post_id"], part["n"], part["total"], reason)
+    elif part:
         log.info("continuing %s: part %d of %d", part["post_id"], part["n"],
                  part["total"])
         try:
@@ -221,4 +232,26 @@ def main(count: int = 1) -> int:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    sys.exit(main(int(sys.argv[1]) if len(sys.argv) > 1 else 1))
+
+    if "--selftest" in sys.argv:
+        # The part is rendered in the run that can send it, and in no other:
+        # nothing else clears it, and a run spent on a part publishes nothing
+        # to YouTube. Stubs, because the real thing costs an LLM call and a TTS
+        # call - the point is which branch is taken, not what it renders.
+        rendered = []
+        TIKTOK_ENABLED = True
+        source.next_part = lambda: {"post_id": "x", "n": 2, "total": 2}
+        source.fetch = source.fetch_viral = lambda *a: []
+        source.viral_due = lambda: False
+        make_part = lambda p: rendered.append(p) or Path("stub.mp4")  # noqa: E731
+        publish.due = lambda: "only 0.4h since the last draft"
+        assert main(1) == 1 and not rendered, "a part must wait for TikTok's clock"
+        assert main(1, force=True) == 0 and rendered, "--force renders it anyway"
+        rendered.clear()
+        publish.due = lambda: ""
+        assert main(1) == 0 and len(rendered) == 1, "and so does an open gap"
+        print("part gating ok")
+        sys.exit(0)
+
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    sys.exit(main(int(args[0]) if args else 1, force="--force" in sys.argv))
