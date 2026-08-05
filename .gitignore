@@ -1,6 +1,12 @@
 .env
 .venv/
 __pycache__/
+# The prompt set and the working notes live in a separate private repo, cloned
+# here. This repo has to stay public - Pages serves the policy pages the
+# platform reviews point at, and public is what makes Actions minutes free -
+# so what is worth keeping is simply not in it. CI clones it with a read-only
+# deploy key; see the checkout step in publish.yml.
+.private/
 # seen.db is tracked on purpose: it is the only state a GitHub Actions run
 # must carry over, and it holds no secrets - just post ids and upload ids.
 out/
