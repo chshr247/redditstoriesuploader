@@ -282,7 +282,10 @@ jobs:
       - name: Make one video and publish it
         if: steps.gate.outputs.go == 'true'
         run: |
-          if ! python main.py 1; then
+          # --force reaches main.py too: the awaited part is otherwise rendered
+          # only in a run that may send it, and a forced run is exactly the one
+          # that may send it regardless of the clock.
+          if ! python main.py 1 ${{ inputs.force == true && '--force' || '' }}; then
             echo "::warning::no video produced this run (story pool dry or all skipped)"
             exit 0
           fi
