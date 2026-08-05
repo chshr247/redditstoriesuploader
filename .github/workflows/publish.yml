@@ -149,7 +149,7 @@ jobs:
       # Spacing between the parts of one split story. A TikTok knob now - only
       # that platform is ever offered a part - and below TIKTOK_MIN_GAP_HOURS
       # because three parts at the ordinary spacing would not fit inside a day.
-      PART_GAP_HOURS: "1.5"
+      PART_GAP_HOURS: "1"
 
     steps:
       - uses: actions/checkout@v4
