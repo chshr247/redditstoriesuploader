@@ -201,7 +201,7 @@ TIKTOK_MIN_GAP_HOURS = float(os.getenv("TIKTOK_MIN_GAP_HOURS", 3))
 # half - by then the feed has moved on and part 2 reads as a stranger's video.
 # It also has to be small enough that a three-parter fits inside one day, which
 # the ordinary gap is not.
-PART_GAP_HOURS = float(os.getenv("PART_GAP_HOURS", 1.5))
+PART_GAP_HOURS = float(os.getenv("PART_GAP_HOURS", 1))
 HASHTAGS = chan_env("HASHTAGS", "#reddit #redditstories #storytime #fyp")
 
 # Whether this channel's videos go up visible to everyone. Off by default, and

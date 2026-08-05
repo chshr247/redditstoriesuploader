@@ -239,7 +239,7 @@ def _split(mp4: Path) -> bool:
     """Is this file one part of a story told across several videos?
 
     Splitting is TikTok's alone. There a story arrives as "1/3", "2/3", "3/3"
-    an hour and a half apart and that reads as a serial; on a Shorts feed the
+    an hour apart and that reads as a serial; on a Shorts feed the
     same three land as one video and two follow-ups nobody asked for, hours
     after the hook, against an allowance of three uploads a day - so a split
     story would spend a whole day publishing one post. Parts are therefore
