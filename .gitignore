@@ -7,6 +7,9 @@ __pycache__/
 # so what is worth keeping is simply not in it. CI clones it with a read-only
 # deploy key; see the checkout step in publish.yml.
 .private/
+# ...and the same clone under its own name, in case it was cloned by hand
+# without renaming. Never tracked here, not even as a gitlink.
+reddit-prompts/
 # seen.db is tracked on purpose: it is the only state a GitHub Actions run
 # must carry over, and it holds no secrets - just post ids and upload ids.
 out/

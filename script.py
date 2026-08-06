@@ -319,6 +319,53 @@ HOMOGRAPH = {
         r"|invalid|row|sow)\b", re.IGNORECASE),
 }
 
+# In-law words the language is quietly retiring. Not wrong - unknown: a viewer
+# under thirty has to stop and work out which one золовка is, and the sentence
+# after it is gone by the time they have. Свекровь, тёща and зять are missing
+# from this list on purpose, and the prompt keeps them for the same reason:
+# those three never left everyday speech.
+#
+# The one check here that reads the NARRATION as well as the title, because
+# that is where these words actually turn up - the title has six words and
+# spends them on the event, the narration is where a family gets named.
+#
+# Russian only, and the dict has no "en" key to say so. Every other table above
+# carries both languages because the rule exists in both prompts; English
+# in-law words are all current, so SYSTEM_EN has no such rule, and an English
+# half here would be a regex that can never fire pretending to be a check.
+#
+# ponytail: stems, like tags.py, but two of them are written the long way round
+# because a short one would eat a word that is allowed. "свекр" matches
+# свекровь, hence the lookahead; "кум" matches кумир and кумовство, hence the
+# spelled-out endings.
+ARCHAIC_KIN = {
+    "ru": [
+        (re.compile(r"\bзоловк\w*", re.IGNORECASE), "сестра мужа"),
+        (re.compile(r"\bдевер\w*", re.IGNORECASE), "брат мужа"),
+        (re.compile(r"\bшур(?:ин|ья|ьё|ье)\w*", re.IGNORECASE), "брат жены"),
+        (re.compile(r"\bсвояк\w*", re.IGNORECASE), "муж сестры жены"),
+        (re.compile(r"\bсвоячениц\w*", re.IGNORECASE), "сестра жены"),
+        (re.compile(r"\bснох[аиоуе]\w*", re.IGNORECASE), "жена сына"),
+        (re.compile(r"\bневестк\w*", re.IGNORECASE), "жена сына"),
+        (re.compile(r"\b(?:св[её]кор\w*|св[её]кр(?!ов)\w*)", re.IGNORECASE),
+         "отец мужа"),
+        (re.compile(r"\bкум(?:а|ы|е|у|ой|ом|ам|ами)?\b", re.IGNORECASE),
+         "крёстный моего сына"),
+    ],
+}
+
+
+def _kin_fault(text: str, lang: str = "") -> str:
+    """Empty unless the text names a relative by a word nobody says any more."""
+    t = plain(text)
+    for pat, fix in ARCHAIC_KIN.get(lang or OUTPUT_LANG, ()):
+        m = pat.search(t)
+        if m:
+            return (f"\"{m.group()}\" is a word a young viewer has to stop and "
+                    f"work out - name the person plainly instead, \"{fix}\"")
+    return ""
+
+
 # How the model is told to keep a title to one sentence, which is the one
 # complaint that has to name a conjunction to be actionable.
 _TURN_WORDS = {"ru": '"а" or "но"', "en": '"and" or "but"'}
@@ -554,7 +601,11 @@ def _parse_parts(raw: str, post: dict, parts: int,
         # before it end on the cliffhanger itself.
         label = f"part {i}: " if parts > 1 else ""
         faults += [label + f for f in
-                   (_title_fault(title), _ending_fault(body, final=i == len(chunks)))
+                   (_title_fault(title),
+                    # title and narration together: one complaint either way,
+                    # and the fix is the same wherever the word turned up
+                    _kin_fault(f"{title} {body}"),
+                    _ending_fault(body, final=i == len(chunks)))
                    if f]
         total = _words(title) + _words(body)
         if not _fits(total, target):
@@ -733,8 +784,8 @@ if __name__ == "__main__":
     assert not ru("Соседка орала на моих детей, а наказала я своих")
     assert not ru("В четверг похороны, а в пятницу она спросила про деньги")
     # digits are the point of the title, not a stray token to trip over
-    assert not ru("Золовка платит 8000 за комнату в моей квартире")
-    assert ru("Попросила золовку платить восемьсот за комнату")
+    assert not ru("Свекровь платит 8000 за комнату в моей квартире")
+    assert ru("Попросила свекровь платить восемьсот за комнату")
     assert ru("Отец требует тридцать процентов моей зарплаты")
     assert ru("Брат занял пять тысяч и пропал перед свадьбой")
     # the figure is the hook, the unit is filler - and it eats the 40-char cut
@@ -746,6 +797,29 @@ if __name__ == "__main__":
     assert not ru("В четверг похороны, а в пятницу она спросила про деньги")
     assert not ru("Он оставил пятно на платье, а виноватой стала я")
     assert not SPELLED_NUMBER["ru"].search("Ремонт стоит дороже"), '"сто" must not fire on "стоит"'
+
+    # in-law words nobody says any more, in the title and in the narration
+    assert _kin_fault("Золовка забрала кольцо бабушки", "ru")
+    assert _kin_fault("Я отдала ключи золовке и пожалела", "ru")
+    assert _kin_fault("Деверь занял денег и пропал", "ru")
+    assert _kin_fault("Шурин переехал к нам на месяц", "ru")
+    assert _kin_fault("Свояк потребовал долю в квартире", "ru")
+    assert _kin_fault("Свояченица требует свою долю", "ru")
+    assert _kin_fault("Сноха выставила меня из кухни", "ru")
+    assert _kin_fault("Невестка не пустила меня к внуку", "ru")
+    assert _kin_fault("Свёкор продал машину без спроса", "ru")
+    assert _kin_fault("Свекра я больше не пускаю в дом", "ru")
+    assert _kin_fault("Кум пришёл на крестины пьяным", "ru")
+    # the cue is stripped first, so an English speaker label is not a match
+    assert not _kin_fault("[husband, angry] «Отдай ключи»", "ru")
+    # the three that stayed, and the words a short stem would have eaten
+    assert not _kin_fault("Свекровь сменила замок в нашей квартире", "ru")
+    assert not _kin_fault("Свекрови я больше ничего не должна", "ru")
+    assert not _kin_fault("Тёща въехала к нам, а зять молчал", "ru")
+    assert not _kin_fault("Он был её кумиром, пока не занял денег", "ru")
+    assert not _kin_fault("Невеста опоздала на собственную свадьбу", "ru")
+    # English has no such rule, so the check has nothing to say about it
+    assert not _kin_fault("My sister-in-law took the ring", "en")
 
     # a homograph in a short title is read as a coin flip, so it never ships
     assert ru("Тёща сменила замок в нашей квартире"), "за́мок vs замо́к"

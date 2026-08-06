@@ -33,9 +33,20 @@ TOPICS_RU = [
     # Two buckets, not one: свекровь and тёща are different people, and a story
     # about the husband's mother tagged #тёща is wrong to everyone it reaches.
     # The stems are written ё-less because pick() folds ё to е before matching.
-    (r"свекров|свекр|золовк|деверь|сноха|невестк",
+    # The prompt now writes these relatives the long way round - золовка and
+    # деверь are banned outright, and "мама мужа" is preferred over свекровь
+    # wherever the line has room - so the phrase has to match too, or the
+    # bucket empties out and the story falls through to #отношения on the word
+    # муж alone. Only the phrases that mean THIS person, though: the head tag
+    # here names her, and #свекровь on a story about the husband's sister is
+    # the same mislabel from the other side. Сестра мужа and брат жены have no
+    # tag of their own and belong to the #семья bucket below, which the stems
+    # \bсестр and \bбрат already reach.
+    (r"свекров|свекр|золовк|деверь|сноха|невестк"
+     r"|(?:мам|матер|мать)\w*\s+мужа\b",
      ["#свекровь", "#родня", "#семейныеконфликты"]),
-    (r"тещ|тесть|\bзят[ья]",
+    (r"тещ|тесть|\bзят[ья]"
+     r"|(?:мам|матер|мать)\w*\s+жены\b",
      ["#тёща", "#родня", "#семейныеконфликты"]),
     (r"\bмуж\b|\bмужа\b|\bмужу\b|\bжена\b|\bжену\b|\bжене\b|\bпарн[ея]|"
      r"девушк|бывш|расстал|отношени|встречал",
