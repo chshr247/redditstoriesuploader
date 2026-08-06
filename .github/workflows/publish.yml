@@ -333,6 +333,21 @@ jobs:
           # No CAPTION line means nothing was sent (allowance spent, queue
           # empty, upload failed) and there is nothing to remind anyone about.
           caption=$(sed -n '/^CAPTION:/,$p' /tmp/tiktok.out | tail -n +2)
+          # publish.py now asks TikTok what became of the file before it prints
+          # anything, and answers on this line. FAILED means the bytes arrived
+          # and the video was refused: there is no draft, the caption is
+          # withheld on purpose, and without the two lines below the only trace
+          # would be a green step that delivered nothing.
+          state=$(sed -n 's/^STATE: //p' /tmp/tiktok.out | tail -1)
+          if [ "$state" = "FAILED" ]; then
+            echo "::error::TikTok refused the upload - no draft was created"
+            printf 'TikTok отклонил загрузку: `%s`.\n\nЧерновика в приложении нет, публиковать нечего.\n\nЛог: %s/%s/actions/runs/%s\n' \
+              "$state" "${{ github.server_url }}" "${{ github.repository }}" "${{ github.run_id }}" \
+              | gh issue create \
+                  --title "TikTok ${{ matrix.channel }}: загрузка отклонена" \
+                  --assignee "${{ github.repository_owner }}" \
+                  --body-file -
+          fi
           # The CLI prints the publish_id after the caption, and the body of
           # this issue is meant to be copied into TikTok whole - so the id has
           # to go. It is the last line by construction: $() has already eaten
@@ -348,6 +363,52 @@ jobs:
               --assignee "${{ github.repository_owner }}" \
               --body-file -
           fi
+
+      # The step above pings a human the moment TikTok takes the bytes, and
+      # TikTok then takes its own time handing the draft to the app - their
+      # docs guarantee no limit for it and say moderation "may take a few
+      # hours". Measured 2026-08-06: the notification for one draft arrived an
+      # hour and a half late, batched with the next one's, and a third had not
+      # arrived after forty minutes. So the reminder can be true and useless at
+      # the same time, and a draft that never surfaces is a video nobody will
+      # ever see. This asks again, hours later, which is the only moment the
+      # question can be answered.
+      - name: Anything stuck in the TikTok inbox?
+        if: steps.gate.outputs.go == 'true' && inputs.dry_run != true
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STALE: ${{ vars.TIKTOK_STALE_HOURS || '6' }}
+        run: |
+          if python publish.py --stale "$STALE" > /tmp/stale.md; then
+            cat /tmp/stale.md
+            exit 0
+          fi
+          cat /tmp/stale.md
+          title="TikTok ${{ matrix.channel }}: черновики висят без публикации"
+          # One issue at a time, matched on the exact title. This step runs on
+          # every passing gate and a stuck draft stays stuck for hours - an
+          # issue per run would bury the one that matters under its own copies.
+          # --search is full-text and fuzzy, so the match is made here instead.
+          open=$(gh issue list --state open --limit 100 --json number,title \
+                 --jq "map(select(.title == \"$title\")) | .[0].number")
+          if [ -n "$open" ] && [ "$open" != "null" ]; then
+            echo "already reported in #$open, saying nothing"
+            exit 0
+          fi
+          # The header is written here rather than in publish.py for the same
+          # reason the titles are: what the CLI prints is data, and which
+          # language it is read in is this file's business.
+          {
+            echo "Залито в TikTok больше ${STALE} ч назад и до сих пор не опубликовано:"
+            echo
+            cat /tmp/stale.md
+            echo
+            echo "\`SEND_TO_USER_INBOX\` - черновик у TikTok принят; если уведомления в приложении нет, оно не дошло."
+            echo "Всё остальное - ролик застрял до выдачи в приложение."
+          } | gh issue create --title "$title" \
+                --assignee "${{ github.repository_owner }}" \
+                --body-file -
 
       - name: Keep the state file
         if: always() && steps.gate.outputs.go == 'true'
