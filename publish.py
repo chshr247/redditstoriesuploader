@@ -12,6 +12,7 @@ Two targets, and the default is the quiet one:
     python publish.py --next              send the oldest unsent mp4
     python publish.py --due               may another one go out today?
     python publish.py --status            what is queued, what already went
+    python publish.py --stale [hours]     what TikTok took but nobody has seen
     python publish.py out/<id>.mp4 [--direct] [--public]
 
 A draft carries no caption - TikTok's inbox endpoint takes the file and nothing
@@ -100,8 +101,24 @@ def _post(url: str, body: dict, token: str = "", form: bool = False) -> dict:
         raise RuntimeError(f"{url} -> {e.code}: {e.read().decode()[:400]}") from None
 
 
+# The live token and the moment it stops being one. Per process, and that is
+# the whole scope it needs: a run is one upload.
+_token: tuple[str, float] = ("", 0.0)
+
+
 def access_token() -> str:
-    """Short-lived token from the long-lived refresh token in .env."""
+    """Short-lived token from the long-lived refresh token in .env.
+
+    Cached for as long as TikTok says it is good for. Fetching one per call was
+    free while a run made exactly one API call; await_send() and stale() make a
+    dozen each, and every one of them was a full OAuth round trip against an
+    endpoint that has its own rate limit and no reason to be asked twice.
+    """
+    global _token
+    tok, good_until = _token
+    if tok and time.time() < good_until:
+        return tok
+
     for name, val in [("TIKTOK_CLIENT_KEY", TIKTOK_CLIENT_KEY),
                       ("TIKTOK_CLIENT_SECRET", TIKTOK_CLIENT_SECRET),
                       (TIKTOK_REFRESH_KEY, TIKTOK_REFRESH_TOKEN)]:
@@ -125,7 +142,11 @@ def access_token() -> str:
     if r.get("refresh_token") and r["refresh_token"] != TIKTOK_REFRESH_TOKEN:
         save_env(TIKTOK_REFRESH_KEY, r["refresh_token"])
         log.info("refresh token rotated, saved to .env as %s", TIKTOK_REFRESH_KEY)
-    return r["access_token"]
+    # A minute short of what TikTok promises, so a call that starts inside the
+    # window cannot finish outside it. The default is only used if expires_in
+    # ever goes missing; it never has.
+    _token = (r["access_token"], time.time() + int(r.get("expires_in", 3600)) - 60)
+    return _token[0]
 
 
 def _catch_locally() -> dict:
@@ -317,6 +338,103 @@ def status(publish_id: str) -> dict:
     return r.get("data", r)
 
 
+# The two states that mean the file is out of our hands for good: handed to the
+# app as a draft, or already published from one. Everything else is either
+# still moving or dead.
+DELIVERED = ("SEND_TO_USER_INBOX", "PUBLISH_COMPLETE")
+# How long to keep asking, and how often. Deliberately short - see await_send()
+# for why the answer is advisory and a timeout is not an error.
+SEND_WAIT_S = int(os.getenv("TIKTOK_SEND_WAIT_S", "120"))
+SEND_POLL_S = 10
+
+
+def await_send(publish_id: str, timeout: int = SEND_WAIT_S) -> str:
+    """Ask TikTok what it did with the upload. Returns the last status seen.
+
+    A 201 from the last chunk means the bytes arrived and nothing else. The file
+    is moderated after that and only then handed to the app, and TikTok
+    guarantees no time for either step - their own words are that a time limit
+    is not guaranteed and that moderation "may take a few hours". Until this
+    module asks, a run that uploaded a file TikTok later rejected outright is
+    indistinguishable from one that worked, which is what let a silent failure
+    look exactly like a success for as long as this function did not exist.
+
+    A timeout is NOT a failure and the caller must not treat it as one: the file
+    is almost certainly fine and merely slow, and losing the caption reminder
+    over TikTok being slow costs more than the uncertainty does. Only FAILED is
+    an answer worth acting on. That is also why the deadline is two minutes
+    rather than an hour - the honest states are reached fast or not at all, and
+    a CI runner is not the place to wait out moderation.
+    """
+    deadline = time.time() + timeout
+    state = "UNKNOWN"
+    while True:
+        try:
+            state = status(publish_id).get("status") or state
+        except RuntimeError as e:
+            # 500s out of this endpoint are routine - one of the 08-05 ids
+            # answers with one to this day - and they say nothing about the
+            # upload itself. Keep asking; the deadline below ends it.
+            log.warning("status fetch failed, asking again: %s", e)
+        log.info("publish %s: %s", publish_id[-6:], state)
+        if state in DELIVERED or state == "FAILED" or time.time() >= deadline:
+            return state
+        time.sleep(SEND_POLL_S)
+
+
+def stale(hours: float = 6.0) -> list[tuple]:
+    """This channel's uploads that a human still owes something, oldest first.
+
+    The reminder issue is fire-and-forget: it is written the moment TikTok takes
+    the bytes and never looks again. But the draft reaches the app on TikTok's
+    schedule, not ours - measured 2026-08-06, the notification for one draft
+    arrived an hour and a half late, batched together with the next one's - and
+    a draft that never arrives leaves an issue nobody can act on and a video
+    nobody will ever see. This is the second look nothing else was taking.
+
+    Both kinds of stuck are reported, because both end the same way. A draft
+    still PROCESSING_UPLOAD hours later is broken; one sitting at
+    SEND_TO_USER_INBOX is merely unpublished, which after `hours` means the
+    notification never surfaced or was missed. The state is printed either way
+    and the reader decides which it is.
+    """
+    now = time.time()
+    # A week back and no further. The point is what is stuck NOW, and an id old
+    # enough that TikTok has forgotten it answers nothing worth reading.
+    with _db() as db:
+        rows = db.execute("SELECT file, publish_id, ts FROM tiktok WHERE"
+                          " channel=? AND ts>? AND ts<? ORDER BY ts",
+                          (CHANNEL, now - 7 * 86400, now - hours * 3600)
+                          ).fetchall()
+    out = []
+    for f, pid, ts in rows:
+        # Ids from the retired local backend are not TikTok's and asking about
+        # one gets an error, not an answer. See the note at the top of the file.
+        if not pid or not pid.startswith("v_"):
+            continue
+        # Twice, because this endpoint is genuinely flaky - measured 2026-08-06,
+        # five of ten ids answered 500 on the first ask and every one of them
+        # answered properly on the second, including ids that had answered fine
+        # minutes earlier. One try would make the watchdog miss half of what it
+        # exists to catch, and it would miss it silently.
+        for attempt in (1, 2):
+            try:
+                state = status(pid).get("status", "UNKNOWN")
+                break
+            except RuntimeError as e:
+                log.warning("status fetch failed for %s (try %d): %s",
+                            f, attempt, e)
+                time.sleep(2)
+        else:
+            # Two 500s say nothing about the draft, so say nothing about it
+            # either. A row wrongly called stuck sends someone to look for a
+            # video that is fine, which is how a watchdog stops being read.
+            continue
+        if state != "PUBLISH_COMPLETE":
+            out.append((f, pid, (now - ts) / 3600, state))
+    return out
+
+
 # --------------------------------------------------------------------- queue
 
 def _db():
@@ -491,9 +609,16 @@ def upload_next(direct: bool = False, private: bool = True,
                    " VALUES (?,?,?,?)",
                    (mp4.name, pid, time.time(), CHANNEL))
     _clear_part(meta)
+    # Printed BEFORE the caption and never after it: the workflow reads from the
+    # CAPTION line to the end of this output and takes the last line as the id,
+    # so anything added below would land in the issue body.
+    state = await_send(pid)
+    print(f"STATE: {state}")
     # A draft gets no caption from the API, so this print IS the caption and
-    # the workflow forwards it to be pasted by hand.
-    if not direct:
+    # the workflow forwards it to be pasted by hand. Withheld on FAILED alone -
+    # there is then no draft to publish, and a reminder about one is worse than
+    # no reminder. A slow upload still gets its caption; see await_send().
+    if not direct and state != "FAILED":
         print("\nCAPTION:\n" + caption(title, body=meta.get("body", "")) + "\n")
     return pid
 
@@ -601,7 +726,42 @@ if __name__ == "__main__":
         TIKTOK_PER_DAY, TIKTOK_MIN_GAP_HOURS = _real_per_day, _real_gap
         PART_GAP_HOURS = _real_part_gap
         TIKTOK_ENABLED = _real_enabled
-    print("chunking, caption and allowance logic ok")
+    # What await_send() does with each kind of answer, faked out - these run
+    # before every CLI command and must not touch the network.
+    _real_status, _real_poll = status, SEND_POLL_S
+    try:
+        SEND_POLL_S = 0
+        _seen = []
+
+        def _fake(_pid, _seq=iter(["PROCESSING_UPLOAD", "SEND_TO_USER_INBOX"])):
+            _seen.append(s := next(_seq))
+            return {"status": s}
+
+        status = _fake
+        assert await_send("x") == "SEND_TO_USER_INBOX", _seen
+        assert len(_seen) == 2, "it must keep asking while the answer moves"
+        status = lambda _pid: {"status": "FAILED"}
+        assert await_send("x") == "FAILED", "and stop dead on a refusal"
+        # A deadline that has already passed answers once and gives up. The
+        # caller still gets a state rather than an exception, because the
+        # caption is printed on everything except FAILED - see upload_next().
+        status = lambda _pid: {"status": "PROCESSING_UPLOAD"}
+        assert await_send("x", timeout=0) == "PROCESSING_UPLOAD"
+
+        def _boom(_pid):
+            raise RuntimeError("500 internal_error")
+
+        status = _boom
+        assert await_send("x", timeout=0) == "UNKNOWN", "a 500 is not an answer"
+    finally:
+        status, SEND_POLL_S = _real_status, _real_poll
+    # The window stale() looks through, from both ends at once. Nothing can be
+    # newer than a week and older than a year, so this asks TikTok nothing.
+    assert stale(24 * 365) == [], "the two ends of the window must not overlap"
+    # To stderr, not stdout. Every command's real output is read by something -
+    # the workflow greps the caption out of --next and puts --stale straight
+    # into an issue body - and a banner about the tests belongs in neither.
+    print("chunking, caption, allowance and status logic ok", file=sys.stderr)
 
     try:
         if "--auth" in sys.argv:
@@ -630,6 +790,22 @@ if __name__ == "__main__":
             if nxt := source.next_part():
                 print(f"next: {nxt['post_id']} part {nxt['n']} of {nxt['total']}"
                       f" (gap {PART_GAP_HOURS:.1f}h)")
+        elif "--stale" in sys.argv:
+            # The hours are an argument because the right threshold is not a
+            # property of the code: it is how long you are willing to let a
+            # video sit unseen, and the workflow and a human asking by hand do
+            # not answer that the same way.
+            i = sys.argv.index("--stale") + 1
+            hrs = float(sys.argv[i]) if len(sys.argv) > i and \
+                not sys.argv[i].startswith("-") else 6.0
+            rows = stale(hrs)
+            for f, pid, age, st in rows:
+                print(f"- `{f}` - {age:.1f}h ago, still `{st}` (`{pid}`)")
+            if not rows:
+                print(f"nothing older than {hrs:.1f}h is waiting")
+            # Exit code is the point, same as --due: the workflow asks and only
+            # writes an issue when the answer is yes.
+            sys.exit(1 if rows else 0)
         elif "--next" in sys.argv:
             print(upload_next(direct="--direct" in sys.argv,
                               private=not _public(),
@@ -659,7 +835,8 @@ if __name__ == "__main__":
             print(pid, status(pid))
         else:
             print("usage: python publish.py --auth | --whoami | --status | "
-                  "--due | --next | out/<id>.mp4 [--direct] [--public]")
+                  "--due | --next | --stale [hours] | "
+                  "out/<id>.mp4 [--direct] [--public]")
     except RuntimeError as e:
         print(f"\n{e}")
         sys.exit(1)
