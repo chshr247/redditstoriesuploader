@@ -43,6 +43,10 @@ on:
         description: "Publish now, ignoring the daily allowance and the gap"
         type: boolean
         default: false
+      stale_hours:
+        description: "Ask TikTok about drafts older than this many hours"
+        type: string
+        default: ""
 
 # Two runs writing seen.db at once would lose one of them.
 concurrency:
@@ -373,12 +377,25 @@ jobs:
       # the same time, and a draft that never surfaces is a video nobody will
       # ever see. This asks again, hours later, which is the only moment the
       # question can be answered.
+      # Deliberately NOT behind the gate. A draft goes missing exactly when the
+      # pipeline is having a bad day, and on a bad day the gate refuses: the
+      # allowance is spent, or the source is down and no video is made. Measured
+      # 2026-08-07 - five hours of runs in a row answered "neither platform is
+      # due" while pullpush was 502ing, so five hours of runs asked TikTok
+      # nothing, which is five hours of a stuck draft nobody could have been
+      # told about. The gate decides whether to MAKE a video; it has no business
+      # deciding whether to ask about one already sent. Two API calls per stuck
+      # row is what this costs on the runs that used to skip it.
       - name: Anything stuck in the TikTok inbox?
-        if: steps.gate.outputs.go == 'true' && inputs.dry_run != true
+        if: inputs.dry_run != true
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
-          STALE: ${{ vars.TIKTOK_STALE_HOURS || '6' }}
+          # The input is for asking by hand at a threshold the repo variable is
+          # not set to - "nothing has arrived for an hour and a half, what does
+          # TikTok say". Empty on every scheduled run, so it falls straight
+          # through to the standing value.
+          STALE: ${{ inputs.stale_hours || vars.TIKTOK_STALE_HOURS || '6' }}
         run: |
           if python publish.py --stale "$STALE" > /tmp/stale.md; then
             cat /tmp/stale.md
