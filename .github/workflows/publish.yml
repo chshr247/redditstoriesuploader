@@ -213,7 +213,13 @@ jobs:
           # "send one to TikTok now" must not have to buy the second one too.
           # yt keeps whatever --due said above - if YouTube is genuinely due it
           # still goes, this bypasses TikTok's clock and nothing else.
-          if [ "${{ inputs.force_tiktok }}" = "true" ]; then
+          # ...but never past the pause. --due folds three refusals into one
+          # exit code and only two of them are a clock; the third is a channel
+          # that has nowhere to put the file at all, and forcing that renders a
+          # video, spends the story and throws both away. Measured 2026-08-07:
+          # the first force_tiktok dispatch did exactly that to the English
+          # channel - five minutes of render, one story burned, nothing sent.
+          if [ "${{ inputs.force_tiktok }}" = "true" ] && python publish.py --enabled; then
             echo "::warning::forced (TikTok only) - its allowance and gap bypassed"
             tt=true
           fi

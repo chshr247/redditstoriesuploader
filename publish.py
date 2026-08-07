@@ -11,6 +11,7 @@ Two targets, and the default is the quiet one:
     python publish.py --auth              one-time, gets the refresh token
     python publish.py --next              send the oldest unsent mp4
     python publish.py --due               may another one go out today?
+    python publish.py --enabled           is this channel paused?
     python publish.py --status            what is queued, what already went
     python publish.py --stale [hours]     what TikTok took but nobody has seen
     python publish.py out/<id>.mp4 [--direct] [--public]
@@ -773,6 +774,16 @@ if __name__ == "__main__":
             reason = due()
             print(reason or "due")
             sys.exit(1 if reason else 0)
+        elif "--enabled" in sys.argv:
+            # The pause on its own, apart from the count and the gap that --due
+            # folds in with it. A forced run overrides those two and must NOT
+            # override this one - a paused channel has nowhere to put the file,
+            # so forcing it renders a video, spends the story and throws it
+            # away. Measured 2026-08-07: the first force_tiktok dispatch did
+            # exactly that to the English channel.
+            print("enabled" if TIKTOK_ENABLED else
+                  f"paused ({chan_key('TIKTOK_ENABLED')}=0)")
+            sys.exit(0 if TIKTOK_ENABLED else 1)
         elif "--status" in sys.argv:
             with _db() as db:
                 rows = db.execute("SELECT file, publish_id FROM tiktok "
@@ -835,7 +846,7 @@ if __name__ == "__main__":
             print(pid, status(pid))
         else:
             print("usage: python publish.py --auth | --whoami | --status | "
-                  "--due | --next | --stale [hours] | "
+                  "--due | --enabled | --next | --stale [hours] | "
                   "out/<id>.mp4 [--direct] [--public]")
     except RuntimeError as e:
         print(f"\n{e}")
