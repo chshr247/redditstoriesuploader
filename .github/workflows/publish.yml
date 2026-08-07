@@ -43,6 +43,10 @@ on:
         description: "Publish now, ignoring the daily allowance and the gap"
         type: boolean
         default: false
+      force_tiktok:
+        description: "Same, but TikTok only - YouTube keeps its own schedule"
+        type: boolean
+        default: false
       stale_hours:
         description: "Ask TikTok about drafts older than this many hours"
         type: string
@@ -202,6 +206,17 @@ jobs:
             if python youtube.py --due; then yt=true; else yt=false; fi
             if python publish.py --due; then tt=true; else tt=false; fi
           fi
+          # One platform at a time, because the two overrides are not the same
+          # size. A forced TikTok costs a draft in an inbox that a human still
+          # has to tap; a forced YouTube is a public video, and its gap exists
+          # so three uploads do not land in one feed on top of each other. So
+          # "send one to TikTok now" must not have to buy the second one too.
+          # yt keeps whatever --due said above - if YouTube is genuinely due it
+          # still goes, this bypasses TikTok's clock and nothing else.
+          if [ "${{ inputs.force_tiktok }}" = "true" ]; then
+            echo "::warning::forced (TikTok only) - its allowance and gap bypassed"
+            tt=true
+          fi
           echo "yt=$yt" >> "$GITHUB_OUTPUT"
           echo "tt=$tt" >> "$GITHUB_OUTPUT"
           if [ "$yt" = "true" ] || [ "$tt" = "true" ]; then
@@ -284,7 +299,7 @@ jobs:
           # --force reaches main.py too: the awaited part is otherwise rendered
           # only in a run that may send it, and a forced run is exactly the one
           # that may send it regardless of the clock.
-          if ! python main.py 1 ${{ inputs.force == true && '--force' || '' }}; then
+          if ! python main.py 1 ${{ (inputs.force == true || inputs.force_tiktok == true) && '--force' || '' }}; then
             echo "::warning::no video produced this run (story pool dry or all skipped)"
             exit 0
           fi
@@ -321,7 +336,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -o pipefail
-          if [ "${{ inputs.force }}" = "true" ]; then
+          if [ "${{ inputs.force }}" = "true" ] || [ "${{ inputs.force_tiktok }}" = "true" ]; then
             python publish.py --next --force | tee /tmp/tiktok.out
           else
             python publish.py --next | tee /tmp/tiktok.out
