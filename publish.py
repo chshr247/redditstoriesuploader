@@ -478,6 +478,32 @@ def sent_today() -> int:
     return sum(1 for (ts,) in rows if _utc_date(ts) == today)
 
 
+# TikTok's ceiling, not ours: "There may be at most 5 pending shares within any
+# 24-hour period" - the upload reference, same page as the 6-requests-a-minute
+# limit. Two things about it are different from TIKTOK_PER_DAY and both matter.
+#
+# It is a ROLLING 24 hours, where our count is a UTC calendar day: three drafts
+# at 23:00 and three at 01:00 never break a daily count of three and are six
+# inside one rolling day. And it is TikTok's rule, so nothing on our side gets
+# to bypass it - not --force, and not the part exemption that lets the middle of
+# a split story past the daily count.
+INBOX_CAP = int(os.getenv("TIKTOK_INBOX_CAP", 5))
+
+
+def shares_24h() -> int:
+    """Inbox shares this channel started in the last rolling 24 hours.
+
+    ponytail: counts every share, not only the ones still unpublished, because
+    "pending" would cost a status call per row on a gate that runs twice an hour
+    per channel. That errs toward sending less, never more. Ask TikTok properly
+    if the ceiling ever starts refusing videos there was really room for.
+    """
+    with _db() as db:
+        (n,) = db.execute("SELECT COUNT(*) FROM tiktok WHERE channel=? AND ts>?",
+                          (CHANNEL, time.time() - 24 * 3600)).fetchone()
+    return n
+
+
 def _since_last_h() -> float:
     """Hours since the last draft was sent, or a large number if none ever was."""
     with _db() as db:
@@ -498,6 +524,13 @@ def due() -> str:
     """
     if not TIKTOK_ENABLED:
         return f"TikTok is paused for this channel ({chan_key('TIKTOK_ENABLED')}=0)"
+    # Ahead of the part exemption below, because this ceiling is not ours to
+    # make exceptions to. Past it the upload does not fail - init still answers
+    # with a publish_id and the status still reads SEND_TO_USER_INBOX - the
+    # notification carrying the draft simply never arrives, which is a video
+    # lost with every signal saying it was delivered.
+    if (n := shares_24h()) >= INBOX_CAP:
+        return f"TikTok's 24h inbox ceiling reached ({n}/{INBOX_CAP})"
     # The awaited middle of a story answers to its own clock and to no count.
     # It has to be asked HERE and not only in _blocked(), because this is the
     # gate CI consults before anything is rendered: a run refused here renders
@@ -539,6 +572,11 @@ def _blocked(meta: dict, force: bool = False) -> str:
     # exactly the case a quota of zero would have missed.
     if not TIKTOK_ENABLED:
         return f"TikTok is paused for this channel ({chan_key('TIKTOK_ENABLED')}=0)"
+    # Ahead of --force for the same reason as the pause: a limit TikTok enforces
+    # is not one we can decide to spend anyway. Forcing past it does not deliver
+    # the video sooner, it delivers it never.
+    if (n := shares_24h()) >= INBOX_CAP:
+        return f"TikTok's 24h inbox ceiling reached ({n}/{INBOX_CAP})"
     if force:
         return ""
     # Keyed on what this FILE turned out to be, never on what due() sees
@@ -672,6 +710,12 @@ if __name__ == "__main__":
     _real_per_day, _real_gap = TIKTOK_PER_DAY, TIKTOK_MIN_GAP_HOURS
     _real_part_gap = PART_GAP_HOURS
     _real_enabled = TIKTOK_ENABLED
+    # Lifted out of the way for everything below except the block that is about
+    # it. It sits ahead of the pause, --force and the part exemption, so a run
+    # made while the real window happens to be full - which is exactly when
+    # these tests are most worth having - would otherwise fail every one of
+    # them, and fail them with the wrong reason.
+    _real_cap, INBOX_CAP = INBOX_CAP, 10_000
     try:
         # A paused channel sends nothing at all: not an ordinary video, not a
         # part of a split story, and not on --force. The part is the one that
@@ -723,10 +767,28 @@ if __name__ == "__main__":
         PART_GAP_HOURS = 10_000
         assert "for a part" in _blocked({"part": 2, "total": 2}), "parts are spaced"
         assert _blocked({"part": 2, "total": 2}, force=True) == "", "--force wins"
+
+        # ...but TikTok's own ceiling wins over --force and over the part
+        # exemption both, which is the whole difference between it and every
+        # other limit above. A cap of zero is the cheapest way to stand at it.
+        try:
+            INBOX_CAP = 0
+            TIKTOK_MIN_GAP_HOURS = PART_GAP_HOURS = 0
+            TIKTOK_PER_DAY = 10_000
+            for meta, force, who in [({}, False, "an ordinary video"),
+                                     ({}, True, "--force"),
+                                     ({"part": 2, "total": 2}, False, "a part"),
+                                     ({"part": 2, "total": 2}, True, "a forced part")]:
+                assert "inbox ceiling" in _blocked(meta, force=force), \
+                    f"{who} must not get past TikTok's 24h ceiling"
+            assert "inbox ceiling" in due(), "the CI gate must see it too"
+        finally:
+            INBOX_CAP = 10_000
     finally:
         TIKTOK_PER_DAY, TIKTOK_MIN_GAP_HOURS = _real_per_day, _real_gap
         PART_GAP_HOURS = _real_part_gap
         TIKTOK_ENABLED = _real_enabled
+        INBOX_CAP = _real_cap
     # What await_send() does with each kind of answer, faked out - these run
     # before every CLI command and must not touch the network.
     _real_status, _real_poll = status, SEND_POLL_S
