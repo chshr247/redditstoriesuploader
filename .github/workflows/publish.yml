@@ -265,17 +265,23 @@ jobs:
 
       - name: Fetch background clips
         if: steps.gate.outputs.go == 'true' && steps.bg.outputs.cache-hit != 'true'
+        # through the environment, not inlined into the script: a dropbox URL
+        # carries & and ? in its query string, and pasted straight into the
+        # shell those are operators, not characters
+        env:
+          BG_URL: ${{ secrets.BG_URL }}
         run: |
-          if [ -z "${{ secrets.BG_URL }}" ]; then
+          if [ -z "$BG_URL" ]; then
             echo "::error::BG_URL secret is not set - it must hold one or more whitespace-separated zip URLs of vertical-friendly clips"
             exit 1
           fi
           mkdir -p assets/bg
           # BG_URL is a whitespace/newline-separated list: one zip or many, same
           # secret. Each unpacks into its own subdir so identically named clips
-          # across zips do not overwrite each other.
+          # across zips do not overwrite each other. Unquoted on purpose - the
+          # split into words is the whole point, and a URL has no spaces.
           i=0
-          for url in ${{ secrets.BG_URL }}; do
+          for url in $BG_URL; do
             i=$((i + 1))
             curl -fsSL "$url" -o /tmp/bg.zip
             unzip -oq /tmp/bg.zip -d "assets/bg/$i"
