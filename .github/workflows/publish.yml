@@ -267,12 +267,19 @@ jobs:
         if: steps.gate.outputs.go == 'true' && steps.bg.outputs.cache-hit != 'true'
         run: |
           if [ -z "${{ secrets.BG_URL }}" ]; then
-            echo "::error::BG_URL secret is not set - it must point to a zip of vertical-friendly clips"
+            echo "::error::BG_URL secret is not set - it must hold one or more whitespace-separated zip URLs of vertical-friendly clips"
             exit 1
           fi
           mkdir -p assets/bg
-          curl -fsSL "${{ secrets.BG_URL }}" -o /tmp/bg.zip
-          unzip -oq /tmp/bg.zip -d assets/bg
+          # BG_URL is a whitespace/newline-separated list: one zip or many, same
+          # secret. Each unpacks into its own subdir so identically named clips
+          # across zips do not overwrite each other.
+          i=0
+          for url in ${{ secrets.BG_URL }}; do
+            i=$((i + 1))
+            curl -fsSL "$url" -o /tmp/bg.zip
+            unzip -oq /tmp/bg.zip -d "assets/bg/$i"
+          done
           find assets/bg -name '*.mp4' | head -20
 
       - name: Install dependencies
