@@ -3,6 +3,11 @@
 We walk each subreddit top-down by score. Used posts go into sqlite, and the
 lowest used score becomes the cursor, so every run picks up the next batch
 instead of the same top posts.
+
+pullpush goes down for hours at a time (502s across every sub, and then the run
+makes no video at all), so arctic shift stands behind it - same archive, same
+post shape, no key either. It cannot sort or filter by score, only by time, so
+it reads a random window of days and the band is filtered here instead.
 """
 import datetime
 import html
@@ -22,9 +27,12 @@ from config import (DB_PATH, DEFAULT_CHANNEL, MAX_SCORE, MIN_COMMENTS,
                     VIRAL_PER_DAY)
 
 API = "https://api.pullpush.io/reddit/search/submission/"
+ARCTIC = "https://arctic-shift.photon-reddit.com/api/posts/search"
 UA = "StoryReader/0.1"
 BATCH = 100                        # pullpush per-request cap
 MIN_CHARS, MAX_CHARS = 400, 4000   # ~40 sec .. ~4 min of narration
+ARCTIC_DAYS = 2                    # width of the window arctic shift reads
+ARCTIC_BACK = 4 * 365              # ...taken from anywhere in the last 4 years
 
 log = logging.getLogger(__name__)
 
@@ -79,20 +87,49 @@ def _add_lang(db) -> None:
         log.info("%s: migrated to per-channel rows", table)
 
 
-def _api(**params):
-    url = API + "?" + urllib.parse.urlencode(params)
+def _api(base: str, **params):
+    """Both archives answer {"data": [...]} to a plain GET, so one helper does."""
+    url = base + "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
                 return json.load(r)["data"]
         except urllib.error.HTTPError as e:
-            # pullpush throttles bursts; a short wait clears it
+            # both throttle bursts; a short wait clears it
             if e.code != 429 or attempt == 2:
                 raise
             wait = 5 * (attempt + 1)
-            log.info("pullpush 429, retrying in %ds", wait)
+            log.info("429 from %s, retrying in %ds", base, wait)
             time.sleep(wait)
+
+
+# Anything that means "the archive is not answering right now" - the next
+# backend gets a turn, and if there is none the sub is skipped for this run.
+DOWN = (urllib.error.URLError, TimeoutError, json.JSONDecodeError)
+
+
+def _pullpush(sub: str, top: int) -> list[dict]:
+    """The band's best unread posts, straight from the score index."""
+    return _api(API, subreddit=sub, size=BATCH, sort="desc",
+                sort_type="score", score=f"<{top}")
+
+
+def _arctic(sub: str) -> list[dict]:
+    """The same posts from arctic shift, which has no score index at all.
+
+    So it reads a random ARCTIC_DAYS-day window instead and _harvest filters the
+    band out of it. Random, not the newest days and not the score cursor's
+    position: the cursor is a score and means nothing to a time-ordered API,
+    while a fixed window would hand back the same posts every run until the
+    whole window was used up. A couple of days of a busy sub carries a handful
+    of posts above MIN_SCORE, which is all a run needs.
+    """
+    start = datetime.date.today() - datetime.timedelta(
+        days=random.randint(ARCTIC_DAYS, ARCTIC_BACK))
+    # "auto" is arctic's own batch size, 100..1000 - the busy subs cap out on it
+    return _api(ARCTIC, subreddit=sub, limit="auto", sort="desc",
+                after=str(start), before=str(start + datetime.timedelta(days=ARCTIC_DAYS)))
 
 
 # "UPDATE: ..." only makes sense to someone who read the original post, and the
@@ -183,13 +220,15 @@ def _harvest(limit: int, floor: int, ceiling: int) -> list[dict]:
             log.info("r/%s: nothing left above %d, trying another sub", sub, floor)
             continue
 
-        params = {"subreddit": sub, "size": BATCH,
-                  "sort": "desc", "sort_type": "score", "score": f"<{top}"}
         try:
-            posts = _api(**params)
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
-            log.warning("r/%s: source unavailable (%s), skipping", sub, e)
-            continue
+            posts = _pullpush(sub, top)
+        except DOWN as e:
+            log.warning("r/%s: pullpush unavailable (%s), trying arctic shift", sub, e)
+            try:
+                posts = _arctic(sub)
+            except DOWN as e:
+                log.warning("r/%s: no source available (%s), skipping", sub, e)
+                continue
 
         found = 0
         for p in posts:
@@ -197,7 +236,11 @@ def _harvest(limit: int, floor: int, ceiling: int) -> list[dict]:
             # pool on its own again and the ranking has nothing to choose from.
             if found >= limit:
                 break
-            if p["id"] in seen or p["score"] < floor or not _usable(p):
+            # The ceiling is enforced here and not only in the request, because
+            # arctic shift cannot filter on score - its window comes back with
+            # the whole band range in it. pullpush already caps at `top`, which
+            # is the tighter of the two, so this changes nothing for it.
+            if p["id"] in seen or not floor <= p["score"] < ceiling or not _usable(p):
                 continue
             title, text = _clean(p["title"]), _clean(p["selftext"])
             # cheapest possible gate: reject here and the story never costs an LLM call
@@ -444,6 +487,18 @@ if __name__ == "__main__":
                                          (OUTPUT_LANG,))}
         assert "_selftest_other" not in mine, "the other channel's row leaked in"
         db.execute("DELETE FROM seen WHERE id='_selftest_other'")
+
+    # The fallback is the whole point: pullpush answers 502 for hours at a time,
+    # and a backup nobody exercises is a backup that is broken when it is needed.
+    # So the run below is done twice, once with pullpush forcibly dead.
+    real_pullpush = _pullpush
+    _pullpush = lambda *a: (_ for _ in ()).throw(urllib.error.URLError("forced"))
+    arctic = fetch(3)
+    assert arctic, "arctic shift returned nothing - the fallback is dead"
+    for p in arctic:
+        assert MIN_SCORE <= p["score"] < MAX_SCORE, f"out of band: {p['score']}"
+    print(f"fallback ok: {len(arctic)} posts from arctic shift")
+    _pullpush = real_pullpush
 
     posts = fetch(3)
     assert posts, "source returned nothing - check network / SUBREDDITS"

@@ -9,7 +9,7 @@ users. It runs locally, on demand, on one machine.
 
 ## What it does
 
-1. **Source** — pulls public Reddit submissions from the pullpush.io archive.
+1. **Source** — pulls public Reddit submissions from the pullpush.io archive, falling back to arctic shift when it is down.
 2. **Script** — an LLM condenses the post into ~75 seconds of narration and
    translates it. Posts that are unsuitable are dropped, not sanitised.
 3. **Voice** — text-to-speech produces the narration; word timings are recovered
