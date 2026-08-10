@@ -32,8 +32,9 @@ from pathlib import Path
 
 import tags as tags_          # `tags` is the local variable in description_for
 from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL, OUT_DIR,
-                    YT_CLIENT_ID, YT_CLIENT_SECRET,
-                    YT_MIN_GAP_HOURS, YT_REFRESH_KEY, YT_REFRESH_TOKEN, save_env)
+                    VIRAL_MIN_SCORE, YT_CLIENT_ID, YT_CLIENT_SECRET,
+                    YT_MIN_GAP_HOURS, YT_PAUSED_UNTIL, YT_PER_DAY,
+                    YT_REFRESH_KEY, YT_REFRESH_TOKEN, YT_VIRAL_ONLY, save_env)
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -189,8 +190,12 @@ def daily_allowance(day: int) -> int:
     working ceiling for Shorts on one channel; more reads as a firehose and each
     upload competes with the last one for the same audience. A young channel
     starts at two.
+
+    YT_PER_DAY overrides the whole ramp: once the bar is the viral band only,
+    "as many as the platform tolerates" is the wrong question - there is about
+    one story a day worth putting there.
     """
-    return 2 if day < 7 else 3
+    return YT_PER_DAY or (2 if day < 7 else 3)
 
 
 def _utc_date(ts: float):
@@ -247,17 +252,35 @@ def _split(mp4: Path) -> bool:
     return _meta_for(mp4).get("total", 0) > 1
 
 
+def _loud(mp4: Path) -> bool:
+    """Is this story loud enough for this channel's YouTube, if it is picky?
+
+    The score is read back off disk rather than asked of Reddit again: it is
+    what the post scored when it was chosen, and that is the number the band
+    was judged on. A file with no score in its meta predates this filter, so
+    under YT_VIRAL_ONLY it is not loud - refusing an unknown is the safe way
+    round when the whole point is that ordinary stories stop going up.
+
+    Not folded into due(): --force is a human saying "publish now", and the
+    bar is not a clock to be waited out. There is nothing to force past.
+    """
+    return not YT_VIRAL_ONLY or _meta_for(mp4).get("score", 0) >= VIRAL_MIN_SCORE
+
+
 def pending() -> list:
     """This channel's rendered videos that have not been uploaded, oldest first.
 
     Parts of a split story are not among them - see _split(). Nothing else
     filters them out later, so a part rendered by a TikTok run simply sits in
     out/ as far as YouTube is concerned, and never blocks the queue behind it.
+    An ordinary-band story under YT_VIRAL_ONLY is invisible here the same way,
+    and for the same reason: TikTok still takes it, so it is not stuck, it just
+    is not this platform's.
     """
     with _db() as db:
         done = {r[0] for r in db.execute("SELECT file FROM uploaded")}
     return sorted((p for p in OUT_DIR.glob("*.mp4")
-                   if p.name not in done and _mine(p) and not _split(p)),
+                   if p.name not in done and _mine(p) and not _split(p) and _loud(p)),
                   key=lambda p: p.stat().st_mtime)
 
 
@@ -293,6 +316,22 @@ def mark_done(mp4: Path, yt_id: str = "manual") -> None:
     print(f"{mp4.name} marked as uploaded")
 
 
+def _pause_left(now: float | None = None) -> float:
+    """Hours of pause still to run, 0 when the channel is publishing.
+
+    A bad date must not read as "not paused" - that turns a typo into days of
+    uploads nobody asked for - so it raises rather than shrugging, and it does
+    it on --due, seconds into the run, before anything has been generated.
+    """
+    if not YT_PAUSED_UNTIL:
+        return 0.0
+    until = datetime.datetime.fromisoformat(YT_PAUSED_UNTIL)
+    if until.tzinfo is None:                       # bare date/time means UTC
+        until = until.replace(tzinfo=datetime.timezone.utc)
+    now = datetime.datetime.fromtimestamp(now or time.time(), datetime.timezone.utc)
+    return max(0.0, (until - now).total_seconds() / 3600)
+
+
 def due() -> str:
     """Empty string if an upload is allowed right now, else the reason it is not.
 
@@ -300,6 +339,8 @@ def due() -> str:
     runner the rendered file dies with the job, so generating first and finding
     out afterwards that the schedule says no burns a story for nothing.
     """
+    if left := _pause_left():
+        return f"paused for another {left:.1f}h (YT_PAUSED_UNTIL={YT_PAUSED_UNTIL})"
     s = status()
     if s["today"] >= s["allowed"]:
         return f"daily allowance reached ({s['today']}/{s['allowed']})"
@@ -442,8 +483,25 @@ if __name__ == "__main__":
         boss = description_for(*BOSS)
         assert set(boss.split()) & tags_.TOPIC_TAGS[CHANNEL], boss
 
-        assert daily_allowance(0) == 2 and daily_allowance(6) == 2
-        assert daily_allowance(7) == 3 and daily_allowance(365) == 3, "3 is the ceiling"
+        if YT_PER_DAY:
+            assert daily_allowance(0) == daily_allowance(365) == YT_PER_DAY, \
+                "YT_PER_DAY is the whole allowance, ramp included"
+        else:
+            assert daily_allowance(0) == 2 and daily_allowance(6) == 2
+            assert daily_allowance(7) == 3 and daily_allowance(365) == 3, "3 is the ceiling"
+
+        # The pause is a deadline, not a switch: it has to expire on its own.
+        now = datetime.datetime(2026, 8, 10, 14, tzinfo=datetime.timezone.utc)
+        for value, left in (("", 0), ("2026-08-12T14:00", 48), ("2026-08-09", 0)):
+            globals()["YT_PAUSED_UNTIL"] = value
+            assert abs(_pause_left(now.timestamp()) - left) < 0.01, value
+        globals()["YT_PAUSED_UNTIL"] = "nonsense"
+        try:
+            _pause_left()
+            raise AssertionError("a mistyped pause date must not read as running")
+        except ValueError:
+            pass
+        globals()["YT_PAUSED_UNTIL"] = ""
 
         # The case that broke it: two uploads two hours apart, either side of
         # midnight. A trailing 24h window counts both as "today"; calendar days

@@ -70,7 +70,10 @@ def make_video(post: dict) -> Path:
     """One post, one video. Marks the post used only once the mp4 exists."""
     gender, written = script.write_script(post)
     title, body = written[0]
-    out = _render(title, body, gender, post["id"], post["sub"])
+    # The score travels with the file: youtube.py decides by band and the post
+    # is out of reach by then - seen.db keeps it per story, not per rendered mp4.
+    out = _render(title, body, gender, post["id"], post["sub"],
+                  meta={"score": post["score"]})
     source.mark_used(post["id"], post["score"], post["sub"])
     return out
 
@@ -100,7 +103,8 @@ def make_split(post: dict, n: int) -> Path:
     if len(written) < 2:
         log.info("model returned one part, publishing %s as a single video", post["id"])
         title, body = written[0]
-        out = _render(title, body, gender, post["id"], post["sub"])
+        out = _render(title, body, gender, post["id"], post["sub"],
+                      meta={"score": post["score"]})
         source.mark_used(post["id"], post["score"], post["sub"])
         return out
 

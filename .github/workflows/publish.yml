@@ -149,6 +149,18 @@ jobs:
       # third upload still fits. Only the day-2 allowance of 2 hid it. At 3.5
       # the same three span seven hours and the slack goes from two to five.
       YT_MIN_GAP_HOURS: "3.5"
+      # One upload a day, and only from the viral band. Measured on the channel
+      # itself, 2026-08-10: fourteen days of two-to-three ordinary stories a day
+      # sat at 0-8 views each, and the only two that moved (383 and 62) were the
+      # loud ones. So YouTube gets the day's one loud story and nothing else -
+      # TikTok keeps taking the ordinary band at its own count. A repo variable
+      # overrides either without a push.
+      YT_PER_DAY: ${{ vars.YT_PER_DAY || '1' }}
+      YT_VIRAL_ONLY: ${{ vars.YT_VIRAL_ONLY || '1' }}
+      # A dated pause, inert once it passes - no second push to resume, and no
+      # channel left silently stopped. Set the variable to a later date to
+      # extend it, to an empty value to lift it early.
+      YT_PAUSED_UNTIL: ${{ vars.YT_PAUSED_UNTIL || '2026-08-12T14:00' }}
       # Spacing between the parts of one split story. A TikTok knob now - only
       # that platform is ever offered a part - and below TIKTOK_MIN_GAP_HOURS
       # because three parts at the ordinary spacing would not fit inside a day.
