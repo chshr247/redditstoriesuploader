@@ -228,6 +228,26 @@ YT_HASHTAGS = [t for t in (h.strip().strip('"\'')
 # Five hours apart, so three uploads spread across a waking day instead of
 # landing in one block and competing with each other in the same feed.
 YT_MIN_GAP_HOURS = float(os.getenv("YT_MIN_GAP_HOURS", 5))
+# Uploads a day. 0 means the ramp in youtube.daily_allowance decides (2 in the
+# channel's first week, 3 after) - a knob because "how many" turned out to be
+# an editorial call, not a platform limit: three ordinary stories a day landed
+# on 0-8 views each, so the count came down to one and the bar went up.
+YT_PER_DAY = int(os.getenv("YT_PER_DAY", 0))
+# ...and that bar. On, only stories from the viral band (VIRAL_MIN_SCORE up)
+# are offered to YouTube. The ordinary band still gets made and still goes to
+# TikTok - this narrows one platform's queue, it does not narrow the pipeline.
+# Nothing forces the two to agree, so a day whose viral slot came back empty
+# simply has no YouTube upload in it, which is the intended trade.
+# shared=True: one value pauses/raises the bar on every channel at once, and a
+# suffixed one overrides a single channel. Safe to fall back on - unlike a
+# token, the worst a shared value can do is apply where it was already meant.
+YT_VIRAL_ONLY = chan_env("YT_VIRAL_ONLY", "0", shared=True).strip().lower() in (
+    "1", "true", "yes", "on")
+# Pause with an expiry: ISO-8601, UTC assumed, e.g. 2026-08-12T14:00. Past that
+# moment the value is inert, which is the whole point - a pause that has to be
+# lifted by hand is a pause somebody forgets to lift, and a channel that
+# quietly stopped publishing looks exactly like a channel with no runs due.
+YT_PAUSED_UNTIL = chan_env("YT_PAUSED_UNTIL", shared=True)
 # YouTube requires the synthetic-content flag for realistic material: real
 # people made to say things they did not, altered footage of real events,
 # realistic scenes that never happened, AI-generated music. Voice-over, a
