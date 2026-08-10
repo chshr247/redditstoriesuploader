@@ -261,11 +261,16 @@ DECLARE_AI = os.getenv("DECLARE_AI", "").lower() in ("1", "true", "yes")
 SUBTITLE_FONT = os.getenv("SUBTITLE_FONT", "Arial Black")
 
 BG_DIR = ROOT / "assets" / "bg"      # background clips, 1080x1920
+# Ad banners: png/jpg/webp for a still, gif/mp4/mov/webm for one that moves.
+# Empty directory means no banner, which is the default - drop a file in and
+# every render from then on carries it. See render._pick_ad().
+AD_DIR = ROOT / "assets" / "ad"
 OUT_DIR = ROOT / "out"               # audio, .ass, finished mp4
 DB_PATH = ROOT / "seen.db"           # sqlite: post_ids already turned into videos
 
 OUT_DIR.mkdir(exist_ok=True)
 BG_DIR.mkdir(parents=True, exist_ok=True)
+AD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 if __name__ == "__main__":

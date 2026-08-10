@@ -14,5 +14,8 @@ reddit-prompts/
 # must carry over, and it holds no secrets - just post ids and upload ids.
 out/
 assets/bg/
+# Ad banners, same reason as the backgrounds: a ProRes 4444 banner is 260 MB
+# for ten seconds, and this repo is public.
+assets/ad/
 .env.*
 !.env.example
