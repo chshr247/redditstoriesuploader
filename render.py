@@ -15,7 +15,7 @@ from pathlib import Path
 
 import safety
 import script
-from config import BG_DIR, CHANNEL, CHANNELS, OUT_DIR, SUBTITLE_FONT
+from config import AD_DIR, BG_DIR, CHANNEL, CHANNELS, OUT_DIR, SUBTITLE_FONT
 from voice import duration as _dur
 
 W, H = 1080, 1920
@@ -30,6 +30,21 @@ HOOK_WINDOW = 3            # seconds a seek is judged on: the hook, and nothing 
 MOTION_DIR = BG_DIR / ".motion"   # one json per clip, next to the footage it describes
 CUT_MIN_GAP = 90.0         # how far the post-title footage must be from the opening
 CUT_TRIES = 40             # draws allowed to find that gap before the cut is dropped
+
+# --- overlay banner ---
+# An optional image or clip laid over every render. None of these numbers are
+# taste: each one comes from a placement spec, and the reasoning behind every
+# one of them - why this instant, this share of the frame, this band of it, and
+# which of its rules are knowingly not met - is in DOCS.ru.md, not here.
+AD_AT = 1.0                # when it appears, seconds
+AD_FADE = 0.5              # fade in, and out again if AD_SEC ends it
+AD_SEC = 0.0               # how long it stays; 0 means to the end of the video
+AD_CHANNELS = ("ru",)      # channels that carry one; the rest never do
+AD_MIN_AREA = 1 / 6        # of the frame, below which _ad_size() warns
+AD_MARGIN = 40             # side gap, so the banner is never flush with an edge
+AD_Y = 240                 # below the platform's top interface strip, and word
+                           # cards sit dead centre, so this band is free
+IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp")
 
 log = logging.getLogger(__name__)
 
@@ -435,9 +450,100 @@ def _cut(bg_dur: float, dur: float, title_end: float, name: str,
     return None
 
 
+def _pick_ad(channel: str = CHANNEL) -> Path | None:
+    """A banner from AD_DIR, or None when there is nothing to show.
+
+    No config switch: an empty directory is the off position. Several files are
+    drawn between at random, which is what a rotation of banners wants.
+
+    A channel outside AD_CHANNELS never gets one, whatever is in the directory.
+    Both channels render out of the same assets/ad, so the check has to be here
+    - CI fetching the banner for every job is a cached download, not a decision.
+    """
+    if channel not in AD_CHANNELS:
+        return None
+    ads = sorted(p for p in AD_DIR.rglob("*")
+                 if p.suffix.lower() in IMAGE_EXT + (".gif", ".mp4", ".mov", ".webm"))
+    return random.choice(ads) if ads else None
+
+
+def _ad_input(ad: Path) -> list[str]:
+    """Input flags that make the banner last as long as the video does.
+
+    Each source type loops by its own flag: a still frame has to be told to
+    repeat at all, a gif carries a loop count the demuxer honours only when
+    asked, and a video has to be re-read from the top. Without this the banner
+    plays once and the rest of the video runs with an empty slot.
+    """
+    ext = ad.suffix.lower()
+    if ext in IMAGE_EXT:
+        return ["-loop", "1", "-i", str(ad)]
+    if ext == ".gif":
+        return ["-ignore_loop", "0", "-i", str(ad)]
+    return ["-stream_loop", "-1", "-i", str(ad)]
+
+
+def _ad_size(ad: Path) -> int:
+    """The full frame width bar a margin - and a warning if that misses 1/6.
+
+    Solving for the AD_MIN_AREA minimum instead would be exactly backwards: it
+    is a floor to stay above, not a size to hit, and the widest placement that
+    still clears the interface is the one the spec asks for. See DOCS.ru.md.
+
+    Only the aspect ratio is measured, and only to tell whether that width can
+    reach the floor at all - a banner too wide to qualify at any size is a
+    file that has to be swapped, so this warns and renders rather than failing
+    a whole run over it.
+    """
+    wide = W - 2 * AD_MARGIN
+    try:
+        wh = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream=width,height", "-of", "csv=p=0", str(ad)],
+            capture_output=True, text=True, check=True).stdout.strip().split(",")
+        ratio = int(wh[0]) / int(wh[1])
+    except (subprocess.SubprocessError, OSError, ValueError, IndexError,
+            ZeroDivisionError) as e:
+        log.warning("could not measure %s (%s) - placing it at full width anyway",
+                    ad.name, e)
+        return wide
+    got = wide * wide / ratio
+    if got < W * H * AD_MIN_AREA:
+        log.warning("%s is %.1f:1 - %dx%d covers 1/%.1f of the frame, under the "
+                    "1/%.0f it is paid for. Use a less wide banner.",
+                    ad.name, ratio, wide, round(wide / ratio), W * H / got,
+                    1 / AD_MIN_AREA)
+    return wide
+
+
+def _ad_chain(idx: int, dur: float, wide: int) -> str:
+    """Filter graph putting input `idx` over [base] as a fading banner -> [v].
+
+    tpad rather than overlay's `enable`: enable only hides the banner while its
+    stream runs on underneath, so a gif or a video would arrive three seconds
+    into itself, mid-motion. Padding the FRONT with transparent frames delays
+    the stream itself, so the animation starts on its first frame the moment the
+    banner appears - which is the whole point of the delay for anything that
+    moves, and costs a still image nothing.
+
+    The fade is on alpha, so it dissolves against the footage instead of
+    fading through black, and it sits after the pad so both timestamps are read
+    off the same padded timeline as AD_AT.
+    """
+    gone = AD_AT + AD_SEC
+    out = (f",fade=t=out:st={gone - AD_FADE:.2f}:d={AD_FADE}:alpha=1"
+           if AD_SEC and gone < dur else "")
+    return (f"[{idx}:v]fps={FPS},scale={wide}:-2,format=rgba,"
+            f"tpad=start_duration={AD_AT}:start_mode=add:color=black@0,"
+            f"fade=t=in:st={AD_AT}:d={AD_FADE}:alpha=1{out}[ad];"
+            # eof_action=pass, not shortest: a banner that runs out must leave
+            # the video alone, not cut it off wherever it happened to end
+            f"[base][ad]overlay=(W-w)/2:{AD_Y}:format=auto:eof_action=pass[v]")
+
+
 def render(mp3, words: list[dict], name: str, bg=None,
            title: str = "", title_end: float = 0, key: str = "",
-           title_words: list[dict] | None = None):
+           title_words: list[dict] | None = None, ad=None):
     """Burn subtitles over a background clip and mux the narration.
 
     `key` identifies the STORY rather than the file: out/<id>_en.mp4 and
@@ -445,6 +551,7 @@ def render(mp3, words: list[dict], name: str, bg=None,
     pair that must not share footage.
     """
     bg = bg or _pick_bg(key)
+    ad = ad or _pick_ad()
     dur = _dur(mp3)
     ass = OUT_DIR / f"{name}.ass"
     out = OUT_DIR / f"{name}.mp4"
@@ -466,9 +573,12 @@ def render(mp3, words: list[dict], name: str, bg=None,
     # join streams that disagree about it, and with one branch it costs nothing.
     chain = (f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
              f"crop={W}:{H},setsar=1,hflip,fps={FPS}")
+    # the banner goes on last, over the burnt-in subtitles, so whatever it was
+    # paid for is never half-covered by a word card
+    last = "[base]" if ad else "[v]"
     if cut is None:
         inputs = ["-ss", str(seek), "-stream_loop", "-1", "-i", str(bg)]
-        video, audio = f"[0:v]{chain},subtitles={ass.name}[v]", "1:a"
+        video, audio = f"[0:v]{chain},subtitles={ass.name}{last}", "1:a"
     else:
         # Two reads of the same file, joined where the title card leaves and
         # the story starts. Subtitles go on AFTER the join, so the word cards
@@ -478,13 +588,20 @@ def render(mp3, words: list[dict], name: str, bg=None,
                   "-ss", str(cut), "-stream_loop", "-1", "-i", str(bg)]
         video = (f"[0:v]{chain}[hook];[1:v]{chain}[rest];"
                  f"[hook][rest]concat=n=2:v=1:a=0[cat];"
-                 f"[cat]subtitles={ass.name}[v]")
+                 f"[cat]subtitles={ass.name}{last}")
         audio = "2:a"
+
+    # after the mp3, so the audio input keeps the index the map above expects
+    ad_in = _ad_input(ad) if ad else []
+    if ad:
+        # inputs are the backgrounds, then the mp3, then the banner
+        video += ";" + _ad_chain((1 if cut is None else 2) + 1, dur, _ad_size(ad))
 
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
         *inputs,
         "-i", str(mp3),
+        *ad_in,
         "-filter_complex", video,
         "-map", "[v]", "-map", audio, "-t", f"{dur:.3f}", "-r", str(FPS),
         # The ceiling is the point, not the CRF. crf 23 alone let high-motion
@@ -507,8 +624,9 @@ def render(mp3, words: list[dict], name: str, bg=None,
     ]
     # run inside OUT_DIR: the subtitles filter chokes on Windows drive colons
     subprocess.run(cmd, cwd=OUT_DIR, check=True)
-    log.info("%s: %.1f sec from %s at %.1fs%s", out.name, dur, bg.name, seek,
-             f", cutting to %.1fs at %.1fs" % (cut, title_end) if cut else "")
+    log.info("%s: %.1f sec from %s at %.1fs%s%s", out.name, dur, bg.name, seek,
+             f", cutting to %.1fs at %.1fs" % (cut, title_end) if cut else "",
+             f", banner {ad.name} from {AD_AT:.0f}s" if ad else "")
     return out
 
 
@@ -572,6 +690,59 @@ if __name__ == "__main__":
     assert _cut(1100, 75, 74.0, "bg", None, 100.0) is None   # nothing after the card
     # A clip with no window CUT_MIN_GAP clear of the opening gives up quietly
     assert _cut(200, 75, 3.0, "(expected info)", None, 60.0) is None
+
+    # A channel outside AD_CHANNELS gets no banner even with the directory
+    # full, and one inside it gets whatever is there. Both channels read the
+    # same assets/ad, so this check is all that keeps them apart.
+    for c in CHANNELS:
+        got = _pick_ad(c)
+        assert (got is not None) == (c in AD_CHANNELS and any(AD_DIR.rglob("*.*"))), \
+            f"{c}: {got}"
+
+    # The banner: nothing on screen before AD_AT, fully there once the fade is
+    # over, and a moving source starting from its own first frame rather than
+    # three seconds into itself. Run on the real filter graph over a black
+    # frame, so it costs one short encode instead of a whole render.
+    ad = OUT_DIR / "_selftest_ad.mp4"
+    # a source that MOVES: black for its first second, then white. Overlaid at
+    # AD_AT it must show its black opening, not the white it would be showing
+    # if the stream had been running underneath all along.
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+                    "-i", f"color=black:s=400x200:r={FPS}:d=1", "-f", "lavfi",
+                    "-i", f"color=white:s=400x200:r={FPS}:d=4",
+                    "-filter_complex", "[0:v][1:v]concat=n=2:v=1[v]",
+                    "-map", "[v]", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-pix_fmt", "yuv420p", str(ad)], check=True)
+    # a 2:1 banner at full width clears the sixth the rules ask for, and stays
+    # inside the frame with its margins
+    wide = _ad_size(ad)
+    assert wide * (wide / 2) >= W * H * AD_MIN_AREA, wide
+    assert wide == W - 2 * AD_MARGIN, wide
+    assert AD_Y + wide / 2 < H / 2, "the banner reaches down into the word cards"
+    over = OUT_DIR / "_selftest_banner.mp4"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
+                    "-f", "lavfi", "-i", f"color=black:s={W}x{H}:r={FPS}:d=9",
+                    *_ad_input(ad),
+                    "-filter_complex", f"[0:v]null[base];{_ad_chain(1, 9.0, wide)}",
+                    "-map", "[v]", "-t", "9", "-c:v", "libx264",
+                    "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(over)],
+                   check=True)
+
+    def _lum(at: float) -> int:
+        """Mean brightness of one strip of the banner area, 0-255."""
+        return subprocess.run(
+            ["ffmpeg", "-v", "error", "-ss", f"{at}", "-i", str(over), "-vf",
+             f"crop={wide}:100:{(W - wide) // 2}:{AD_Y + 60},scale=1:1,format=gray",
+             "-frames:v", "1", "-f", "rawvideo", "-"],
+            capture_output=True, check=True).stdout[0]
+
+    if AD_AT:
+        assert _lum(AD_AT / 2) < 40, "the banner is on screen before it should be"
+    # its own first second, which is black - if tpad had been swapped for
+    # overlay's `enable` this would already be white and the gif would arrive
+    # mid-animation
+    assert _lum(AD_AT + AD_FADE + 0.2) < 40, "the banner did not start from frame one"
+    assert _lum(AD_AT + 1.5) > 200, "the banner never faded in"
 
     mp3 = OUT_DIR / "_selftest.mp3"
     assert mp3.exists(), "run `python voice.py` first"

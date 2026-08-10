@@ -300,6 +300,43 @@ jobs:
           done
           find assets/bg -name '*.mp4' | head -20
 
+      - name: Cache the ad banner
+        if: steps.gate.outputs.go == 'true'
+        id: ad
+        uses: actions/cache@v4
+        with:
+          path: assets/ad
+          key: ad-${{ vars.AD_VERSION || 'v1' }}
+
+      - name: Fetch the ad banner
+        if: steps.gate.outputs.go == 'true' && steps.ad.outputs.cache-hit != 'true'
+        env:
+          AD_URL: ${{ secrets.AD_URL }}
+        # Unset is not an error here, unlike BG_URL: an empty assets/ad is how
+        # render._pick_ad() is told there is no banner, and a run without one
+        # is a perfectly good run. A missing background, by contrast, is a
+        # video that cannot be made at all.
+        run: |
+          if [ -z "$AD_URL" ]; then
+            echo "AD_URL is not set - rendering without a banner"
+            exit 0
+          fi
+          mkdir -p assets/ad
+          i=0
+          for url in $AD_URL; do
+            i=$((i + 1))
+            # the query string is not part of the name: a share link ends in
+            # ?dl=1, and _ad_input() reads the extension to decide how to loop
+            path=${url%%\?*}
+            case "$path" in
+              *.zip) curl -fsSL "$url" -o /tmp/ad.zip
+                     unzip -oq /tmp/ad.zip -d "assets/ad/$i" ;;
+              # a banner is usually one file, so a bare URL is allowed too
+              *) curl -fsSL "$url" -o "assets/ad/$i.${path##*.}" ;;
+            esac
+          done
+          find assets/ad -type f | head -20
+
       - name: Install dependencies
         if: steps.gate.outputs.go == 'true'
         run: pip install -q -r requirements.txt
@@ -345,6 +382,21 @@ jobs:
           else
             echo "TikTok's turn only - this one is not going to YouTube"
           fi
+
+      # A dry run costs a story and a TTS call either way - main.py above marks
+      # it used - and until this step the video it paid for died with the
+      # runner. "Rendered but not uploaded" then proved only that ffmpeg exited
+      # zero, which is not the question anyone runs a dry run to answer.
+      # Dry runs only: on a real run the file is already on its way to a
+      # platform, and keeping a copy of every video would fill the quota.
+      - name: Keep the rendered video
+        if: steps.gate.outputs.go == 'true' && inputs.dry_run == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: dry-run-${{ matrix.channel }}-${{ github.run_id }}
+          path: out/*.mp4
+          retention-days: 3
+          if-no-files-found: warn
 
       # Same file, second platform. Never fatal: TikTok is a draft in an inbox,
       # YouTube is the published video, and losing the copy must not colour a
