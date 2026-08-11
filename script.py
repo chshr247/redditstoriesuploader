@@ -268,6 +268,12 @@ WEAK_TITLE = {
 # is the story's job, not the card's. Past this the title also stops fitting the
 # feed's ~40-character cut, which is the whole reason it got short.
 MAX_TITLE_WORDS = 10
+# A split story gets ONE title for all of its parts, so that title has to hold
+# the whole setup rather than one video's opening - "Начальница сказала, что я
+# никто, и я перестала делать её работу" is the shape, and it does not fit in
+# ten. Two words of slack and no more: the card sets at 82px between 120px
+# margins, where twelve Russian words still come out on three lines.
+MAX_TITLE_WORDS_MULTI = 12
 
 # Numbers spelled out in the title: "восемьсот долларов" where "800 долларов"
 # belongs. Full words only - a stem like "пят" would fire on "пятница".
@@ -371,15 +377,19 @@ def _kin_fault(text: str, lang: str = "") -> str:
 _TURN_WORDS = {"ru": '"а" or "но"', "en": '"and" or "but"'}
 
 
-def _title_fault(title: str, lang: str = "") -> str:
-    """Empty when the title is usable, otherwise what to tell the model."""
+def _title_fault(title: str, lang: str = "", multi: bool = False) -> str:
+    """Empty when the title is usable, otherwise what to tell the model.
+
+    `multi` is a split story, whose one title serves every part and is allowed
+    the wider ceiling - see MAX_TITLE_WORDS_MULTI.
+    """
     lang = lang or OUTPUT_LANG
+    cap = MAX_TITLE_WORDS_MULTI if multi else MAX_TITLE_WORDS
     t = plain(title).strip()
     if not t:
         return "the TITLE line is missing"
-    if len(t.split()) > MAX_TITLE_WORDS:
-        return (f"the TITLE is {len(t.split())} words, keep it under "
-                f"{MAX_TITLE_WORDS}")
+    if len(t.split()) > cap:
+        return f"the TITLE is {len(t.split())} words, keep it under {cap}"
     if WEAK_TITLE[lang].match(t):
         return ("the TITLE states a position or gives advice instead of showing "
                 "a moment - rewrite it as the single sharpest thing that "
@@ -573,6 +583,13 @@ def _parse_parts(raw: str, post: dict, parts: int,
 
     Every part is checked on its own and the complaints are labelled, so a
     rewrite request names the part that is wrong instead of the whole answer.
+
+    A split story has ONE title, written once at the top, and every part is
+    returned carrying it. That is what the viewer gets: the title is narrated
+    and lit on the card at the head of each part, so a story that renamed
+    itself halfway looked like three unrelated videos. The "Часть N" line under
+    it is the renderer's, added to the card and never to this text - it is not
+    narrated, and the prompt forbids the model from writing it at all.
     """
     chunks = [c for c in PART_SEP.split(raw) if c.strip()] if parts > 1 else [raw]
     faults = []
@@ -585,10 +602,25 @@ def _parse_parts(raw: str, post: dict, parts: int,
     # complaint rather than a silent truncation
     chunks = chunks[:parts]
 
-    gender, out = "", []
+    gender, title, out = "", "", []
     for i, chunk in enumerate(chunks, 1):
-        g, title, body = _split(chunk, gender or guess_gender(post))
-        gender = gender or g
+        if i == 1:
+            gender, title, body = _split(chunk, guess_gender(post))
+        else:
+            # Only the first chunk carries the tags now. A stray TITLE: on a
+            # later part is the model falling back to the shape this used to
+            # have; strip it, or it is narrated as the part's opening line -
+            # and complain, so the rewrite drops it. Stripped off the RAW
+            # chunk, because _clean() folds every newline into a space and
+            # after it there is no telling where that title stopped.
+            body = chunk
+            if m := re.match(r"\s*(?:NARRATOR:[^\n]*\n\s*)?TITLE:[^\n]*", body):
+                faults.append(f"part {i}: it writes its own TITLE: line - the "
+                              "title is written ONCE, above part 1, and is the "
+                              "title of every part")
+                body = body[m.end():]
+            body = _clean(body)
+
         # the model can introduce what the source did not have, so re-check
         hit = safety.blocked(title, body)
         if hit:
@@ -601,17 +633,21 @@ def _parse_parts(raw: str, post: dict, parts: int,
         # before it end on the cliffhanger itself.
         label = f"part {i}: " if parts > 1 else ""
         faults += [label + f for f in
-                   (_title_fault(title),
-                    # title and narration together: one complaint either way,
-                    # and the fix is the same wherever the word turned up
-                    _kin_fault(f"{title} {body}"),
+                   (_kin_fault(body),
                     _ending_fault(body, final=i == len(chunks)))
                    if f]
+        # The title is narrated at the head of every part, so it counts against
+        # every part's budget even though it is written once.
         total = _words(title) + _words(body)
         if not _fits(total, target):
             faults.append(f"{label}it is {total} words, rewrite to about {target} - "
                           f"{'cut it down' if total > target else 'expand it'}")
         out.append((title, body))
+
+    # Once, not per part: one title, one complaint, and a rewrite that is not
+    # told the same thing three times over.
+    faults += [f for f in (_title_fault(title, multi=parts > 1),
+                           _kin_fault(title)) if f]
     return gender or guess_gender(post), out, faults
 
 
@@ -936,13 +972,13 @@ if __name__ == "__main__":
     assert part_count({"text": "x" * (PART_CHARS + 10)}) == 2
     assert part_count({"text": "x" * 4000}) == MAX_PARTS, "MAX_CHARS must not exceed it"
 
-    # a two-part answer must come apart cleanly: one NARRATOR at the top, a
-    # title and a cliffhanger question in each half
+    # a two-part answer must come apart cleanly: ONE NARRATOR and ONE TITLE at
+    # the top, both of them holding for every part, and a cliffhanger in the
+    # half that is not the last
     RAW2 = ("NARRATOR: female\n"
             "TITLE: Свекровь [emphasis] потребовала ключи, а я сменила замки\n\n"
             "Тело первой части. И тут я услышала её шаги на лестнице.\n"
             "---\n"
-            "TITLE: Свекровь [emphasis] пришла с полицией, а ключи были другие\n\n"
             "Тело второй части. [doubtful] А вы бы её [emphasis] пустили в дом?")
     g4, p4, f4 = _parse_parts(RAW2, {"title": "", "text": ""}, 2, 6)
     assert g4 == "female" and len(p4) == 2, (g4, p4)
@@ -950,11 +986,33 @@ if __name__ == "__main__":
     # - the cues are what the engine reads - and only meta.json gets it
     # stripped. Comparing the raw title against unmarked words could never pass.
     assert plain(p4[0][0]).startswith("Свекровь потребовала"), p4[0]
-    assert plain(p4[1][0]).startswith("Свекровь пришла"), p4[1]
+    # the whole point of the shape: both parts carry the SAME title, so the card
+    # and the voice open every video of the story on one line
+    assert p4[0][0] == p4[1][0], p4
     assert p4[1][1].startswith("Тело второй"), p4[1]
     # the fixture is deliberately far off six words; nothing else may be wrong
     assert all("words" in f for f in f4), f4
     assert all(f.startswith("part ") for f in f4), "faults must name their part"
+    # a later part writing its own TITLE: is the model reverting to the old
+    # shape. The line must be stripped rather than narrated as the part's first
+    # sentence, and it must be complained about so the rewrite drops it.
+    RAW_TITLED = RAW2.replace("Тело второй части.",
+                              "TITLE: Свекровь пришла с полицией\n\nТело второй части.")
+    _, p9, f9 = _parse_parts(RAW_TITLED, {"title": "", "text": ""}, 2, 6)
+    assert p9[1][0] == p4[0][0], "the shared title must survive a stray one"
+    assert p9[1][1].startswith("Тело второй"), p9[1]
+    assert any(f.startswith("part 2") and "TITLE" in f for f in f9), f9
+    # ...and the shared title is checked ONCE, however many parts there are
+    assert sum("the TITLE is" in f for f in f9) <= 1, f9
+    # It also gets the wider ceiling, because it carries a whole story. Asserted
+    # on the length complaint alone - these fixtures trip the markup rules too,
+    # and it is the ceiling being tested.
+    over = " ".join(["слово"] * (MAX_TITLE_WORDS + 1))
+    assert f"keep it under {MAX_TITLE_WORDS}" in _title_fault(over)
+    assert "keep it under" not in _title_fault(over, multi=True)
+    assert f"keep it under {MAX_TITLE_WORDS_MULTI}" in _title_fault(
+        " ".join(["слово"] * (MAX_TITLE_WORDS_MULTI + 1)), multi=True), \
+        "the wider ceiling is still a ceiling"
     # only the last part may address the viewer, and only it must
     RAW_BAD = RAW2.replace("И тут я услышала её шаги на лестнице.",
                            "[curious] Как думаете, что было дальше?")

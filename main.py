@@ -8,6 +8,11 @@ arrangement only - YouTube is never offered a part, it always gets whole
 stories. The whole split is written in a single LLM call and parked in seen.db;
 one part is rendered per run, in the run that publishes it, because on a CI
 runner out/ does not survive to the next one.
+
+Which story is next is normally source.py's decision. A channel with a plan
+file (config.PLAN_FILE, e.g. plan_ru.md) takes that decision away from it: the
+stories go out in the order written there, one at a time, and the pool is not
+touched until the plan runs out.
 """
 import json
 import logging
@@ -54,9 +59,14 @@ def _render(title: str, body: str, gender: str, key: str, sub: str,
             log.warning("still %.1fs after slowing down - story was too short", total)
 
     # keyed on the story, not the file: that is what keeps the two channels'
-    # versions of one story off the same background clip
+    # versions of one story off the same background clip.
+    # The part number goes in for the card's "Часть N" line, and is read out of
+    # the same meta that publish.py captions from - one source, so the card and
+    # the caption can never disagree about which part this is.
     out = render.render(mp3, words, name, title=title, title_end=title_end,
-                        key=key, title_words=title_words)
+                        key=key, title_words=title_words,
+                        part=(meta or {}).get("part", 0)
+                        if (meta or {}).get("total", 0) > 1 else 0)
     # publishing runs separately and later, so the text has to survive on disk.
     # The channel goes in with it - the part marker's language and which
     # channel's queue the file belongs to are both read back from here.
@@ -181,7 +191,47 @@ def main(count: int = 1, force: bool = False) -> int:
             source.fail_part(part["post_id"], part["n"])
             failed += 1
 
-    if len(done) < count:
+    # A plan is an ORDER, so while one is running it is the only source: the
+    # pool below cannot be consulted even as a fallback, because a story taken
+    # from it publishes ahead of the next planned one and the order is gone.
+    # A run with nothing to do is the cheaper failure - the plan is finite and
+    # the pool is waiting at the end of it.
+    if len(done) < count and (left := source.plan_left()):
+        log.info("plan: %d stories still to publish", left)
+        if part:
+            # Its remaining parts come first by definition, and this run has
+            # already decided not to render one (publish.due() said no). A new
+            # story here would land between two halves of the one on air.
+            log.info("%s is mid-flight - nothing new until its parts are out",
+                     part["post_id"])
+        elif not (p := source.next_planned()):
+            log.error("plan: %d stories left but none could be read this run",
+                      left)
+        else:
+            n = p["parts"]
+            # multipart_today() is deliberately NOT consulted here. It exists to
+            # stop the pool from splitting story after story; the plan already
+            # spaces its multi-parters one to a day, and re-asking would only
+            # stall the order whenever a run drifts across midnight.
+            if n > 1 and (room := _room()) < n:
+                log.warning("plan: %s is %d parts and only %d send(s) are left "
+                            "today - starting it tomorrow rather than letting "
+                            "it straddle the night", p["id"], n, room)
+            else:
+                log.info("plan: r/%s [%d] %d part(s): %s", p["sub"], p["score"],
+                         n, p["title"][:60])
+                try:
+                    done.append(make_split(p, n) if n > 1 else make_video(p))
+                except script.Unsuitable as e:
+                    # burned, exactly as in the pool below: the plan moves on to
+                    # the next story rather than offering this one again for ever
+                    source.mark_used(p["id"], p["score"], p["sub"])
+                    log.info("skipped: %s", e)
+                    skipped += 1
+                except Exception:
+                    log.exception("failed on %s", p["id"])
+                    failed += 1
+    elif len(done) < count:
         # The day's loud story is read first, before the ordinary band is even
         # asked. It is the one video a day that has to happen, and a run that
         # spends its slot on an ordinary story does not get the slot back - the
