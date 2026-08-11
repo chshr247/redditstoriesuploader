@@ -23,11 +23,12 @@ import urllib.request
 
 import safety
 from config import (DB_PATH, DEFAULT_CHANNEL, MAX_SCORE, MIN_COMMENTS,
-                    MIN_SCORE, OUTPUT_LANG, SUBREDDITS, VIRAL_MIN_SCORE,
-                    VIRAL_PER_DAY)
+                    MIN_SCORE, OUTPUT_LANG, PLAN_FILE, SUBREDDITS,
+                    VIRAL_MIN_SCORE, VIRAL_PER_DAY)
 
 API = "https://api.pullpush.io/reddit/search/submission/"
 ARCTIC = "https://arctic-shift.photon-reddit.com/api/posts/search"
+ARCTIC_IDS = "https://arctic-shift.photon-reddit.com/api/posts/ids"
 UA = "StoryReader/0.1"
 BATCH = 100                        # pullpush per-request cap
 MIN_CHARS, MAX_CHARS = 400, 4000   # ~40 sec .. ~4 min of narration
@@ -306,6 +307,152 @@ def mark_used(post_id: str, score: int, sub: str) -> None:
                    (post_id, score, sub, time.time(), OUTPUT_LANG))
 
 
+# ------------------------------------------------------------------- the plan
+#
+# Everything above chooses the next story; this chooses nothing. A channel with
+# a plan file publishes the stories written in it, in the order they are written
+# in, and the archive is asked for one post at a time by id rather than searched
+# at all. The bands, the cursor, contested() and the viral slot all go quiet -
+# they are ways of picking, and the picking is already done.
+
+# One row of the schedule table in plan_<channel>.md:
+#   | 2 | «Ты здесь не начальник» ... | 1/3 | [`istlsy`](https://redd.it/istlsy) | ...
+# Three of its seven columns are load-bearing - the slot number, the part
+# marker, and the post id. The rest is there for the person reading the file.
+PLAN_ROW = re.compile(
+    r"^\|\s*(\d+)\s*\|[^|]*\|\s*(\d+)\s*/\s*(\d+)\s*\|\s*\[`(\w+)`\]"
+    r"|^\|\s*(\d+)\s*\|[^|]*\|\s*[-–—]\s*\|\s*\[`(\w+)`\]", re.M)
+
+
+def plan() -> list[dict]:
+    """The running order as [{id, parts}], or [] when this channel has none.
+
+    A malformed plan raises rather than publishing some readable subset of
+    itself: the file exists to fix an order, and an order with a hole in it is
+    the one thing it must not quietly become.
+    """
+    if not PLAN_FILE.exists():
+        return []
+    out, slot, run = [], 0, 0        # `run` counts the rows of the story open now
+    for m in PLAN_ROW.finditer(PLAN_FILE.read_text(encoding="utf-8")):
+        n, part, total, pid = m.group(1), m.group(2), m.group(3), m.group(4)
+        if pid is None:                       # the single-video branch
+            n, pid, part, total = m.group(5), m.group(6), "1", "1"
+        slot, part, total = slot + 1, int(part), int(total)
+        if int(n) != slot:
+            raise ValueError(f"{PLAN_FILE.name}: row {slot} is numbered {n} - "
+                             "the slots must run 1..N with no holes or repeats")
+        if part == 1:
+            if run and run != out[-1]["parts"]:
+                raise ValueError(f"{PLAN_FILE.name}: {out[-1]['id']} promises "
+                                 f"{out[-1]['parts']} parts but has {run} rows")
+            if any(e["id"] == pid for e in out):
+                raise ValueError(f"{PLAN_FILE.name}: {pid} appears twice - a "
+                                 "story is told once, and its parts run together")
+            out.append({"id": pid, "parts": total})
+            run = 1
+            continue
+        # a later part continues the story directly above it, and nothing else
+        if not out or out[-1]["id"] != pid or out[-1]["parts"] != total \
+                or part != run + 1:
+            raise ValueError(f"{PLAN_FILE.name}: row {slot} is {pid} part "
+                             f"{part}/{total}, which does not follow the row "
+                             "above it")
+        run = part
+    if run and run != out[-1]["parts"]:
+        raise ValueError(f"{PLAN_FILE.name}: {out[-1]['id']} promises "
+                         f"{out[-1]['parts']} parts but has {run} rows")
+    return out
+
+
+def plan_left() -> int:
+    """How many of the plan's stories this channel has not published yet."""
+    entries = plan()
+    if not entries:
+        return 0
+    with _db() as db:
+        seen = {r[0] for r in db.execute("SELECT id FROM seen WHERE lang=?",
+                                         (OUTPUT_LANG,))}
+    return sum(1 for e in entries if e["id"] not in seen)
+
+
+def _by_id(post_id: str) -> dict | None:
+    """One post from the archive by id. None when the archive has no such post.
+
+    Raises the DOWN family when neither backend answers, and that difference
+    matters: a post that is gone is skipped and the plan moves on, while an
+    archive that is down must leave the plan exactly where it was.
+    """
+    try:
+        data = _api(ARCTIC_IDS, ids=post_id)
+    except DOWN as e:
+        log.warning("%s: arctic shift unavailable (%s), trying pullpush",
+                    post_id, e)
+        data = _api(API, ids=post_id)
+    return data[0] if data else None
+
+
+# What the plan path checks instead of _usable(). A planned story was chosen by
+# hand, so the discovery heuristics have already been overruled: MIN_COMMENTS
+# and CONTESTED are ways of guessing whether a story is worth telling, and
+# `locked` and `stickied` describe the state of the THREAD - a comment lock says
+# nothing about the story under it, and three of plan_ru.md's stories are locked.
+# What is left is what makes a video impossible rather than unpromising.
+def _tellable(p: dict) -> bool:
+    text = p.get("selftext") or ""
+    return (not p.get("over_18")
+            and text not in ("[removed]", "[deleted]")
+            and MIN_CHARS <= len(text) <= MAX_CHARS)
+
+
+def next_planned() -> dict | None:
+    """The next story the plan calls for, ready for script.write_script().
+
+    Carries `parts` - how many videos the plan says this story is - so the
+    split is the one that was planned rather than one recomputed from the
+    length. None means the plan has nothing to give this run: either it is
+    finished, or the archive is not answering, and those are told apart by
+    plan_left() rather than here.
+
+    A post that has since been deleted, or that trips the blocklist, is burned
+    on the spot and the plan moves to the next one - it can never be published,
+    and left in place it would hold the whole order behind it for ever.
+    """
+    entries = plan()
+    if not entries:
+        return None
+    with _db() as db:
+        seen = {r[0] for r in db.execute("SELECT id FROM seen WHERE lang=?",
+                                         (OUTPUT_LANG,))}
+
+    for e in entries:
+        if e["id"] in seen:
+            continue
+        try:
+            p = _by_id(e["id"])
+        except DOWN as err:
+            log.error("plan: no archive available for %s (%s) - the order "
+                      "waits rather than skipping it", e["id"], err)
+            return None
+        if p is None or not _tellable(p):
+            log.error("plan: %s is gone or can no longer be told, dropping it",
+                      e["id"])
+            mark_used(e["id"], p.get("score", 0) if p else 0,
+                      p.get("subreddit", "?") if p else "?")
+            continue
+        title, text = _clean(p["title"]), _clean(p["selftext"])
+        hit = safety.blocked(title, text)
+        if hit:
+            log.error("plan: %s trips the blocklist (%s), dropping it",
+                      e["id"], hit)
+            mark_used(e["id"], p["score"], p["subreddit"])
+            continue
+        return {"id": p["id"], "sub": p["subreddit"], "score": p["score"],
+                "title": title, "text": text, "parts": e["parts"],
+                "rank": contested(title, p.get("num_comments", 0), p["score"])}
+    return None
+
+
 # ---------------------------------------------------------------- split stories
 
 def queue_parts(post: dict, parts: list[tuple[str, str]], gender: str,
@@ -474,6 +621,70 @@ if __name__ == "__main__":
         with _db() as db:
             db.execute("DELETE FROM seen WHERE id LIKE '_selftest%'")
         assert viral_due()
+
+    # The plan reader. It decides publication ORDER, so a plan it reads wrong
+    # is a plan that is not being followed - and nothing downstream would say
+    # so. Every shape it must accept and every one it must refuse is here.
+    import tempfile
+    from pathlib import Path
+    _real_plan_file = PLAN_FILE
+    _tmp = Path(tempfile.gettempdir()) / "_selftest_plan.md"
+    HEAD = "| № | Заголовок | Части | Пост | Саб | Score | Знаков |\n|--:|---|:--:|---|---|--:|--:|\n"
+
+    def _plan(rows: str):
+        _tmp.write_text(HEAD + rows, encoding="utf-8")
+        globals()["PLAN_FILE"] = _tmp
+        return plan()
+
+    def _refuses(rows: str, why: str):
+        try:
+            _plan(rows)
+        except ValueError:
+            return
+        raise AssertionError(why)
+
+    ok = _plan(
+        "| 1 | Один ролик | — | [`aaa`](https://redd.it/aaa) | r/tifu | 5000 | 900 |\n"
+        "| 2 | Первая часть | 1/2 | [`bbb`](https://redd.it/bbb) | r/tifu | 6000 | 2500 |\n"
+        "| 3 | Вторая часть | 2/2 | [`bbb`](https://redd.it/bbb) | r/tifu | 6000 | 2500 |\n"
+        "| 4 | Ещё один | — | [`ccc`](https://redd.it/ccc) | r/tifu | 4000 | 800 |\n")
+    assert ok == [{"id": "aaa", "parts": 1}, {"id": "bbb", "parts": 2},
+                  {"id": "ccc", "parts": 1}], ok
+    # a hole in the numbering is a row that was deleted by hand, and the rows
+    # after it are then in an order nobody chose
+    _refuses("| 1 | a | — | [`aaa`](https://redd.it/aaa) |\n"
+             "| 3 | b | — | [`bbb`](https://redd.it/bbb) |\n", "a gap must fail")
+    # a story whose parts do not run together would publish its middle later
+    _refuses("| 1 | a | 1/2 | [`bbb`](https://redd.it/bbb) |\n"
+             "| 2 | b | — | [`aaa`](https://redd.it/aaa) |\n"
+             "| 3 | c | 2/2 | [`bbb`](https://redd.it/bbb) |\n",
+             "split parts must fail")
+    # ...and one that promises three and lists two would lose its ending
+    _refuses("| 1 | a | 1/3 | [`bbb`](https://redd.it/bbb) |\n"
+             "| 2 | b | 2/3 | [`bbb`](https://redd.it/bbb) |\n",
+             "a short story must fail")
+    _refuses("| 1 | a | — | [`aaa`](https://redd.it/aaa) |\n"
+             "| 2 | b | — | [`aaa`](https://redd.it/aaa) |\n",
+             "a repeated post must fail")
+    # A planned story is exempt from the discovery filters but not from what
+    # would make it unrenderable. A comment lock is the first kind; an empty
+    # body is the second, and three of plan_ru.md's stories are locked.
+    _base = {"selftext": "x" * 500, "over_18": False, "num_comments": 500,
+             "title": "A story"}
+    assert _tellable({**_base, "locked": True}) and not _usable({**_base, "locked": True})
+    assert _tellable({**_base, "num_comments": 2}), "the plan already chose it"
+    assert not _tellable({**_base, "selftext": "[removed]"})
+    assert not _tellable({**_base, "over_18": True})
+    assert not _tellable({**_base, "selftext": "x" * (MAX_CHARS + 1)})
+
+    # no file at all is not an error - it is a channel without a plan
+    globals()["PLAN_FILE"] = _tmp.with_name("_no_such_plan.md")
+    assert plan() == [] and plan_left() == 0
+    _tmp.unlink()
+    globals()["PLAN_FILE"] = _real_plan_file
+    if plan():
+        print(f"plan: {len(plan())} stories, {sum(e['parts'] for e in plan())} "
+              f"videos, {plan_left()} still to publish")
 
     # A story spent on one channel must stay available on the other - that is
     # the whole point of keying `seen` by (id, lang), and the failure mode is

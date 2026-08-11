@@ -141,7 +141,13 @@ MIN_SCORE = int(os.getenv("MIN_SCORE", 3000))
 # Ceiling, not a typo. Above this a post went viral for Reddit-internal reasons
 # - memes, meta drama, war, death - not because the story is good. The band
 # between MIN and MAX is where ordinary relatable stories live.
-MAX_SCORE = int(os.getenv("MAX_SCORE", 30000))
+#
+# It sits exactly on VIRAL_MIN_SCORE and not below it, which matters: fetch()
+# takes [MIN_SCORE, MAX_SCORE) and fetch_viral() takes [VIRAL_MIN_SCORE, inf),
+# so any gap between the two is a band of posts NEITHER call can reach. At
+# 30000 that lost everything from 30000 to 39999 - six of the stories in
+# plan_ru.md alone. Raise VIRAL_MIN_SCORE and this has to follow it up.
+MAX_SCORE = int(os.getenv("MAX_SCORE", 40000))
 # ...with one deliberate exception a day. The ordinary band is chosen for being
 # relatable, which is not the same as being watched: a day of nothing but
 # ordinary stories has no peak in it. So the first video of each day is taken
@@ -152,6 +158,24 @@ VIRAL_MIN_SCORE = int(os.getenv("VIRAL_MIN_SCORE", 40000))
 # than one and the exception stops being one.
 VIRAL_PER_DAY = int(os.getenv("VIRAL_PER_DAY", 1))
 MIN_COMMENTS = int(os.getenv("MIN_COMMENTS", 100))
+
+# A hand-written running order, and when there is one it REPLACES the sourcing
+# above: source.py stops choosing and main.py works down the list. That is the
+# whole point of it - a plan whose stories can be overtaken by whatever the
+# archive happened to return is not an order, it is a suggestion.
+#
+# Per channel by name rather than by value, so the English channel does not
+# inherit the Russian one's plan through the default: chan_env() hands the SAME
+# default to every channel, and a plan is the last thing that may be shared.
+# A file that is not there means no plan and the pool as before, which is also
+# what an exhausted channel falls back to.
+PLAN_FILE = ROOT / chan_env("PLAN_FILE", f"plan_{CHANNEL}.md")
+
+# The word in front of a part number, in the channel's own language. Two places
+# need it now and they are not the same surface: render.py writes it on the
+# title card, publish.py writes it into the caption. One dict, so a third
+# language cannot arrive in one of them and not the other.
+PART_WORD = {"ru": "Часть", "en": "Part"}
 TARGET_SEC = int(os.getenv("TARGET_SEC", 75))
 # hard floor: under this a video loses monetization eligibility, so main.py
 # re-synthesizes at a slower rate rather than shipping a 58-second clip

@@ -46,7 +46,7 @@ from pathlib import Path
 import source
 import tags as tags_          # `tags` is the local variable in caption()
 from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL, OUT_DIR,
-                    PART_GAP_HOURS, TIKTOK_CLIENT_KEY,
+                    PART_GAP_HOURS, PART_WORD, TIKTOK_CLIENT_KEY,
                     TIKTOK_CLIENT_SECRET, TIKTOK_ENABLED, TIKTOK_MIN_GAP_HOURS,
                     TIKTOK_PER_DAY, TIKTOK_PUBLIC, TIKTOK_REFRESH_KEY,
                     TIKTOK_REFRESH_TOKEN, chan_key, save_env)
@@ -219,12 +219,10 @@ def authorize() -> None:
     print(f"scopes granted: {r.get('scope')}")
 
 
-# The word in front of "2/3" on a split story, in the channel's own language.
-# The file's channel decides it, not the process: a file rendered by the other
-# channel has to be captioned as what it was made as.
-PART_WORD = {"ru": "Часть", "en": "Part"}
-
-
+# The word in front of "2/3" on a split story comes from config, shared with the
+# title card render.py draws. The file's channel decides which one, not the
+# process: a file rendered by the other channel has to be captioned as what it
+# was made as.
 def part_prefix(meta: dict) -> str:
     """"Часть 2/3 - " for a split story, empty for an ordinary one.
 

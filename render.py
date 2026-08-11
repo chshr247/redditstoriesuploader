@@ -15,7 +15,8 @@ from pathlib import Path
 
 import safety
 import script
-from config import AD_DIR, BG_DIR, CHANNEL, CHANNELS, OUT_DIR, SUBTITLE_FONT
+from config import (AD_DIR, BG_DIR, CHANNEL, CHANNELS, OUT_DIR, PART_WORD,
+                    SUBTITLE_FONT)
 from voice import duration as _dur
 
 W, H = 1080, 1920
@@ -60,6 +61,12 @@ CARD_ACCENT = "&H001A1ACC"
 # Both quote shapes, because the channels use different ones - «» and “”.
 ACCENT = re.compile(r"\d+|«[^»]*»|“[^”]*”")
 CARD_POP_MS = 70           # how fast the card's highlight moves onto a word
+# "Часть 2", set under the title inside the same box. Small and grey: it is a
+# label, not part of the hook, and it must not compete with the line above it
+# for the second the card has. It is drawn here and nowhere else in the video -
+# the narration never contains it, so it is never spoken.
+CARD_PART_SIZE = 48
+CARD_PART = "&H00787878"
 
 # ASS stores colour as &HAABBGGRR - byte order reversed from RGB. Narrator stays
 # white; each speaker takes the next colour the first time they say anything.
@@ -212,14 +219,38 @@ def _group(words: list[dict], min_chars: int = 3, max_words: int = 2,
     return out
 
 
+def _part_line(part: int, channel: str = CHANNEL) -> str:
+    """"\\NЧасть 2", small and grey, or "" for an ordinary video.
+
+    A second line inside the title card's own box rather than a card of its
+    own: the title sets on one, two or three lines depending on its length, so
+    anything positioned under it by hand would sit on top of it half the time.
+    \\N keeps it attached to whatever the title turned out to be.
+
+    Everything after \\N is re-styled, and nothing resets at the end, which is
+    fine - it IS the end of the line.
+    """
+    if part < 1:
+        return ""
+    word = PART_WORD.get(channel, PART_WORD["en"])
+    return rf"\N{{\fs{CARD_PART_SIZE}\c{CARD_PART}&}}{word} {part}"
+
+
 def build_ass(words: list[dict], path, title: str = "", title_end: float = 0,
-              title_words: list[dict] | None = None) -> None:
-    """Title card for the intro, then one word card at a time."""
+              title_words: list[dict] | None = None, part: int = 0) -> None:
+    """Title card for the intro, then one word card at a time.
+
+    `part` writes "Часть N" under the title, on the card and only on the card.
+    It is not in `title`, so the voice never reads it - which is the point: the
+    marker tells a scrolling viewer this is the middle of something, and three
+    syllables of it in front of the hook is dead air.
+    """
     lines = [ASS_HEADER]
     if title and title_end > 0:
         # the scale-up belongs to the card appearing, so it rides the first
         # event only - later ones are already at full size
         pop = r"{\fscx85\fscy85\t(0,180,\fscx100\fscy100)}"
+        marker = _part_line(part)
         cards = _sung(title_words, title_end) if title_words else []
         if not cards:
             # No timings for the title - an older render, or an aligner that
@@ -231,7 +262,7 @@ def build_ass(words: list[dict], path, title: str = "", title_end: float = 0,
                       _accent(safety.mask(script.plain(re.sub(r"[{}\\]", "", title)))))]
         for i, (start, end, text) in enumerate(cards):
             lines.append(f"Dialogue: 0,{_ts(start)},{_ts(end)},Card,,0,0,0,,"
-                         + (pop if i == 0 else "") + text)
+                         + (pop if i == 0 else "") + text + marker)
     styles = _styles(words)
     words = _group(words)
     for i, w in enumerate(words):
@@ -543,19 +574,22 @@ def _ad_chain(idx: int, dur: float, wide: int) -> str:
 
 def render(mp3, words: list[dict], name: str, bg=None,
            title: str = "", title_end: float = 0, key: str = "",
-           title_words: list[dict] | None = None, ad=None):
+           title_words: list[dict] | None = None, ad=None, part: int = 0):
     """Burn subtitles over a background clip and mux the narration.
 
     `key` identifies the STORY rather than the file: out/<id>_en.mp4 and
     out/<id>.mp4 are the same story on two channels, and that is exactly the
     pair that must not share footage.
+
+    `part` is which video of a split story this is, 0 for an ordinary one. It
+    reaches the title card and nothing else.
     """
     bg = bg or _pick_bg(key)
     ad = ad or _pick_ad()
     dur = _dur(mp3)
     ass = OUT_DIR / f"{name}.ass"
     out = OUT_DIR / f"{name}.mp4"
-    build_ass(words, ass, title, title_end, title_words)
+    build_ass(words, ass, title, title_end, title_words, part)
 
     scores = _motion(bg)
     bg_dur = _dur(bg)
@@ -743,6 +777,31 @@ if __name__ == "__main__":
     # mid-animation
     assert _lum(AD_AT + AD_FADE + 0.2) < 40, "the banner did not start from frame one"
     assert _lum(AD_AT + 1.5) > 200, "the banner never faded in"
+
+    # "Часть N" is the renderer's alone: it is on the card and it is in no
+    # narrated text anywhere, which is the only reason it can be shown without
+    # being read out. Ahead of the mp3 gate below on purpose - this needs no
+    # audio and it is the assertion that catches the marker leaking into the
+    # voice track, so it must run even when out/ is empty.
+    _tw = [{"word": "Соседка", "start": 0.0, "end": 0.4},
+           {"word": "прислала", "start": 0.4, "end": 0.9}]
+    _ass = OUT_DIR / "_check_part.ass"
+    build_ass([], _ass, "Соседка прислала счёт", 1.2, _tw, part=2)
+    _txt = _ass.read_text("utf-8")
+    assert _txt.count(f"\\N{{\\fs{CARD_PART_SIZE}") == len(_tw), _txt
+    assert f"{PART_WORD['ru']} 2" in _txt, _txt
+    # ...on every event of the card, so it does not blink with the lit word
+    for _line in _txt.splitlines():
+        if _line.startswith("Dialogue") and ",Card," in _line:
+            assert _line.endswith(f"{PART_WORD['ru']} 2"), _line
+    # and an ordinary video carries no marker at all
+    build_ass([], _ass, "Соседка прислала счёт", 1.2, _tw)
+    assert "\\N{\\fs" not in _ass.read_text("utf-8")
+    # the fallback card - no timings from the aligner - must carry it too, or a
+    # part rendered without word timings would silently lose its marker
+    build_ass([], _ass, "Соседка прислала счёт", 1.2, None, part=3)
+    assert f"{PART_WORD['ru']} 3" in _ass.read_text("utf-8")
+    _ass.unlink()
 
     mp3 = OUT_DIR / "_selftest.mp3"
     assert mp3.exists(), "run `python voice.py` first"
