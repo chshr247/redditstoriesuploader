@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import random
+import re
 import secrets
 import sqlite3
 import sys
@@ -43,6 +44,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+import facts as facts_        # `facts` is the local variable in caption()
 import source
 import tags as tags_          # `tags` is the local variable in caption()
 from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL, OUT_DIR,
@@ -238,11 +240,26 @@ def part_prefix(meta: dict) -> str:
     return f"{word} {meta['part']}/{meta['total']} - "
 
 
-def caption(title: str, hashtags=None, body: str = "") -> str:
-    """Title plus tags matched to the video, trimmed to TikTok's limit.
+# The part marker as caption() finds it: already glued to the front of the
+# title by the caller, because that is where part_prefix() puts it. It has to
+# come back off to lead the caption on its own line - see the note there.
+_PART = re.compile(r"^(?:%s)\s+\d+/\d+\s+-\s+"
+                   % "|".join(sorted(map(re.escape, set(PART_WORD.values())))))
 
-    Deliberately shorter than the YouTube description: TikTok shows two lines
-    before the fold, so anything past the hook is scrolled past anyway.
+
+def caption(title: str, hashtags=None, body: str = "") -> str:
+    """Facts block, title and tags matched to the video, inside TikTok's limit.
+
+    Two lines show before the fold, and they are spent on the facts block from
+    facts.py rather than on the title. That is deliberate and it is the whole
+    point of the block: the title is already burned onto the title card the
+    viewer is looking at, so repeating it here buys nothing, while a line that
+    promises three facts buys the seconds someone spends reading them - seconds
+    the video is still playing. The title stays underneath, where it is worth
+    keeping for the words in it.
+
+    The part marker is the exception and still leads: someone who landed on
+    part 2 has to learn that from the feed, not by tapping "ещё".
 
     Tags come from tags.py rather than from a shuffled flat pool - see the note
     in youtube.description_for(). `body` is what lets them match on more than
@@ -251,10 +268,32 @@ def caption(title: str, hashtags=None, body: str = "") -> str:
     pool = (tags_.pick(title, body) if hashtags is None
             else random.sample(list(hashtags), min(5, len(hashtags))))
     tags = " ".join(pool[:5])
-    text = f"{title.strip()}\n\n{tags}"
-    if len(text) > TITLE_MAX:
-        text = title.strip()[:TITLE_MAX - len(tags) - 6].rstrip() + "...\n\n" + tags
-    return text
+    title = title.strip()
+    marker = _PART.match(title)
+    mark = ""
+    if marker:
+        # Moved, not copied: left on the title as well it reads twice in one
+        # caption, and the second one is the copy nobody meant to send.
+        mark = marker.group(0).strip(" -")
+        title = title[marker.end():]
+
+    # The block is the first thing dropped if the text will not fit. It is 400
+    # characters of someone else's trivia; the title and the tags are what the
+    # video is about, and TITLE_MAX is 2200, so this branch is a guard rather
+    # than something that happens.
+    room = TITLE_MAX - len(tags) - 3
+    block = facts_.block(lead=f"{mark}. " if mark else "")
+    if block and len(block) + len(title) + 2 <= room:
+        # Tags on the line straight under the title, not a paragraph below it:
+        # they are part of the same line of text as far as a reader is
+        # concerned, and a blank line there reads as a fourth section.
+        return f"{block}\n\n{title}\n{tags}"
+
+    lead = f"{mark}\n\n" if mark else ""
+    room -= len(lead)
+    if len(title) > room:
+        title = title[:room - 3].rstrip() + "..."
+    return f"{lead}{title}\n{tags}"
 
 
 def _plan(size: int) -> list[tuple[int, int]]:
@@ -679,6 +718,13 @@ if __name__ == "__main__":
     assert len(p) == 5 and p[0] == (0, 9_999_999) and p[-1] == (40_000_000, 54_099_999)
     assert sum(e - s + 1 for s, e in p) == 54_100_000, "chunks must cover the file"
     assert all(a[1] + 1 == b[0] for a, b in zip(p, p[1:])), "gap between chunks"
+    # These run before every CLI command, including in CI, so the facts block
+    # is stubbed rather than fetched: caption() would otherwise make a dozen
+    # calls to a third-party API and one to the model per invocation, and a
+    # self-test that needs the network is a self-test that fails for weather.
+    # facts.py tests the real thing against its own stubs.
+    _real_block = facts_.block
+    facts_.block = lambda lang="", lead="": ""
     assert caption("Короткий").splitlines()[0] == "Короткий"
     assert len(caption("x" * 3000)) <= TITLE_MAX
 
@@ -692,14 +738,36 @@ if __name__ == "__main__":
     # a file from before channels existed is the default channel's
     assert part_prefix({"part": 2, "total": 3}) == "Часть 2/3 - "
     _long = caption(_pfx + "я" * 3000)
-    assert len(_long) <= TITLE_MAX and _long.startswith(_pfx), _long[:80]
+    assert len(_long) <= TITLE_MAX, len(_long)
+    # the marker leads on its own line now, so it is the first line and not a
+    # prefix of one - what must not happen is a long title swallowing it
+    assert _long.splitlines()[0] == _pfx.strip(" -"), _long[:80]
     assert len({caption("Один и тот же") for _ in range(30)}) > 5, "tags must rotate"
+
+    # With a block: the marker rides on the hook's line, the title sits under
+    # the block and the tags on the line straight below it. That order and
+    # those blank lines are the whole layout.
+    facts_.block = lambda lang="", lead="": f"{lead}ХУК\n\n1 факт\n2 факт\n3 факт\n\nКОММЕНТ"
+    _with = caption(_pfx + "Заголовок")
+    assert _with.splitlines()[0] == "Часть 2/3. ХУК", _with
+    assert _with.index("ХУК") < _with.index("Заголовок") < _with.index("#"), _with
+    assert _with.count("Часть 2/3") == 1, "the marker is moved, not copied"
+    assert _with.endswith("\nЗаголовок\n" + _with.splitlines()[-1]), _with
+    assert caption("Заголовок").startswith("ХУК"), "no marker, the hook leads"
+    # ...and without a block the marker still has to lead, on its own line
+    facts_.block = lambda lang="", lead="": ""
+    assert caption(_pfx + "Заголовок").splitlines()[0] == "Часть 2/3"
+    facts_.block = lambda lang="", lead="": f"{lead}ХУК\n\n1 факт\n2 факт\n3 факт\n\nКОММЕНТ"
+    # ...and a title long enough to crowd it out drops the block, not the title
+    _tight = caption("я" * (TITLE_MAX - 20))
+    assert len(_tight) <= TITLE_MAX and "ХУК" not in _tight, len(_tight)
     # The body is matched too, not just the title - it is where most of the
     # topic words are, and passing it is the whole reason caption() takes it.
     # Fixtures in this channel's language: caption() reads its own buckets.
     _TOPIC = {"ru": "Свекровь въехала в квартиру.",
               "en": "My mother-in-law moved into the apartment."}[CHANNEL]
     assert set(caption("Заголовок", body=_TOPIC).split()) & tags_.TOPIC_TAGS[CHANNEL]
+    facts_.block = _real_block
 
     # A spent allowance stops an ordinary video and never a part: the inbox
     # must not end up holding the middle of a story with no beginning.
