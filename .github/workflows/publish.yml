@@ -138,6 +138,11 @@ jobs:
       # twelve posts above this, so anything that treated it as a supply was
       # promising daily what the subs produce monthly.
       LOUD_AT: ${{ vars.LOUD_AT || '25000' }}
+      # The primary source, and the only one that reads live numbers. A secret
+      # rather than a variable: it is a billable key. Unset it and source.py
+      # falls through to the two free archives on its own, so a run with no key
+      # still makes videos - just from worse numbers.
+      REDDITAPIS_KEY: ${{ secrets.REDDITAPIS_KEY }}
       TTS_BACKEND: fish
       SUBTITLE_FONT: Arial Black
       # Deliberately below the code default of 5. With the grid this is the only
