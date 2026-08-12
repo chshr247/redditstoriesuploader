@@ -23,9 +23,10 @@ import edge_tts
 from num2words import num2words
 
 import script
-from config import (FISH_API_KEY, FISH_CTA_CUE, FISH_MODEL, FISH_SPEED,
-                    FISH_TITLE_CUE, FISH_VOICES_FEMALE, FISH_VOICES_MALE,
-                    OUT_DIR, OUTPUT_LANG, TTS_BACKEND, TTS_VOICE, WHISPER_SIZE)
+from config import (FISH_API_KEY, FISH_BODY_CUE, FISH_CTA_CUE, FISH_MODEL,
+                    FISH_SPEED, FISH_TITLE_CUE, FISH_VOICES_FEMALE,
+                    FISH_VOICES_MALE, OUT_DIR, OUTPUT_LANG, TTS_BACKEND,
+                    TTS_VOICE, WHISPER_SIZE)
 
 TICKS_PER_SEC = 10_000_000
 FISH_URL = "https://api.fish.audio/v1/tts"
@@ -299,7 +300,7 @@ CUE_MAX = script.CUE_MAX                      # the ceiling on script.TAG
 LEAD_CUE = re.compile(rf"^\[([^\]\n]{{1,{CUE_MAX}}})\]\s*")
 
 
-def _cued(text: str, cue: str) -> str:
+def _cued(text: str, cue: str, sep: str = ", ") -> str:
     """Apply a delivery cue, and make sure the line lands on a full stop.
 
     Text with no terminal punctuation gets read as if the sentence carries on,
@@ -318,6 +319,13 @@ def _cued(text: str, cue: str) -> str:
 
     The test is for a cue at the FRONT rather than a bracket anywhere, so a
     stray cue mid-line cannot suppress the merge.
+
+    `sep` is how the two halves are joined. The comma default is the shape the
+    listening test picked, and it is safe for the title and the question because
+    neither carries dialogue. The story does: script.speakers() reads whatever
+    precedes the first comma of a bracket as the name of the speaker of the next
+    quoted line, so a comma joined onto a bare [emphasis] would invent a speaker
+    of that name and shift every real one's colour. The story passes " ".
     """
     text = text.rstrip()
     if text[-1:] not in script.TERMINAL:
@@ -341,7 +349,7 @@ def _cued(text: str, cue: str) -> str:
     # so they have to become a single bracket. If the join outgrows the ceiling
     # it stops being strippable and would be narrated as visible text, which is
     # worse than losing the constraint - then the model's cue stands alone.
-    merged = f"[{lead.group(1)}, {cue.strip()[1:-1]}]"
+    merged = f"[{lead.group(1)}{sep}{cue.strip()[1:-1]}]"
     if len(merged) - 2 > CUE_MAX:
         log.warning("merged cue %r exceeds %d chars, keeping the model's",
                     merged[:50], CUE_MAX)
@@ -387,8 +395,8 @@ def speak_parts(title: str, body: str, name: str, gap: float = 0.0,
     # were always computed here and thrown away
     t_mp3, t_words = speak(_cued(title, FISH_TITLE_CUE), f"{name}_title",
                            rate=rate, speed=speed, fish_voice=fish_voice)
-    b_mp3, b_words = speak(story, f"{name}_body", rate=rate, speed=speed,
-                           fish_voice=fish_voice)
+    b_mp3, b_words = speak(_cued(story, FISH_BODY_CUE, " "), f"{name}_body",
+                           rate=rate, speed=speed, fish_voice=fish_voice)
     parts, words = [t_mp3, b_mp3], list(b_words)
 
     if cta:
@@ -460,7 +468,7 @@ if __name__ == "__main__":
     # A cue must vanish completely on the way to the screen. Both defaults once
     # grew past TAG's 60-char ceiling and were narrated as visible text, so the
     # configured values - not just the shipped ones - get checked here.
-    for cue in (FISH_TITLE_CUE, FISH_CTA_CUE):
+    for cue in (FISH_TITLE_CUE, FISH_CTA_CUE, FISH_BODY_CUE):
         assert not script.plain(cue), f"cue too long to be stripped: {cue!r}"
     assert _cued("Заголовок", "[short]").endswith("Заголовок."), "must land on a stop"
     assert _cued("Вопрос?", "[short]").endswith("Вопрос?"), "a question keeps its mark"
@@ -477,8 +485,32 @@ if __name__ == "__main__":
     assert _cued("А как бы [oops] вы поступили?", "[calm]").startswith("[calm] ")
     # a merge that would outgrow the ceiling leaves the model's cue alone,
     # because an unstrippable cue gets narrated instead of steering the voice
-    huge = "[" + "x" * 55 + "]"
+    # sized against CUE_MAX rather than written out, or the fixture goes stale
+    # the next time the ceiling moves - at 55 chars and CUE_MAX 80 this stopped
+    # overflowing and quietly tested nothing
+    huge = "[" + "x" * (CUE_MAX - len(", calm, flat") + 1) + "]"
     assert _cued(f"{huge} Реплика.", "[calm, flat]").startswith(huge)
+
+    # The story's cue rides in on the SAME bracket as the model's lead, and that
+    # bracket is read twice: by fish as delivery, by script.speakers() as who
+    # says the next quoted line. speakers() takes the text before the first
+    # comma, so a comma-joined merge onto a bare [emphasis] hands the next quote
+    # to a speaker called "emphasis" and shifts every real speaker's colour
+    # after it. The space join is what keeps the two readings apart.
+    assert "," not in FISH_BODY_CUE, "a comma in the story cue invents a speaker"
+    lead = _cued("[emphasis] Она вернула сорок тысяч. [aunt, proud] «Мои»",
+                 FISH_BODY_CUE, " ")
+    assert lead.count("[") == 2, f"the merge must not add a bracket: {lead}"
+    assert not script.plain(FISH_BODY_CUE), "the story cue must strip clean"
+    assert script.speakers(lead)[-1] == "aunt", script.speakers(lead)
+    assert "emphasis" not in script.speakers(lead), script.speakers(lead)
+    # a story that opens on a real speaker cue keeps that speaker
+    named = _cued("[aunt, proud] «Мои деньги»", FISH_BODY_CUE, " ")
+    assert script.speakers(named)[-1] == "aunt", script.speakers(named)
+    # and one that opens on plain narration gets the cue as its own bracket
+    assert _cued("Она вернула всё.", FISH_BODY_CUE, " ").startswith(FISH_BODY_CUE)
+    # the comma join is still what the title and the question get
+    assert _cued("[doubtful] Вопрос?", "[calm, flat]").startswith("[doubtful, calm, flat]")
 
     # full-length narration on purpose: pace on a two-sentence clip is not
     # representative, and this number is what WPM in script.py must match
