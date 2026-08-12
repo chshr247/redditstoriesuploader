@@ -159,6 +159,16 @@ SUBREDDITS = [s.strip() for s in
 # measured on a settled window of r/AmItheAsshole, the post with 897 comments
 # against 1054 upvotes - the most argued-over story in it - sat below the floor.
 MIN_SCORE = int(os.getenv("MIN_SCORE", 1000))
+# redditapis.com - a pay-per-call proxy over the live reddit API, and the
+# primary source. It is the only one of the three that can ask for a sub's top
+# posts at all: pullpush sorts by score but has been 502 for days, and arctic
+# shift cannot sort by score in any way, so it draws a random window of days
+# and hopes. Worse, the archives store the score as it was when they crawled
+# the post - 16 of 20 sampled windows came back with medians of 1-20 upvotes
+# against 10-33 comments, i.e. snapshots taken minutes after posting. This
+# returns today's numbers: ixjjl6 reads 54093 here against 53775 in the
+# archive. Unset, and everything falls through to the archives as before.
+REDDITAPIS_KEY = os.getenv("REDDITAPIS_KEY", "")
 # Where "loud" starts, and nothing more than that: the score at which
 # source.contested() hands out its full loudness point. There used to be a
 # ceiling here as well, with a second fetch path and a daily slot behind it, on

@@ -1,5 +1,15 @@
-"""Step 1: story sourcing. Backends are the pullpush.io and arctic shift
-archives: no keys, no approval.
+"""Step 1: story sourcing. Three backends, tried in this order:
+
+    redditapis.com   a paid proxy over the LIVE reddit API. The only one that
+                     can ask a sub for its top posts, and the only one whose
+                     numbers are today's rather than a crawl's snapshot.
+    pullpush.io      an archive with a score index. Free, and 502 for days.
+    arctic shift     an archive with no score index at all. Free, and the last
+                     resort: it can only read a window of days and filter here.
+
+The two archives are the emergency route. Both store the score as it stood when
+they crawled the post, which for most windows is minutes after it was posted -
+see config.REDDITAPIS_KEY for the measurement.
 
 Harvesting and choosing are two different acts here, and the `pool` table is
 what separates them. A run picks the best story out of everything harvested so
@@ -7,16 +17,10 @@ far; only a run that finds the choice too thin pays to widen it, and then it
 pays in bulk. Before that split, one run meant one archive read per sub, and the
 run was therefore only ever as good as the window it happened to draw.
 
-We walk each subreddit top-down by score, and the lowest score already harvested
-is the cursor, so every refill picks up below the last one instead of re-reading
-the same top posts. That only works on pullpush, which has a score index.
-
-pullpush goes down for hours at a time (502s across every sub, and it has been
-down more often than up lately), so arctic shift stands behind it - same
-archive, same post shape, no key either. It cannot sort or filter by score, only
-by time, so it reads a random window of days and the band is filtered here
-instead. The pool matters most exactly then: a random window almost never holds
-a loud post, but a few hundred windows do.
+Which posts a refill asks for depends on who answers. The live proxy is asked
+for a sub's top of a drawn time window; pullpush is walked top-down by score,
+with the lowest score already harvested as the cursor; arctic shift can only be
+handed a window of days, and the band is filtered here afterwards.
 """
 import datetime
 import html
@@ -32,13 +36,15 @@ import urllib.request
 
 import safety
 from config import (DB_PATH, DEFAULT_CHANNEL, LOUD_AT, MIN_COMMENTS, MIN_SCORE,
-                    OUTPUT_LANG, PLAN_FILE, SUBREDDITS)
+                    OUTPUT_LANG, PLAN_FILE, REDDITAPIS_KEY, SUBREDDITS)
 
+REDDITAPIS = "https://api.redditapis.com"
 API = "https://api.pullpush.io/reddit/search/submission/"
 ARCTIC = "https://arctic-shift.photon-reddit.com/api/posts/search"
 ARCTIC_IDS = "https://arctic-shift.photon-reddit.com/api/posts/ids"
 UA = "StoryReader/0.1"
 BATCH = 100                        # pullpush per-request cap
+TOP_WINDOWS = ("week", "month", "year", "all")   # what the live proxy sorts by
 MIN_CHARS, MAX_CHARS = 400, 4000   # ~40 sec .. ~4 min of narration
 ARCTIC_DAYS = 2                    # width of the window arctic shift reads
 ARCTIC_BACK = 4 * 365              # ...taken from anywhere in the last 4 years
@@ -104,16 +110,22 @@ def _add_lang(db) -> None:
         log.info("%s: migrated to per-channel rows", table)
 
 
-def _api(base: str, **params):
-    """Both archives answer {"data": [...]} to a plain GET, so one helper does."""
-    url = base + "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
+def _api(base: str, envelope: str = "data", headers: dict | None = None,
+         **params):
+    """GET one page of posts. Both archives answer {"data": [...]}; the live
+    proxy answers {"posts": [...]} and wants a bearer token, hence the two
+    arguments in front."""
+    url = base + ("?" + urllib.parse.urlencode(params) if params else "")
+    req = urllib.request.Request(url, headers={"User-Agent": UA, **(headers or {})})
     for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
-                return json.load(r)["data"]
+                left = r.headers.get("X-Credits-Remaining")
+                if left and float(left) < 0.05:
+                    log.warning("redditapis credit is down to $%s", left)
+                return json.load(r)[envelope]
         except urllib.error.HTTPError as e:
-            # both throttle bursts; a short wait clears it
+            # all three throttle bursts; a short wait clears it
             if e.code != 429 or attempt == 2:
                 raise
             wait = 5 * (attempt + 1)
@@ -124,6 +136,45 @@ def _api(base: str, **params):
 # Anything that means "the archive is not answering right now" - the next
 # backend gets a turn, and if there is none the sub is skipped for this run.
 DOWN = (urllib.error.URLError, TimeoutError, json.JSONDecodeError)
+
+
+def _redditapi(path: str, envelope: str = "posts", **params) -> list[dict]:
+    """One call to the live proxy. Raises DOWN when it will not answer.
+
+    An HTTPError is a URLError, so 402-out-of-credit and 5xx both land in the
+    DOWN family and the caller falls through to the archives on their own.
+    """
+    if not REDDITAPIS_KEY:
+        raise urllib.error.URLError("no REDDITAPIS_KEY set")
+    return _api(REDDITAPIS + path, envelope,
+                {"Authorization": f"Bearer {REDDITAPIS_KEY}"}, **params)
+
+
+def _mapped(p: dict, sub: str) -> dict:
+    """The proxy's field names in the shape the rest of this module reads.
+
+    Their JSON is close to reddit's but not identical - upvotes, text and
+    comments where the archives say score, selftext and num_comments - so the
+    translation happens once, here, rather than in every reader downstream.
+    """
+    return {**p, "score": p.get("upvotes") or 0,
+            "num_comments": p.get("comments") or 0,
+            "selftext": p.get("text") or "",
+            "subreddit": p.get("subreddit") or sub}
+
+
+def _live(sub: str) -> list[dict]:
+    """This sub's top posts for one time window, live.
+
+    The window is drawn rather than fixed: `all` is the same hundred posts for
+    ever and would be spent in a week, while `week` alone would never surface
+    the years of good material behind it. Rotating them keeps both in reach and
+    lets `seen` do the forgetting.
+    """
+    window = random.choice(TOP_WINDOWS)
+    posts = _redditapi(f"/api/reddit/sub/{sub}/top", t=window, limit=100)
+    log.info("r/%s: %d posts from top/%s (live)", sub, len(posts), window)
+    return [_mapped(p, sub) for p in posts]
 
 
 def _pullpush(sub: str, top: int) -> list[dict]:
@@ -300,27 +351,35 @@ def refill(db, windows: int = POOL_WINDOWS) -> int:
 
     Shuffled, so a tie in the ranking does not always fall the same way -
     twenty-six of the first twenty-seven stories came from one sub back when the
-    order was fixed. pullpush is asked first because its walk is ordered by
-    score and therefore reaches the loud band on purpose; arctic shift only ever
-    reaches it by luck, which is what the measurement above is about.
+    order was fixed.
     """
     added = 0
     subs = random.sample(SUBREDDITS, len(SUBREDDITS))
     for i in range(windows):
         sub = subs[i % len(subs)]
-        top = _cursor(db, sub)
-        if top <= MIN_SCORE:
-            log.info("r/%s: nothing left above %d, trying another sub", sub, MIN_SCORE)
-            continue
         try:
-            posts = _pullpush(sub, top)
+            posts = _live(sub)
         except DOWN as e:
-            log.warning("r/%s: pullpush unavailable (%s), trying arctic shift", sub, e)
-            try:
-                posts = _arctic(sub)
-            except DOWN as e:
-                log.warning("r/%s: no source available (%s), skipping", sub, e)
+            # Both archives are the emergency route now, and in this order: the
+            # score index first, the random window last. Neither can be trusted
+            # on the numbers - see config.REDDITAPIS_KEY - so this is about
+            # having something rather than having something good.
+            log.warning("r/%s: live proxy unavailable (%s), falling back", sub, e)
+            top = _cursor(db, sub)
+            if top <= MIN_SCORE:
+                log.info("r/%s: nothing left above %d, trying another sub",
+                         sub, MIN_SCORE)
                 continue
+            try:
+                posts = _pullpush(sub, top)
+            except DOWN as e:
+                log.warning("r/%s: pullpush unavailable (%s), trying arctic shift",
+                            sub, e)
+                try:
+                    posts = _arctic(sub)
+                except DOWN as e:
+                    log.warning("r/%s: no source available (%s), skipping", sub, e)
+                    continue
         got = _store(db, sub, posts)
         log.info("r/%s: %d new candidates out of %d", sub, got, len(posts))
         added += got
@@ -337,10 +396,19 @@ def _bodies(ids: list[str]) -> dict[str, dict]:
     """
     joined = ",".join(ids)
     try:
-        data = _api(ARCTIC_IDS, ids=joined)
+        # up to 100 in one call, and the numbers come back current, so a row
+        # harvested weeks ago is re-read at today's score rather than at the
+        # one it was stored with
+        posts = _redditapi("/api/reddit/by_id/"
+                           + ",".join(f"t3_{i}" for i in ids))
+        return {p["id"]: _mapped(p, p.get("subreddit", "")) for p in posts}
     except DOWN as e:
-        log.warning("arctic shift unavailable (%s), trying pullpush", e)
+        log.warning("live proxy unavailable (%s), falling back", e)
+    try:
         data = _api(API, ids=joined)
+    except DOWN as e:
+        log.warning("pullpush unavailable (%s), trying arctic shift", e)
+        data = _api(ARCTIC_IDS, ids=joined)
     return {p["id"]: p for p in data}
 
 
@@ -368,6 +436,7 @@ def _pick(limit: int) -> list[dict]:
         rows = db.execute(unused, (*SUBREDDITS, OUTPUT_LANG)).fetchall()
 
     ranked = [{"id": pid, "sub": sub, "score": score, "title": title,
+               "comments": comments, "ratio": ratio,
                "rank": contested(title, comments, score, ratio)}
               for pid, sub, score, comments, ratio, title in
               sorted(rows, key=lambda r: contested(r[5], r[3], r[2], r[4]),
@@ -399,7 +468,16 @@ def _pick(limit: int) -> list[dict]:
             log.info("skipping %s (%s)", p["id"], hit)
             db.execute("DELETE FROM pool WHERE id=?", (p["id"],))
             continue
-        out.append({**p, "title": title, "text": text})
+        # The body came back with today's numbers next to it. Write them back:
+        # a row harvested from an archive carries whatever the crawl saw, often
+        # minutes after the post went up, and left alone it would rank on that
+        # number for as long as it sits here. Each field falls back to what the
+        # row already held - a backend that omits one must not blank it.
+        score = raw.get("score") or p["score"]
+        db.execute("UPDATE pool SET score=?, comments=?, ratio=? WHERE id=?",
+                   (score, raw.get("num_comments") or p["comments"],
+                    raw.get("upvote_ratio") or p["ratio"], p["id"]))
+        out.append({**p, "score": score, "title": title, "text": text})
     db.commit()
     db.close()
     return out
@@ -751,14 +829,19 @@ if __name__ == "__main__":
     _real = (SUBREDDITS, _refilled, _bodies)
     globals()["SUBREDDITS"] = ["_selftest_sub", "_selftest_other"]
     globals()["_refilled"] = True                 # no archive is to be touched
+    # the stub answers like a real backend, numbers included, because _pick()
+    # writes those numbers back into the row it just read
     globals()["_bodies"] = lambda ids: {
-        i: {"id": i, "selftext": "x" * 500, "over_18": False, "title": "A story"}
+        i: {"id": i, "selftext": "x" * 500, "over_18": False, "title": "A story",
+            "score": _planted_by_id[i][2], "num_comments": _planted_by_id[i][3],
+            "upvote_ratio": _planted_by_id[i][4]}
         for i in ids if i != "_sp_gone"}
     _planted = [("_sp_quiet", "_selftest_sub", MIN_SCORE + 10, 20, 0.99),
                 ("_sp_fight", "_selftest_sub", MIN_SCORE + 10, 900, 0.72),
                 ("_sp_spent", "_selftest_sub", MIN_SCORE + 10, 900, 0.72),
                 ("_sp_gone", "_selftest_other", MIN_SCORE + 10, 50, 0.72),
                 ("_sp_loud", "_selftest_other", LOUD_AT + 1, 900, 0.72)]
+    _planted_by_id = {row[0]: row for row in _planted}
     with _db() as db:
         db.executemany("INSERT OR REPLACE INTO pool(id, sub, score, comments, "
                        "ratio, title, ts) VALUES (?,?,?,?,?,?,?)",
@@ -858,17 +941,32 @@ if __name__ == "__main__":
         assert "_selftest_other" not in mine, "the other channel's row leaked in"
         db.execute("DELETE FROM seen WHERE id='_selftest_other'")
 
-    # The fallback is the whole point: pullpush answers 502 for hours at a time,
-    # and a backup nobody exercises is a backup that is broken when it is needed.
-    # So the run below is done twice, once with pullpush forcibly dead.
-    real_pullpush = _pullpush
-    _pullpush = lambda *a: (_ for _ in ()).throw(urllib.error.URLError("forced"))
-    arctic = fetch(3)
-    assert arctic, "arctic shift returned nothing - the fallback is dead"
-    for p in arctic:
-        assert p["score"] >= MIN_SCORE, f"below the floor: {p['score']}"
-    print(f"fallback ok: {len(arctic)} posts from arctic shift")
-    _pullpush = real_pullpush
+    # The field translation. The proxy answers upvotes/text/comments where the
+    # archives answer score/selftext/num_comments, so if it ever renames one of
+    # them everything downstream reads a zero and the pool fills with rows that
+    # cannot be ranked - silently, because a zero is a legal score.
+    _theirs = {"id": "x", "upvotes": 4200, "comments": 310, "upvote_ratio": 0.8,
+               "text": "body", "title": "t", "subreddit": "tifu"}
+    _ours = _mapped(_theirs, "asked_for")
+    assert (_ours["score"], _ours["num_comments"], _ours["selftext"]) \
+        == (4200, 310, "body"), _ours
+    assert _ours["upvote_ratio"] == 0.8, "the fields that already match must survive"
+    assert _mapped({"id": "x"}, "asked_for")["subreddit"] == "asked_for", \
+        "a post with no sub of its own belongs to the sub it was asked for"
+    assert _mapped({"id": "x"}, "s")["score"] == 0, "a missing count reads 0, not None"
+
+    # The chain, exercised on purpose. Two of the three backends are down as
+    # often as they are up and the third costs money and can run out of it, so a
+    # fallback nobody runs is a fallback that is broken when it is needed.
+    _real_live = _live
+    if REDDITAPIS_KEY:
+        assert _live(SUBREDDITS[0]), "the live proxy answered with nothing"
+        print("live proxy ok")
+    _live = lambda *a: (_ for _ in ()).throw(urllib.error.URLError("forced"))
+    with _db() as db:
+        refill(db, windows=1)          # must reach an archive rather than raise
+    print("fallback ok: the archives answer with the proxy dead")
+    _live = _real_live
 
     posts = fetch(3)
     assert posts, "source returned nothing - check network / SUBREDDITS"
