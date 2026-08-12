@@ -152,7 +152,13 @@ WHISPER_SIZE = os.getenv("WHISPER_SIZE", "base")
 # again, exactly as before.
 SUBREDDITS = [s.strip() for s in
               chan_env("SUBREDDITS", "tifu", shared=True).split(",") if s.strip()]
-MIN_SCORE = int(os.getenv("MIN_SCORE", 3000))
+# Floor, and a much lower one since 2026-08-12. It was never the thing judging
+# whether a story is good - source.contested() ranks and the prompt's own SKIP
+# gate decides, and that gate costs about three seconds to say no against two
+# and a half minutes to say yes. What 3000 mostly did was throw away the fights:
+# measured on a settled window of r/AmItheAsshole, the post with 897 comments
+# against 1054 upvotes - the most argued-over story in it - sat below the floor.
+MIN_SCORE = int(os.getenv("MIN_SCORE", 1000))
 # The day's one deliberate exception. The ordinary band below is chosen for
 # being relatable, which is not the same as being watched: a day of nothing but
 # ordinary stories has no peak in it. So the first video of each day is taken
