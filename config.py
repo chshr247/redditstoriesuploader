@@ -125,6 +125,21 @@ FISH_TITLE_CUE = os.getenv(
 # mood plus the constraint. Mood on its own was a separate take, and it lost.
 # Kept short because both halves count against the 60-char ceiling together.
 FISH_CTA_CUE = os.getenv("FISH_CTA_CUE", "[calm, no stress on the last word]")
+# And the story itself, which had no cue at all until now. The model spends its
+# emotion cues where the story turns - three to six across twenty-odd sentences,
+# which is the right rule - so most of the narration ran in the engine's default
+# register and the take opened on whatever the first sentence happened to carry,
+# usually a bare [emphasis]. Word-level peaks over a flat bed is what "reads
+# like grey stone" sounds like. This sets the bed; the model's cues still do
+# the turns.
+# NO COMMAS IN THIS ONE. Every cue here is merged into the model's leading
+# bracket, and script.speakers() reads the text before the first comma as the
+# name of whoever speaks the next quoted line. Title and question have no
+# dialogue so a comma there is free; in the story it would invent a speaker
+# called "emphasis" and shift every real speaker's subtitle colour after it.
+# Hence the space join at the call site too - see voice._cued().
+FISH_BODY_CUE = os.getenv(
+    "FISH_BODY_CUE", "[telling this to one person not reading it]")
 # Fish returns audio only, so word timings come from local whisper alignment.
 # base is enough - we use its timings, never its text.
 WHISPER_SIZE = os.getenv("WHISPER_SIZE", "base")
