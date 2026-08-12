@@ -45,6 +45,7 @@ ARCTIC_IDS = "https://arctic-shift.photon-reddit.com/api/posts/ids"
 UA = "StoryReader/0.1"
 BATCH = 100                        # pullpush per-request cap
 TOP_WINDOWS = ("week", "month", "year", "all")   # what the live proxy sorts by
+THIN = 20                          # below this a window is not worth the call
 MIN_CHARS, MAX_CHARS = 400, 4000   # ~40 sec .. ~4 min of narration
 ARCTIC_DAYS = 2                    # width of the window arctic shift reads
 ARCTIC_BACK = 4 * 365              # ...taken from anywhere in the last 4 years
@@ -170,9 +171,20 @@ def _live(sub: str) -> list[dict]:
     ever and would be spent in a week, while `week` alone would never surface
     the years of good material behind it. Rotating them keeps both in reach and
     lets `seen` do the forgetting.
+
+    A slow sub answers a narrow window with almost nothing - r/ProRevenge
+    returned 0 posts for top/month and r/TalesFromRetail 2 for top/week, three
+    of eight calls in one refill - so a thin answer is widened to top/all rather
+    than left as a spent call. It is only ever one retry: `all` is the widest
+    there is, and a sub that has nothing to say there has nothing to say.
     """
     window = random.choice(TOP_WINDOWS)
     posts = _redditapi(f"/api/reddit/sub/{sub}/top", t=window, limit=100)
+    if len(posts) < THIN and window != "all":
+        log.info("r/%s: %d posts from top/%s, widening to top/all",
+                 sub, len(posts), window)
+        window = "all"
+        posts = _redditapi(f"/api/reddit/sub/{sub}/top", t=window, limit=100)
     log.info("r/%s: %d posts from top/%s (live)", sub, len(posts), window)
     return [_mapped(p, sub) for p in posts]
 
@@ -958,10 +970,26 @@ if __name__ == "__main__":
     # The chain, exercised on purpose. Two of the three backends are down as
     # often as they are up and the third costs money and can run out of it, so a
     # fallback nobody runs is a fallback that is broken when it is needed.
-    _real_live = _live
+    _real_live, _real_redditapi = _live, _redditapi
     if REDDITAPIS_KEY:
         assert _live(SUBREDDITS[0]), "the live proxy answered with nothing"
         print("live proxy ok")
+    # A slow sub must not cost a call for nothing: a thin window is widened to
+    # top/all, and only once. Stubbed rather than measured - which sub happens
+    # to be slow this week is not something a test should depend on.
+    _asked, _real_choice = [], random.choice
+    globals()["_redditapi"] = lambda path, envelope="posts", **p: (
+        _asked.append(p.get("t")) or ([{"id": "x"}] * 100 if p.get("t") == "all"
+                                      else [{"id": "x"}] * 2))
+    random.choice = lambda seq: "week"
+    assert len(_live("_slow")) == 100, "a thin window must be widened"
+    assert _asked == ["week", "all"], _asked
+    _asked.clear()
+    random.choice = lambda seq: "all"
+    assert len(_live("_slow")) == 100 and _asked == ["all"], \
+        "top/all is already the widest - there is nothing to retry"
+    random.choice = _real_choice
+    globals()["_redditapi"] = _real_redditapi
     _live = lambda *a: (_ for _ in ()).throw(urllib.error.URLError("forced"))
     with _db() as db:
         refill(db, windows=1)          # must reach an archive rather than raise
