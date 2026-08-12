@@ -159,32 +159,22 @@ SUBREDDITS = [s.strip() for s in
 # measured on a settled window of r/AmItheAsshole, the post with 897 comments
 # against 1054 upvotes - the most argued-over story in it - sat below the floor.
 MIN_SCORE = int(os.getenv("MIN_SCORE", 1000))
-# The day's one deliberate exception. The ordinary band below is chosen for
-# being relatable, which is not the same as being watched: a day of nothing but
-# ordinary stories has no peak in it. So the first video of each day is taken
-# from ABOVE the ceiling instead - the loudest thing the subs have, whatever
-# made it loud. Everything after it comes from the ordinary band as before.
+# Where "loud" starts, and nothing more than that: the score at which
+# source.contested() hands out its full loudness point. There used to be a
+# ceiling here as well, with a second fetch path and a daily slot behind it, on
+# the grounds that a post above it went viral for Reddit-internal reasons -
+# memes, meta drama, war, death - rather than for the story.
 #
-# 25000 rather than 40000 since 2026-08-12: with YT_VIRAL_ONLY this is also the
-# bar YouTube publishes at, and at 40000 the English channel's subs were not
-# clearing it - its loudest story on 08-12 scored 25312 and the viral fetch came
-# back empty all day.
-VIRAL_MIN_SCORE = int(os.getenv("VIRAL_MIN_SCORE", 25000))
-# Ceiling, not a typo. Above this a post went viral for Reddit-internal reasons
-# - memes, meta drama, war, death - not because the story is good. The band
-# between MIN and MAX is where ordinary relatable stories live.
+# Measured 2026-08-12 and it is not so. A year of r/tifu, r/AmItheAsshole and
+# r/pettyrevenge - 32867 posts - held exactly 12 at or above 25000, and all 12
+# were tellable stories: no memes, no link posts, no updates, no news. The
+# ceiling was not keeping noise out, it was keeping the best material out. So
+# there is one band now, [MIN_SCORE, inf), and loudness is a term in the
+# ranking instead of a gate in front of it.
 #
-# It follows VIRAL_MIN_SCORE rather than carrying a number of its own, because
-# the two have to meet exactly: fetch() takes [MIN_SCORE, MAX_SCORE) and
-# fetch_viral() takes [VIRAL_MIN_SCORE, inf), so a GAP between them is a band of
-# posts neither call can reach - at 30000 against 40000 that lost everything
-# between the two, six of the stories in plan_ru.md alone - and an OVERLAP is a
-# band both reach, where an ordinary pick quietly spends the day's viral slot.
-# Moving the floor now moves this with it; setting MAX_SCORE is opting out.
-MAX_SCORE = int(os.getenv("MAX_SCORE", VIRAL_MIN_SCORE))
-# Per UTC day, matching the allowance reset the rest of the pipeline uses. More
-# than one and the exception stops being one.
-VIRAL_PER_DAY = int(os.getenv("VIRAL_PER_DAY", 1))
+# The same measurement is why a daily "loud slot" made no sense either: twelve
+# a year across three subs is one a month, and the slot promised one a day.
+LOUD_AT = int(os.getenv("LOUD_AT", 25000))
 MIN_COMMENTS = int(os.getenv("MIN_COMMENTS", 100))
 
 # A hand-written running order, and when there is one it REPLACES the sourcing
@@ -284,17 +274,13 @@ YT_MIN_GAP_HOURS = float(os.getenv("YT_MIN_GAP_HOURS", 5))
 # channel's first week, 3 after) - a knob because "how many" turned out to be
 # an editorial call, not a platform limit: three ordinary stories a day landed
 # on 0-8 views each, so the count came down to one and the bar went up.
+#
+# The bar itself is gone. YT_VIRAL_ONLY offered YouTube nothing below the old
+# viral floor, on the theory that TikTok would still take the rest - true for a
+# channel with TikTok on, and for the English one it meant the channel had no
+# outlet at all and burned ten stories in a day rendering for nobody. With the
+# bands collapsed there is no viral floor left to be picky about either.
 YT_PER_DAY = int(os.getenv("YT_PER_DAY", 0))
-# ...and that bar. On, only stories from the viral band (VIRAL_MIN_SCORE up)
-# are offered to YouTube. The ordinary band still gets made and still goes to
-# TikTok - this narrows one platform's queue, it does not narrow the pipeline.
-# Nothing forces the two to agree, so a day whose viral slot came back empty
-# simply has no YouTube upload in it, which is the intended trade.
-# shared=True: one value pauses/raises the bar on every channel at once, and a
-# suffixed one overrides a single channel. Safe to fall back on - unlike a
-# token, the worst a shared value can do is apply where it was already meant.
-YT_VIRAL_ONLY = chan_env("YT_VIRAL_ONLY", "0", shared=True).strip().lower() in (
-    "1", "true", "yes", "on")
 # Pause with an expiry: ISO-8601, UTC assumed, e.g. 2026-08-12T14:00. Past that
 # moment the value is inert, which is the whole point - a pause that has to be
 # lifted by hand is a pause somebody forgets to lift, and a channel that
@@ -336,17 +322,18 @@ if __name__ == "__main__":
     assert SUBREDDITS and all(SUBREDDITS), "SUBREDDITS is empty"
     assert 15 <= TARGET_SEC <= 180, f"TARGET_SEC={TARGET_SEC} out of sane range"
     assert MIN_SEC < TARGET_SEC, "TARGET_SEC must aim above the MIN_SEC floor"
-    # The two bands must not overlap, or the same post is both an ordinary
-    # story and the day's one exception, and the cursors fight over it.
-    assert MIN_SCORE < MAX_SCORE <= VIRAL_MIN_SCORE, \
-        f"bands overlap: {MIN_SCORE} < {MAX_SCORE} <= {VIRAL_MIN_SCORE}"
+    # Loudness is a ranking term, so it has to sit above the floor to mean
+    # anything: at or below it every candidate scores the full point and the
+    # term stops separating anything at all.
+    assert MIN_SCORE < LOUD_AT, f"LOUD_AT={LOUD_AT} is not above MIN_SCORE={MIN_SCORE}"
     # The cursor is per (sub, channel), so a sub named twice in one list is not
     # two sources - it is one source read twice, and _harvest's shuffle just
     # gives it two tickets in the draw.
     assert len(set(SUBREDDITS)) == len(SUBREDDITS), \
         f"{chan_key('SUBREDDITS', True)} repeats a sub"
     print(f"OK: channel {CHANNEL}, {len(SUBREDDITS)} subs, "
-          f"{TARGET_SEC}s (floor {MIN_SEC}s), viral from {VIRAL_MIN_SCORE}")
+          f"{TARGET_SEC}s (floor {MIN_SEC}s), score from {MIN_SCORE}, "
+          f"loud at {LOUD_AT}")
     print(f"    voices: {len(FISH_VOICES_MALE)} male, {len(FISH_VOICES_FEMALE)} female"
           f"   yt token: {'set' if YT_REFRESH_TOKEN else 'MISSING'} ({YT_REFRESH_KEY})"
           f"   tiktok token: {'set' if TIKTOK_REFRESH_TOKEN else 'MISSING'}")

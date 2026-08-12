@@ -133,14 +133,11 @@ jobs:
       # laugh. Unset arrives empty, config.py reads that as absent and both
       # channels go back to sharing SUBREDDITS.
       SUBREDDITS_EN: ${{ vars.SUBREDDITS_EN }}
-      # The day's one loud video, taken from above MAX_SCORE - and under
-      # YT_VIRAL_ONLY the bar YouTube publishes at as well. A knob because the
-      # right floor depends on which subs are in the list: 40k was roughly 200
-      # usable posts across the six ru ones and almost nothing across the en
-      # ones, which is why it now stands at 25k. MAX_SCORE is deliberately not
-      # set here - it follows this value so the two bands keep meeting.
-      VIRAL_MIN_SCORE: ${{ vars.VIRAL_MIN_SCORE || '25000' }}
-      VIRAL_PER_DAY: ${{ vars.VIRAL_PER_DAY || '1' }}
+      # Where the ranking calls a story loud and hands out its full loudness
+      # point. Not a band and not a gate any more - a year of three subs held
+      # twelve posts above this, so anything that treated it as a supply was
+      # promising daily what the subs produce monthly.
+      LOUD_AT: ${{ vars.LOUD_AT || '25000' }}
       TTS_BACKEND: fish
       SUBTITLE_FONT: Arial Black
       # Deliberately below the code default of 5. With the grid this is the only
@@ -152,14 +149,12 @@ jobs:
       # third upload still fits. Only the day-2 allowance of 2 hid it. At 3.5
       # the same three span seven hours and the slack goes from two to five.
       YT_MIN_GAP_HOURS: "3.5"
-      # One upload a day, and only from the viral band. Measured on the channel
-      # itself, 2026-08-10: fourteen days of two-to-three ordinary stories a day
-      # sat at 0-8 views each, and the only two that moved (383 and 62) were the
-      # loud ones. So YouTube gets the day's one loud story and nothing else -
-      # TikTok keeps taking the ordinary band at its own count. A repo variable
-      # overrides either without a push.
+      # One upload a day. Measured on the channel itself, 2026-08-10: fourteen
+      # days of two-to-three ordinary stories a day sat at 0-8 views each, and
+      # the only two that moved (383 and 62) were the loud ones. The count came
+      # down to one; the score bar that came with it (YT_VIRAL_ONLY) is gone,
+      # since it left a channel with TikTok switched off no outlet at all.
       YT_PER_DAY: ${{ vars.YT_PER_DAY || '1' }}
-      YT_VIRAL_ONLY: ${{ vars.YT_VIRAL_ONLY || '1' }}
       # A dated pause, inert once it passes - no second push to resume, and no
       # channel left silently stopped. Set the variable to a later date to
       # extend it, to an empty value to lift it early.

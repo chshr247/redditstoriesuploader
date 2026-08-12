@@ -24,8 +24,8 @@ import render
 import script
 import source
 import voice
-from config import (CHANNEL, MIN_SEC, OUT_DIR, TIKTOK_ENABLED, TIKTOK_PER_DAY,
-                    VIRAL_MIN_SCORE, YT_VIRAL_ONLY, chan_file, chan_key)
+from config import (CHANNEL, LOUD_AT, MIN_SEC, OUT_DIR, TIKTOK_ENABLED,
+                    TIKTOK_PER_DAY, chan_file, chan_key)
 
 log = logging.getLogger("main")
 
@@ -148,24 +148,6 @@ def _room() -> int:
     return max(0, TIKTOK_PER_DAY - publish.sent_today())
 
 
-def _takers(score: int) -> bool:
-    """Would either platform in this run actually take a story from this band?
-
-    A video nobody takes is not free. It is written, narrated, rendered, refused
-    by both platforms and dies with the runner - and the story it spent is
-    marked used on the way out, so it never comes back. The en channel spent ten
-    stories that way on 2026-08-12: TikTok off for the channel
-    (TIKTOK_ENABLED_EN=0), YouTube on YT_VIRAL_ONLY, and every candidate in the
-    ordinary band. Its YouTube allowance never got used either, so due() stayed
-    true and the next run did it again.
-
-    Only the two refusals that hold for a whole run are asked here. TikTok's
-    clock is one of them: due() answers for the run, not for the file, and
-    publish.py checks the file again on its own before it sends anything.
-    """
-    return not publish.due() or not YT_VIRAL_ONLY or score >= VIRAL_MIN_SCORE
-
-
 def main(count: int = 1, force: bool = False) -> int:
     done, skipped, failed = [], 0, 0
 
@@ -227,18 +209,11 @@ def main(count: int = 1, force: bool = False) -> int:
                       left)
         else:
             n = p["parts"]
-            # The plan waits rather than spends: a planned story rendered into a
-            # run neither platform would publish from is burned exactly like a
-            # pool one, and the order loses it for good.
-            if not _takers(p["score"]):
-                log.info("plan: %s waits - nothing this run would take it "
-                         "(TikTok closed, YouTube takes %d+ only)",
-                         p["id"], VIRAL_MIN_SCORE)
             # multipart_today() is deliberately NOT consulted here. It exists to
             # stop the pool from splitting story after story; the plan already
             # spaces its multi-parters one to a day, and re-asking would only
             # stall the order whenever a run drifts across midnight.
-            elif n > 1 and (room := _room()) < n:
+            if n > 1 and (room := _room()) < n:
                 log.warning("plan: %s is %d parts and only %d send(s) are left "
                             "today - starting it tomorrow rather than letting "
                             "it straddle the night", p["id"], n, room)
@@ -257,27 +232,13 @@ def main(count: int = 1, force: bool = False) -> int:
                     log.exception("failed on %s", p["id"])
                     failed += 1
     elif len(done) < count:
-        # The day's loud story is read first, before the ordinary band is even
-        # asked. It is the one video a day that has to happen, and a run that
-        # spends its slot on an ordinary story does not get the slot back - the
-        # next run is hours away and the day has a fixed number of them.
-        # Ahead of the pool rather than instead of it: a viral post can still
-        # come back SKIP, and then the run falls through to an ordinary story
-        # exactly as it did before, with the slot still open for a later run.
-        posts = source.fetch_viral(count * 2) if source.viral_due() else []
-        if posts:
-            log.info("viral slot open: %d candidate(s) from %d upvotes up",
-                     len(posts), VIRAL_MIN_SCORE)
-        # The ordinary band is only worth asking for if something would take it,
-        # see _takers() - and not asking also saves the archive call.
-        if _takers(0):
-            # most posts get rejected as unsuitable, so pull a pool rather than exactly count
-            posts += source.fetch(count * 4)
-        elif not posts and not done:
-            log.info("only the viral band can go out this run - TikTok is "
-                     "closed and YouTube takes %d+ only - and it is empty",
-                     VIRAL_MIN_SCORE)
-            return 1
+        # One band, one call. The loud story used to be read first out of a
+        # band of its own, on a slot of one a day; a year of three subs held
+        # twelve posts above that floor, so the slot was promising daily what
+        # the subs produce monthly. Loudness is a term in contested() now, and
+        # the loud story competes for the top of one list like everything else.
+        # most posts get rejected as unsuitable, so pull a pool rather than exactly count
+        posts = source.fetch(count * 4)
         if not posts and not done:
             log.error("no fresh stories - lower MIN_SCORE or add subreddits")
             return 1
@@ -291,8 +252,7 @@ def main(count: int = 1, force: bool = False) -> int:
             may_split = not part and not source.multipart_today()
             n = max(1, min(script.part_count(p), _room())) if may_split else 1
             log.info("r/%s [%d%s] contested %.2f, %d parts: %s", p["sub"],
-                     p["score"],
-                     " VIRAL" if p["score"] >= VIRAL_MIN_SCORE else "",
+                     p["score"], " LOUD" if p["score"] >= LOUD_AT else "",
                      p.get("rank", 0), n, p["title"][:60])
             try:
                 done.append(make_split(p, n) if n > 1 else make_video(p))
@@ -325,8 +285,7 @@ if __name__ == "__main__":
         rendered = []
         TIKTOK_ENABLED = True
         source.next_part = lambda: {"post_id": "x", "n": 2, "total": 2}
-        source.fetch = source.fetch_viral = lambda *a: []
-        source.viral_due = lambda: False
+        source.fetch = lambda *a: []
         make_part = lambda p: rendered.append(p) or Path("stub.mp4")  # noqa: E731
         publish.due = lambda: "only 0.4h since the last draft"
         assert main(1) == 1 and not rendered, "a part must wait for TikTok's clock"
@@ -335,21 +294,6 @@ if __name__ == "__main__":
         publish.due = lambda: ""
         assert main(1) == 0 and len(rendered) == 1, "and so does an open gap"
         print("part gating ok")
-
-        # A band nobody in this run would take must not be rendered, and the
-        # pool must not even be asked for one - ten stories on en, 2026-08-12.
-        asked = []
-        source.next_part = lambda: None
-        source.plan_left = lambda: 0
-        source.viral_due = lambda: True
-        source.fetch_viral = lambda *a: []
-        source.fetch = lambda *a: asked.append("pool") or []
-        publish.due = lambda: "TikTok is paused for this channel"
-        globals()["YT_VIRAL_ONLY"] = True
-        assert main(1) == 1 and not asked, "nothing takes the ordinary band here"
-        globals()["YT_VIRAL_ONLY"] = False
-        assert main(1) == 1 and asked, "YouTube takes any band, so ask the pool"
-        print("taker gating ok")
         sys.exit(0)
 
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
