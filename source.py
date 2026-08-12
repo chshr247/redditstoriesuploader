@@ -31,9 +31,8 @@ import urllib.parse
 import urllib.request
 
 import safety
-from config import (DB_PATH, DEFAULT_CHANNEL, MAX_SCORE, MIN_COMMENTS,
-                    MIN_SCORE, OUTPUT_LANG, PLAN_FILE, SUBREDDITS,
-                    VIRAL_MIN_SCORE, VIRAL_PER_DAY)
+from config import (DB_PATH, DEFAULT_CHANNEL, LOUD_AT, MIN_COMMENTS, MIN_SCORE,
+                    OUTPUT_LANG, PLAN_FILE, SUBREDDITS)
 
 API = "https://api.pullpush.io/reddit/search/submission/"
 ARCTIC = "https://arctic-shift.photon-reddit.com/api/posts/search"
@@ -50,10 +49,10 @@ log = logging.getLogger(__name__)
 def _db():
     db = sqlite3.connect(DB_PATH)
     db.execute("CREATE TABLE IF NOT EXISTS seen(id TEXT PRIMARY KEY, score INT, sub TEXT)")
-    # When the post was used, added later: the daily viral slot has to know
-    # whether today already had one, and a row on its own cannot say. Rows
-    # written before this exists keep ts NULL, which reads as "not today" -
-    # correct for every one of them, since a run that old is over.
+    # When the post was used, added later: a daily count has to know whether
+    # today already had one, and a row on its own cannot say. Rows written
+    # before this exists keep ts NULL, which reads as "not today" - correct for
+    # every one of them, since a run that old is over.
     if "ts" not in {c[1] for c in db.execute("PRAGMA table_info(seen)")}:
         db.execute("ALTER TABLE seen ADD COLUMN ts REAL")
     # A story split across videos: the TEXT of every part, written in one LLM
@@ -222,10 +221,20 @@ def _disputed(ratio: float | None) -> float:
 
 def contested(title: str, comments: int, score: int,
               ratio: float | None = None) -> float:
-    """0..3, higher when a post looks like a fight rather than a verdict."""
+    """0..4, higher when a post looks worth telling.
+
+    The fourth term is the one that used to be a separate fetch path and a
+    daily slot. It has to exist in some form: the second term divides comments
+    BY score, so without it the loudest story of the year - 44832 upvotes and
+    2331 comments - sorted below an ordinary 1500-upvote AITA post and would
+    never have been picked at all. As a term it lifts that story into the
+    middle of the list instead of the bottom, without letting it beat a real
+    fight outright, which is what a dedicated slot did.
+    """
     return (bool(CONTESTED.search(title))
             + min(comments * ARGUMENTATIVE / max(score, 1), 1.0)
-            + _disputed(ratio))
+            + _disputed(ratio)
+            + min(score / LOUD_AT, 1.0))
 
 
 # How thin the choice may get before a run pays to widen it, and how many
@@ -234,8 +243,8 @@ def contested(title: str, comments: int, score: int,
 # cleared 3000 and NONE cleared 25000. One window per run is therefore not a
 # pool, it is a coin flip - and the loud band cannot be reached by flipping it.
 # The pool is what turns "what did this window happen to hold" into "the best of
-# everything harvested so far", and it is also the only way the viral slot ever
-# fills while pullpush is down.
+# everything harvested so far", and it is also the only way a loud post is ever
+# found at all while pullpush is down.
 POOL_LOW = 40        # unused rows this channel can still choose from
 POOL_WINDOWS = 8     # archive reads one refill is allowed to spend
 
@@ -335,8 +344,8 @@ def _bodies(ids: list[str]) -> dict[str, dict]:
     return {p["id"]: p for p in data}
 
 
-def _pick(limit: int, floor: int, ceiling: int) -> list[dict]:
-    """Up to `limit` unused pool stories inside [floor, ceiling), best first.
+def _pick(limit: int) -> list[dict]:
+    """Up to `limit` unused pool stories, best first.
 
     "Best" is contested() - the argument, not the score. Nothing here spreads
     the answer across subs on purpose; that is refill()'s job, which shuffles
@@ -348,27 +357,15 @@ def _pick(limit: int, floor: int, ceiling: int) -> list[dict]:
     db = _db()
     subs = ",".join("?" * len(SUBREDDITS))
     unused = (f"SELECT id, sub, score, comments, ratio, title FROM pool "
-              f"WHERE sub IN ({subs}) AND score >= ? AND score < ? AND id NOT IN "
+              f"WHERE sub IN ({subs}) AND id NOT IN "
               "(SELECT id FROM seen WHERE lang=?)")
-    rows = db.execute(unused, (*SUBREDDITS, floor, ceiling, OUTPUT_LANG)).fetchall()
+    rows = db.execute(unused, (*SUBREDDITS, OUTPUT_LANG)).fetchall()
 
-    # Two reasons to go harvesting, and the band one is not covered by the
-    # count: a pool holding two hundred ordinary stories and no loud one is
-    # comfortably above the mark and still has nothing to answer the viral slot
-    # with. Without this the loud band would go quiet for good the moment the
-    # ordinary one filled up.
-    if not _refilled:
-        (left,) = db.execute(
-            f"SELECT COUNT(*) FROM pool WHERE sub IN ({subs}) AND id NOT IN "
-            "(SELECT id FROM seen WHERE lang=?)",
-            (*SUBREDDITS, OUTPUT_LANG)).fetchone()
-        if not rows or left < POOL_LOW:
-            log.info("pool: %d left to choose from, %d of them in [%d, %d) - "
-                     "refilling", left, len(rows), floor, ceiling)
-            _refilled = True
-            log.info("pool: +%d rows", refill(db))
-            rows = db.execute(unused,
-                              (*SUBREDDITS, floor, ceiling, OUTPUT_LANG)).fetchall()
+    if not _refilled and len(rows) < POOL_LOW:
+        log.info("pool: %d left to choose from, refilling", len(rows))
+        _refilled = True
+        log.info("pool: +%d rows", refill(db))
+        rows = db.execute(unused, (*SUBREDDITS, OUTPUT_LANG)).fetchall()
 
     ranked = [{"id": pid, "sub": sub, "score": score, "title": title,
                "rank": contested(title, comments, score, ratio)}
@@ -376,7 +373,7 @@ def _pick(limit: int, floor: int, ceiling: int) -> list[dict]:
               sorted(rows, key=lambda r: contested(r[5], r[3], r[2], r[4]),
                      reverse=True)[:limit]]
     if not ranked:
-        log.info("pool: nothing in [%d, %d) for this channel", floor, ceiling)
+        log.info("pool: nothing left for this channel")
         db.close()
         return []
 
@@ -409,40 +406,8 @@ def _pick(limit: int, floor: int, ceiling: int) -> list[dict]:
 
 
 def fetch(limit: int = 3) -> list[dict]:
-    """Return up to `limit` unused stories from the ordinary band."""
-    return _pick(limit, MIN_SCORE, MAX_SCORE)
-
-
-def fetch_viral(limit: int = 3) -> list[dict]:
-    """The same, from above the MAX_SCORE ceiling: the day's one loud story.
-
-    Deliberately not filtered any further. What made a post reach the viral
-    floor is the point of taking it, so the choice of which loud story works is
-    left to the prompt's own SKIP gate, which throws out news and meta anyway.
-    """
-    return _pick(limit, VIRAL_MIN_SCORE, 10_000_000)
-
-
-def viral_due() -> bool:
-    """True when today has not had its loud story yet.
-
-    Counted off `seen`, i.e. off stories that were actually rendered - a run
-    that fetched one and then failed on it has not spent the day's slot.
-
-    The day is the UTC one, like every other daily count here, and that is not
-    an accident: it turns over at 03:00 MSK, in the middle of the nightly gap
-    between the last run at 23:37 and the first at 10:07. A local day would
-    reset at 00:00 MSK - twenty minutes after the last run of the evening, so
-    the slot would open with nothing left awake to spend it.
-    """
-    start = datetime.datetime.combine(
-        datetime.datetime.now(datetime.timezone.utc).date(),
-        datetime.time.min, datetime.timezone.utc).timestamp()
-    with _db() as db:
-        used = db.execute(
-            "SELECT COUNT(*) FROM seen WHERE lang=? AND score>=? AND ts>=?",
-            (OUTPUT_LANG, VIRAL_MIN_SCORE, start)).fetchone()[0]
-    return used < VIRAL_PER_DAY
+    """Return up to `limit` unused stories, the most promising first."""
+    return _pick(limit)
 
 
 def mark_used(post_id: str, score: int, sub: str) -> None:
@@ -458,8 +423,8 @@ def mark_used(post_id: str, score: int, sub: str) -> None:
 # Everything above chooses the next story; this chooses nothing. A channel with
 # a plan file publishes the stories written in it, in the order they are written
 # in, and the archive is asked for one post at a time by id rather than searched
-# at all. The bands, the cursor, contested() and the viral slot all go quiet -
-# they are ways of picking, and the picking is already done.
+# at all. The pool, the cursor and contested() all go quiet - they are ways of
+# picking, and the picking is already done.
 
 # One row of the schedule table in plan_<channel>.md:
 #   | 2 | «Ты здесь не начальник» ... | 1/3 | [`istlsy`](https://redd.it/istlsy) | ...
@@ -725,18 +690,21 @@ if __name__ == "__main__":
         assert _usable({**ok, "title": good}), f"false positive: {good!r}"
     assert _clean("don&#39;t") == "don't"
 
-    # the pool is ordered by how much of a fight a post is, and both signals
-    # have to earn their place: the verdict question and the argument ratio
-    assert contested("AITA for kicking out my sister?", 0, 5000) >= 1
-    assert contested("WIBTA if I skipped the wedding", 0, 5000) >= 1
-    assert contested("Am I wrong for locking the door", 0, 5000) >= 1
-    assert contested("My neighbor flooded my flat", 0, 5000) == 0, \
-        "a plain story must not score on the title"
+    # The pool is ordered by how much of a fight a post is, and every signal has
+    # to earn its place. Each one is checked as a DIFFERENCE against the same
+    # post with nothing going for it: the terms add up, so a bare total says
+    # nothing about which of them moved.
+    _plain = contested("My neighbor flooded my flat", 0, 5000)
+    assert _plain == min(5000 / LOUD_AT, 1.0), \
+        "a quiet, uncommented, plainly titled post scores on loudness alone"
+    for _title in ("AITA for kicking out my sister?", "WIBTA if I skipped the wedding",
+                   "Am I wrong for locking the door"):
+        assert abs(contested(_title, 0, 5000) - _plain - 1) < 1e-9, _title
     # 1 comment per 10 upvotes is a room taking sides; 1 per 100 is a nod
-    assert contested("x", 500, 5000) == 1.0
-    assert contested("x", 50, 5000) < 0.2
+    assert abs(contested("x", 500, 5000) - _plain - 1.0) < 1e-9
+    assert contested("x", 50, 5000) - _plain < 0.2
     assert contested("AITA for this", 500, 5000) > contested("x", 500, 5000), \
-        "both signals must add up, not replace each other"
+        "the signals must add up, not replace each other"
     assert contested("x", 0, 0) == 0, "a scoreless post must not divide by zero"
 
     # parts come back one at a time, in order, and only once the one before is
@@ -757,18 +725,6 @@ if __name__ == "__main__":
         with _db() as db:
             db.execute("DELETE FROM parts WHERE post_id='_selftest'")
 
-    # the day's viral slot: due until a post from that band is marked used, and
-    # an ordinary one must not close it. Skipped when today already spent it -
-    # the fixture would then be testing a state the run is not in.
-    if viral_due():
-        mark_used("_selftest_small", MIN_SCORE, "test")
-        assert viral_due(), "an ordinary story must not spend the viral slot"
-        mark_used("_selftest_loud", VIRAL_MIN_SCORE, "test")
-        assert not viral_due(), "one loud story a day, and today had it"
-        with _db() as db:
-            db.execute("DELETE FROM seen WHERE id LIKE '_selftest%'")
-        assert viral_due()
-
     # The ranking. Ordering is the whole job here - main.py takes the first
     # story the prompt accepts, so whatever sorts to the top IS the choice.
     assert _disputed(None) == _disputed(0) == 0.0, "an absent ratio is not a calm one"
@@ -777,13 +733,21 @@ if __name__ == "__main__":
     assert abs(_disputed(0.85) - 0.4) < 0.01, _disputed(0.85)
     # the pair actually measured on 2026-08-12: 1054 upvotes with 897 comments
     # at 0.85 is the fight, 7555 with 862 at 0.96 is the story everyone shared
-    assert (contested("AITA for spraying my BIL", 897, 1054, 0.85)
-            > contested("AITA for spilling my wine", 862, 7555, 0.96)), \
+    _fight = contested("AITA for spraying my BIL", 897, 1054, 0.85)
+    assert _fight > contested("AITA for spilling my wine", 862, 7555, 0.96), \
         "the argued-over story has to outrank the agreed-with one"
+    # ...and the loudness term, which exists so the year's biggest story is not
+    # buried by the comments-over-score one. The real numbers again: 44832 with
+    # 2331 comments was the loudest post in a year of three subs, and before the
+    # term it scored 0.60 - below every ordinary AITA row in the pool.
+    _loud = contested("My wife's friend insulted her", 2331, 44832, 0.93)
+    assert _loud > contested("A quiet story", 200, 1500, 0.99), \
+        "a loud story must not sort below a bland one"
+    assert _loud < _fight, "but it must not simply outrank a real fight either"
 
     # The pool: what a run chooses from. Rows are planted rather than harvested,
-    # since what is being tested is the reading - the band, a story already
-    # spent in THIS language, the order, and a row whose post has gone since.
+    # since what is being tested is the reading - a story already spent in THIS
+    # language, the order, and a row whose post has gone since.
     _real = (SUBREDDITS, _refilled, _bodies)
     globals()["SUBREDDITS"] = ["_selftest_sub", "_selftest_other"]
     globals()["_refilled"] = True                 # no archive is to be touched
@@ -794,7 +758,7 @@ if __name__ == "__main__":
                 ("_sp_fight", "_selftest_sub", MIN_SCORE + 10, 900, 0.72),
                 ("_sp_spent", "_selftest_sub", MIN_SCORE + 10, 900, 0.72),
                 ("_sp_gone", "_selftest_other", MIN_SCORE + 10, 50, 0.72),
-                ("_sp_loud", "_selftest_other", VIRAL_MIN_SCORE + 1, 900, 0.72)]
+                ("_sp_loud", "_selftest_other", LOUD_AT + 1, 900, 0.72)]
     with _db() as db:
         db.executemany("INSERT OR REPLACE INTO pool(id, sub, score, comments, "
                        "ratio, title, ts) VALUES (?,?,?,?,?,?,?)",
@@ -802,12 +766,13 @@ if __name__ == "__main__":
         db.execute("INSERT OR REPLACE INTO seen(id, score, sub, ts, lang) "
                    "VALUES ('_sp_spent', 0, '_selftest_sub', 0, ?)", (OUTPUT_LANG,))
 
-    got = [p["id"] for p in _pick(3, MIN_SCORE, MAX_SCORE)]
-    assert got == ["_sp_fight", "_sp_quiet"], got
-    assert [p["id"] for p in _pick(1, MIN_SCORE, MAX_SCORE)] == ["_sp_fight"], \
-        "the argued-over row has to come first"
-    assert [p["id"] for p in _pick(3, VIRAL_MIN_SCORE, 10_000_000)] == ["_sp_loud"], \
-        "the loud band answers on its own"
+    # One list, so the loud row competes in it rather than waiting for a band
+    # of its own: it wins here, the fight is second, the row whose post is gone
+    # is ranked third and then dropped, and the bland one does not make the cut.
+    got = [p["id"] for p in _pick(3)]
+    assert got == ["_sp_loud", "_sp_fight"], got
+    assert [p["id"] for p in _pick(1)] == ["_sp_loud"], "the top row is the choice"
+    assert [p["id"] for p in _pick(4)][-1] == "_sp_quiet", "bland sorts last"
     with _db() as db:
         (left,) = db.execute("SELECT COUNT(*) FROM pool WHERE id='_sp_gone'").fetchone()
         assert left == 0, "a post that has gone must not be ranked again"
@@ -901,7 +866,7 @@ if __name__ == "__main__":
     arctic = fetch(3)
     assert arctic, "arctic shift returned nothing - the fallback is dead"
     for p in arctic:
-        assert MIN_SCORE <= p["score"] < MAX_SCORE, f"out of band: {p['score']}"
+        assert p["score"] >= MIN_SCORE, f"below the floor: {p['score']}"
     print(f"fallback ok: {len(arctic)} posts from arctic shift")
     _pullpush = real_pullpush
 

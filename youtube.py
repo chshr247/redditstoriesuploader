@@ -32,9 +32,9 @@ from pathlib import Path
 
 import tags as tags_          # `tags` is the local variable in description_for
 from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL, OUT_DIR,
-                    VIRAL_MIN_SCORE, YT_CLIENT_ID, YT_CLIENT_SECRET,
-                    YT_MIN_GAP_HOURS, YT_PAUSED_UNTIL, YT_PER_DAY,
-                    YT_REFRESH_KEY, YT_REFRESH_TOKEN, YT_VIRAL_ONLY, save_env)
+                    YT_CLIENT_ID, YT_CLIENT_SECRET, YT_MIN_GAP_HOURS,
+                    YT_PAUSED_UNTIL, YT_PER_DAY, YT_REFRESH_KEY,
+                    YT_REFRESH_TOKEN, save_env)
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -252,35 +252,20 @@ def _split(mp4: Path) -> bool:
     return _meta_for(mp4).get("total", 0) > 1
 
 
-def _loud(mp4: Path) -> bool:
-    """Is this story loud enough for this channel's YouTube, if it is picky?
-
-    The score is read back off disk rather than asked of Reddit again: it is
-    what the post scored when it was chosen, and that is the number the band
-    was judged on. A file with no score in its meta predates this filter, so
-    under YT_VIRAL_ONLY it is not loud - refusing an unknown is the safe way
-    round when the whole point is that ordinary stories stop going up.
-
-    Not folded into due(): --force is a human saying "publish now", and the
-    bar is not a clock to be waited out. There is nothing to force past.
-    """
-    return not YT_VIRAL_ONLY or _meta_for(mp4).get("score", 0) >= VIRAL_MIN_SCORE
-
-
 def pending() -> list:
     """This channel's rendered videos that have not been uploaded, oldest first.
 
     Parts of a split story are not among them - see _split(). Nothing else
     filters them out later, so a part rendered by a TikTok run simply sits in
     out/ as far as YouTube is concerned, and never blocks the queue behind it.
-    An ordinary-band story under YT_VIRAL_ONLY is invisible here the same way,
-    and for the same reason: TikTok still takes it, so it is not stuck, it just
-    is not this platform's.
+    Whole stories all queue here now: the score bar this used to apply on top
+    (YT_VIRAL_ONLY) assumed TikTok was taking everything it refused, which was
+    never true for a channel with TikTok switched off.
     """
     with _db() as db:
         done = {r[0] for r in db.execute("SELECT file FROM uploaded")}
     return sorted((p for p in OUT_DIR.glob("*.mp4")
-                   if p.name not in done and _mine(p) and not _split(p) and _loud(p)),
+                   if p.name not in done and _mine(p) and not _split(p)),
                   key=lambda p: p.stat().st_mtime)
 
 
