@@ -24,6 +24,7 @@ import sqlite3
 import time
 import urllib.request
 
+import safety
 from config import (DB_PATH, LLM_BASE_URL, LLM_MODEL, OPENAI_API_KEY,
                     OUTPUT_LANG)
 
@@ -66,6 +67,11 @@ MIN_LEN, MAX_LEN = 60, 280
 # Against a median of 71 that is most of the difference between a block read in
 # eight seconds and one read in fifteen, for no extra model call.
 SURPLUS = 3
+# What the model writes on the line of a fact it refuses. The refusal shares
+# the translation call, so the filter costs nothing extra - and it keeps the
+# one-line-per-fact contract, which is what lets a short answer still be caught
+# as a broken answer rather than read as three refusals.
+SKIP = "SKIP"
 # The endpoint is random, so a request can come back with a fact already spent
 # or one outside the length band. At a 70% hit rate the surplus above is
 # reached in about nine, and a cap at all is what keeps an API that has started
@@ -119,7 +125,20 @@ SYSTEM = {
         "Ничего не добавляй, не убирай и не выдумывай — только перевод. "
         "Пиши живым разговорным языком, как подпись под коротким видео. "
         "Меры переводи в метрические (мили в километры, фунты в килограммы). "
-        "Без markdown, без кавычек вокруг факта."
+        "Без markdown, без кавычек вокруг факта.\n"
+        f"Факт, который не сработает в подписи, не переводи — напиши {SKIP} "
+        "на его строке вместо перевода. Не сработает:\n"
+        "— тот, что держится на английском языке: игра слов, расшифровка "
+        "аббревиатуры, происхождение или написание английского слова. "
+        "По-русски от такого факта не остаётся ничего;\n"
+        "— тот, что требует специальных знаний: термины из биологии, химии, "
+        "геометрии, за которыми зритель пошёл бы в поиск;\n"
+        "— тот, что опирается на имя, фильм, книгу или бренд, которых "
+        "русский зритель может не знать.\n"
+        "Остаётся тот, который человек понимает с одного прочтения с телефона "
+        "и может тут же пересказать другу. "
+        f"Строк в ответе ровно столько же, сколько на входе, включая {SKIP}, "
+        "и номера те же."
     ),
 }
 
@@ -127,6 +146,16 @@ log = logging.getLogger(__name__)
 
 _URL = re.compile(r"https?://|www\.")
 _NUMBERED = re.compile(r"^\s*\d+\s*[.)]\s*(.+?)\s*$", re.M)
+
+
+def _refused(line: str) -> bool:
+    """Whether the model threw this fact out instead of translating it.
+
+    Compared whole rather than by prefix: a refusal is the marker and nothing
+    else, so a translated fact that happens to open on the same letters is
+    still a fact. The line comes back with the model's own punctuation.
+    """
+    return line.strip().rstrip(".").upper() == SKIP
 
 
 def _db():
@@ -172,15 +201,33 @@ def _fetch(alive: list) -> str:
 def _usable(text: str) -> bool:
     # A fact carrying a URL is a citation that got into the text field, and it
     # reads as spam in a caption even when it is genuine.
-    return MIN_LEN <= len(text) <= MAX_LEN and not _URL.search(text)
+    #
+    # The content gate belongs here and not only on the story: this block is the
+    # one text in the caption that comes from a third party, and it reached the
+    # upload without ever meeting safety.blocked(), which every other line has
+    # to pass. The endpoint deals in trivia, and trivia includes suicide rates,
+    # what used to be in Coca-Cola and who was nominated for a Nobel in 1939 -
+    # all true, all unpostable under a video.
+    #
+    # Checked on the English original, before the model is called, so a refused
+    # fact costs nothing. The patterns carry both languages, so they read the
+    # source as well as they read the translation.
+    return (MIN_LEN <= len(text) <= MAX_LEN and not _URL.search(text)
+            and not safety.blocked(text))
 
 
 def _translate(texts: list[str], lang: str) -> list[str]:
-    """The same facts in `lang`, or [] if the model gave back a different set.
+    """The same facts in `lang`, one per input, "" where the model refused one.
 
-    A partial translation is the one outcome worth refusing: three lines where
-    one is still English is worse on a Russian account than no block at all,
-    and it is the failure a length check catches for free.
+    [] if the model gave back a different set. A partial translation is the one
+    outcome worth refusing: three lines where one is still English is worse on a
+    Russian account than no block at all, and it is the failure a length check
+    catches for free. A refusal is not that failure - it is a line the model
+    filled in on purpose, so the count still matches and only the caller decides
+    what a hole means.
+
+    A channel with no prompt of its own gets its facts back untouched, which is
+    also the English channel's behaviour: no call, no translation, no filter.
     """
     if lang not in SYSTEM:
         return texts
@@ -198,7 +245,7 @@ def _translate(texts: list[str], lang: str) -> list[str]:
     if len(out) != len(texts):
         log.warning("facts: asked for %d lines, got %d", len(texts), len(out))
         return []
-    return out
+    return ["" if _refused(t) else t for t in out]
 
 
 def take(n: int = WANT, lang: str = "") -> list[str]:
@@ -229,22 +276,45 @@ def take(n: int = WANT, lang: str = "") -> list[str]:
         log.warning("facts: got %d of %d, skipping the block", len(fresh), n)
         return []
 
+    # Every candidate goes to the model, not just the longest n. The call is
+    # the quality filter as well as the translator - the endpoint deals in
+    # English trivia, and a good share of it is trivia ABOUT English, which
+    # translates into nothing at all - so which facts survive is not known until
+    # it has answered, and ranking before that would rank the rejects too.
+    ids = list(fresh)
+    out = _translate([fresh[i] for i in ids], lang)
+    if len(out) != len(ids):
+        return []
+    done = dict(zip(ids, out))
+    now = time.time()
+
+    def burn(rows):
+        with db:
+            db.executemany("INSERT OR REPLACE INTO facts(id, lang, text, ts) "
+                           "VALUES (?,?,?,?)", rows)
+
+    # A refusal is spent the moment it is made, and spent whether or not a block
+    # gets built on top of it. Nobody ever reads these, so the usual reason to
+    # hold the write back does not apply - and left unburned they would come
+    # back tomorrow to be fetched, translated and refused a second time.
+    refused = [(i, lang, "", now) for i in ids if not done[i]]
+    if refused:
+        burn(refused)
+        log.info("facts: %d of %d refused as unusable", len(refused), len(ids))
+
     # Longest first, then back into fetch order: the block is nicer to read
     # when it does not climb from a one-liner to a paragraph every time.
-    keep = set(sorted(fresh, key=lambda i: len(fresh[i]), reverse=True)[:n])
-    ids = [i for i in fresh if i in keep]
-    out = _translate([fresh[i] for i in ids], lang)
-    if len(out) != n:
+    top = set(sorted((i for i in ids if done[i]),
+                     key=lambda i: len(fresh[i]), reverse=True)[:n])
+    if len(top) < n:
+        log.warning("facts: %d usable of %d, skipping the block", len(top), len(ids))
         return []
+    keep = [i for i in ids if i in top]
 
     # Written only once the translation is in hand: a fact burned on a caption
     # that was never built is a fact nobody ever sees.
-    now = time.time()
-    with db:
-        db.executemany("INSERT OR REPLACE INTO facts(id, lang, text, ts) "
-                       "VALUES (?,?,?,?)",
-                       [(i, lang, t, now) for i, t in zip(ids, out)])
-    return out
+    burn([(i, lang, done[i], now) for i in keep])
+    return [done[i] for i in keep]
 
 
 def block(lang: str = "", lead: str = "") -> str:
@@ -283,7 +353,12 @@ if __name__ == "__main__":
     # Bigger than any one test needs: the table below is never reset, so every
     # take() eats into it for good, and a pool sized to the first test would
     # have the last one failing for want of facts rather than for a bug.
-    _pool = [f"Fact number {i}, " + "long enough " * 5 for i in range(60)]
+    # The tests that serve iter(_pool) all restart at the front, so what they
+    # actually see is the first TRIES entries with the spent ones skipped. That
+    # window is small, and a test that spends the front of it starves every test
+    # after it - so the filter tests below take slices of their own from further
+    # in, and the front stays theirs.
+    _pool = [f"Fact number {i}, " + "long enough " * 5 for i in range(200)]
     _served = iter(_pool)
     _real_fetch = _fetch                    # kept for the fallthrough test below
     _fetch = lambda alive: next(_served, "")                    # noqa: E731
@@ -297,6 +372,19 @@ if __name__ == "__main__":
     assert _usable("x" * 100) and not _usable("short")
     assert not _usable("x" * 100 + " https://a.b"), "a citation is not a fact"
     assert not _usable("x" * 999)
+
+    # Facts the endpoint really serves, all true, none of them postable. This
+    # block used to be the one caption line no content gate ever saw.
+    for _banned in [
+        "Around one million people worldwide commit suicide every single year.",
+        "Cocaine was an official listed ingredient of Coca-Cola until 1903.",
+        "Adolf Hitler was nominated for the Nobel Peace Prize back in 1939.",
+    ]:
+        assert not _usable(_banned), f"the gate let this through: {_banned}"
+    # ...and the gate stays as narrow here as it is on a story: an ordinary
+    # fact about an ordinary grim thing is still an ordinary fact.
+    assert _usable("In 1386, a pig in France was executed by public hanging "
+                   "for the murder of a child, dressed in human clothes.")
     assert _dig({"data": [{"a": {"b": "found"}}]}, ("data", 0, "a", "b")) == "found"
     # Every source has to name a path that _dig can walk, or a live fallback is
     # a KeyError discovered on the day the primary goes down.
@@ -363,6 +451,45 @@ if __name__ == "__main__":
     _served = iter(_pool)
     _translate = lambda texts, lang: ["only one line"]           # noqa: E731
     assert take(3, "ru") == [], "a partial translation must not reach a caption"
+
+    # The marker is the whole line, never a prefix: a translated fact that
+    # happens to start on those letters is a fact, not a refusal.
+    assert _refused("SKIP") and _refused(" skip. ") and _refused("Skip")
+    assert not _refused("SKIP the queue and pay double, that is what a tip is")
+    assert not _refused("Мёд не портится тысячи лет."), "a real fact is not a refusal"
+    assert SKIP in SYSTEM["ru"], "the model is never told what to write to refuse"
+
+    # A refused fact must not reach the caption, and must not come back to be
+    # fetched and judged a second time - the whole point of paying for the
+    # judgement once. Refusing the first of every batch means the block is built
+    # from the survivors, and the refused ones are gone for good.
+    _seen_by_model: list[str] = []
+
+    def _picky(texts, lang):                                     # noqa: E731
+        _seen_by_model.extend(texts)
+        return ["" if i == 0 else f"ru:{t}" for i, t in enumerate(texts)]
+
+    _translate = _picky
+    _served = iter(_pool[100:])
+    _built = take(3, "ru")
+    assert len(_built) == 3 and all(t.startswith("ru:") for t in _built), _built
+    assert "" not in _built, "a refusal reached the caption"
+    # The refused one is the first of the batch, by _picky above. A candidate
+    # that was merely not the longest is NOT spent and is meant to come back -
+    # only the refusal is final.
+    _thrown_out = _seen_by_model[0]
+    _seen_by_model.clear()
+    _served = iter(_pool[100:])
+    take(3, "ru")
+    assert _thrown_out not in _seen_by_model, \
+        "a refused fact came back to be judged again"
+    assert _seen_by_model, "the second batch judged nothing at all"
+
+    # Not enough survivors is the same outcome as not enough facts: no block,
+    # never a short one. Everything refused, so nothing can be kept.
+    _translate = lambda texts, lang: [""] * len(texts)            # noqa: E731
+    _served = iter(_pool[150:])
+    assert take(3, "ru") == [], "a block was built out of refusals"
 
     _translate = lambda texts, lang: [f"ru:{t}" for t in texts]  # noqa: E731
     _served = iter(_pool)
