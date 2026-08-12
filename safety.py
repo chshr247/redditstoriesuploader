@@ -19,11 +19,21 @@ import re
 BANNED = {
     # no word boundaries: the code hides inside usernames like "Soundman1488"
     "hate_code": r"1488",
+    # `hitler` on its own, not only inside "heil hitler". The Russian half has
+    # always had the bare гитлер\w*, and the English half listing him only in a
+    # compound was an oversight rather than a decision - a fact block came back
+    # with "Adolf Hitler was nominated for the Nobel Peace Prize" and walked
+    # straight through. Same for суицид below.
     "hate": r"\b(нацис\w*|нацизм\w*|гитлер\w*|свастик\w*|зиг\s*хайль|хайль\s*гитлер|"
-            r"nazi\w*|swastika|heil\s+hitler|white\s+power|ku\s*klux|kkk)\b",
+            r"nazi\w*|swastika|hitler|heil\s+hitler|white\s+power|ku\s*klux|kkk)\b",
     "sexual_minor": r"\b(педофил\w*|малолетк\w*|pedophil\w*|child\s+porn|underage\s+(sex|girl|boy))\b",
     "sexual_violence": r"\b(изнасилов\w*|изнасил\w*|rape[drs]?|raping|molest\w*|sexual\s+assault)\b",
-    "self_harm": r"\b(суицид\w*|самоубийств\w*|self[\s-]?harm|"
+    # suicid\w* costs the odd "career suicide" and it is worth it: this is the
+    # one word TikTok actions most reliably, and the Russian half has blocked
+    # самоубийств\w* unconditionally from the start - карьерное самоубийство
+    # included. The trade was already taken on one language and simply missed on
+    # the other.
+    "self_harm": r"\b(суицид\w*|самоубийств\w*|self[\s-]?harm|suicid\w*|"
                  r"kill(ed|ing)?\s+(my|him|her)self|повесил\w*\s+себя|вскрыл\w*\s+вены)\b",
     "extreme_violence": r"\b(теракт\w*|расстрел\w*|terrorist\s+attack|school\s+shooting|"
                         r"mass\s+shooting|beheaded|расчлен\w*)\b",
@@ -75,6 +85,15 @@ if __name__ == "__main__":
     assert blocked("TIFU by asking Reddit which ethnic group to exterminate"
                    ).startswith("genocide:")
     assert blocked("какую расу истребить").startswith("genocide:")
+
+    # Every category has to fire on BOTH languages. The source is English and
+    # the caption's fact block is English until the model touches it, so a term
+    # listed in Russian only is a term this gate does not have. Both of these
+    # were exactly that, and both reached a caption.
+    assert blocked("my brother died by suicide").startswith("self_harm:")
+    assert blocked("he was suicidal for months").startswith("self_harm:")
+    assert blocked("Adolf Hitler was nominated for a Nobel Peace Prize"
+                   ).startswith("hate:")
 
     # narrow on purpose: these must NOT fire
     for ok in ["I was born in 1988", "we had to kill time at the airport",
