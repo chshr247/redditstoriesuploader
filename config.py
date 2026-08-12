@@ -153,22 +153,29 @@ WHISPER_SIZE = os.getenv("WHISPER_SIZE", "base")
 SUBREDDITS = [s.strip() for s in
               chan_env("SUBREDDITS", "tifu", shared=True).split(",") if s.strip()]
 MIN_SCORE = int(os.getenv("MIN_SCORE", 3000))
+# The day's one deliberate exception. The ordinary band below is chosen for
+# being relatable, which is not the same as being watched: a day of nothing but
+# ordinary stories has no peak in it. So the first video of each day is taken
+# from ABOVE the ceiling instead - the loudest thing the subs have, whatever
+# made it loud. Everything after it comes from the ordinary band as before.
+#
+# 25000 rather than 40000 since 2026-08-12: with YT_VIRAL_ONLY this is also the
+# bar YouTube publishes at, and at 40000 the English channel's subs were not
+# clearing it - its loudest story on 08-12 scored 25312 and the viral fetch came
+# back empty all day.
+VIRAL_MIN_SCORE = int(os.getenv("VIRAL_MIN_SCORE", 25000))
 # Ceiling, not a typo. Above this a post went viral for Reddit-internal reasons
 # - memes, meta drama, war, death - not because the story is good. The band
 # between MIN and MAX is where ordinary relatable stories live.
 #
-# It sits exactly on VIRAL_MIN_SCORE and not below it, which matters: fetch()
-# takes [MIN_SCORE, MAX_SCORE) and fetch_viral() takes [VIRAL_MIN_SCORE, inf),
-# so any gap between the two is a band of posts NEITHER call can reach. At
-# 30000 that lost everything from 30000 to 39999 - six of the stories in
-# plan_ru.md alone. Raise VIRAL_MIN_SCORE and this has to follow it up.
-MAX_SCORE = int(os.getenv("MAX_SCORE", 40000))
-# ...with one deliberate exception a day. The ordinary band is chosen for being
-# relatable, which is not the same as being watched: a day of nothing but
-# ordinary stories has no peak in it. So the first video of each day is taken
-# from ABOVE the ceiling instead - the loudest thing the subs have, whatever
-# made it loud. Everything after it comes from the ordinary band as before.
-VIRAL_MIN_SCORE = int(os.getenv("VIRAL_MIN_SCORE", 40000))
+# It follows VIRAL_MIN_SCORE rather than carrying a number of its own, because
+# the two have to meet exactly: fetch() takes [MIN_SCORE, MAX_SCORE) and
+# fetch_viral() takes [VIRAL_MIN_SCORE, inf), so a GAP between them is a band of
+# posts neither call can reach - at 30000 against 40000 that lost everything
+# between the two, six of the stories in plan_ru.md alone - and an OVERLAP is a
+# band both reach, where an ordinary pick quietly spends the day's viral slot.
+# Moving the floor now moves this with it; setting MAX_SCORE is opting out.
+MAX_SCORE = int(os.getenv("MAX_SCORE", VIRAL_MIN_SCORE))
 # Per UTC day, matching the allowance reset the rest of the pipeline uses. More
 # than one and the exception stops being one.
 VIRAL_PER_DAY = int(os.getenv("VIRAL_PER_DAY", 1))

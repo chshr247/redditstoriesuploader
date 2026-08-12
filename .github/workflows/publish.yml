@@ -133,10 +133,13 @@ jobs:
       # laugh. Unset arrives empty, config.py reads that as absent and both
       # channels go back to sharing SUBREDDITS.
       SUBREDDITS_EN: ${{ vars.SUBREDDITS_EN }}
-      # The day's one loud video, taken from above MAX_SCORE. A knob because
-      # the right floor depends on which subs are in the list: 40k is roughly
-      # 200 usable posts across the six above, and raising it thins that fast.
-      VIRAL_MIN_SCORE: ${{ vars.VIRAL_MIN_SCORE || '40000' }}
+      # The day's one loud video, taken from above MAX_SCORE - and under
+      # YT_VIRAL_ONLY the bar YouTube publishes at as well. A knob because the
+      # right floor depends on which subs are in the list: 40k was roughly 200
+      # usable posts across the six ru ones and almost nothing across the en
+      # ones, which is why it now stands at 25k. MAX_SCORE is deliberately not
+      # set here - it follows this value so the two bands keep meeting.
+      VIRAL_MIN_SCORE: ${{ vars.VIRAL_MIN_SCORE || '25000' }}
       VIRAL_PER_DAY: ${{ vars.VIRAL_PER_DAY || '1' }}
       TTS_BACKEND: fish
       SUBTITLE_FONT: Arial Black
