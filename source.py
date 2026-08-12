@@ -1,13 +1,22 @@
-"""Step 1: story sourcing. Backend is the pullpush.io archive: no keys, no approval.
+"""Step 1: story sourcing. Backends are the pullpush.io and arctic shift
+archives: no keys, no approval.
 
-We walk each subreddit top-down by score. Used posts go into sqlite, and the
-lowest used score becomes the cursor, so every run picks up the next batch
-instead of the same top posts.
+Harvesting and choosing are two different acts here, and the `pool` table is
+what separates them. A run picks the best story out of everything harvested so
+far; only a run that finds the choice too thin pays to widen it, and then it
+pays in bulk. Before that split, one run meant one archive read per sub, and the
+run was therefore only ever as good as the window it happened to draw.
 
-pullpush goes down for hours at a time (502s across every sub, and then the run
-makes no video at all), so arctic shift stands behind it - same archive, same
-post shape, no key either. It cannot sort or filter by score, only by time, so
-it reads a random window of days and the band is filtered here instead.
+We walk each subreddit top-down by score, and the lowest score already harvested
+is the cursor, so every refill picks up below the last one instead of re-reading
+the same top posts. That only works on pullpush, which has a score index.
+
+pullpush goes down for hours at a time (502s across every sub, and it has been
+down more often than up lately), so arctic shift stands behind it - same
+archive, same post shape, no key either. It cannot sort or filter by score, only
+by time, so it reads a random window of days and the band is filtered here
+instead. The pool matters most exactly then: a random window almost never holds
+a loud post, but a few hundred windows do.
 """
 import datetime
 import html
@@ -56,6 +65,14 @@ def _db():
                "gender TEXT, voice TEXT, sub TEXT, ts REAL, "
                "done INT DEFAULT 0, tries INT DEFAULT 0, "
                "PRIMARY KEY(post_id, n))")
+    # Candidates harvested ahead of time, so choosing a story and finding one
+    # are no longer the same act - see POOL_LOW. Not per language: what has been
+    # harvested is available to every channel whose sub list covers it, and
+    # `seen` is what says who has already spent it. Rows are kept after use for
+    # exactly that reason, so the second channel can still be offered the story.
+    db.execute("CREATE TABLE IF NOT EXISTS pool("
+               "id TEXT PRIMARY KEY, sub TEXT, score INT, comments INT, "
+               "ratio REAL, title TEXT, ts REAL)")
     _add_lang(db)
     return db
 
@@ -182,45 +199,110 @@ CONTESTED = re.compile(
 # crowding out everything else.
 ARGUMENTATIVE = 10
 
+# The third signal, and the only one that is a measurement rather than a guess:
+# upvote_ratio is the share of votes that were up, i.e. how much of the sub
+# disagreed with the post itself. It rides along in every archive response and
+# costs nothing to read. Measured on a settled window of r/AmItheAsshole,
+# 2026-08-12: the story everyone agreed with sat at 0.96-0.98, and the one that
+# drew 897 comments on 1054 upvotes - the fight - sat at 0.85.
+#
+# Below AGREED_AT the signal starts counting and it saturates at DISPUTED_AT.
+# A missing or zero ratio scores nothing rather than something: pullpush rows
+# and old archive dumps do not always carry the field, and an absent measurement
+# must not read as a calm one.
+AGREED_AT, DISPUTED_AT = 0.95, 0.70
 
-def contested(title: str, comments: int, score: int) -> float:
-    """0..2, higher when a post looks like a fight rather than a verdict."""
+
+def _disputed(ratio: float | None) -> float:
+    """0..1, how far this post's upvote ratio is into fight territory."""
+    if not ratio:
+        return 0.0
+    return min(max((AGREED_AT - ratio) / (AGREED_AT - DISPUTED_AT), 0.0), 1.0)
+
+
+def contested(title: str, comments: int, score: int,
+              ratio: float | None = None) -> float:
+    """0..3, higher when a post looks like a fight rather than a verdict."""
     return (bool(CONTESTED.search(title))
-            + min(comments * ARGUMENTATIVE / max(score, 1), 1.0))
+            + min(comments * ARGUMENTATIVE / max(score, 1), 1.0)
+            + _disputed(ratio))
 
 
-def _harvest(limit: int, floor: int, ceiling: int) -> list[dict]:
-    """Up to `limit` unused posts scored inside [floor, ceiling), best first.
+# How thin the choice may get before a run pays to widen it, and how many
+# archive reads it may pay. Measured 2026-08-12, twelve two-day windows of
+# r/AmItheAsshole spread over four years: 166-253 posts each, of which 0-5
+# cleared 3000 and NONE cleared 25000. One window per run is therefore not a
+# pool, it is a coin flip - and the loud band cannot be reached by flipping it.
+# The pool is what turns "what did this window happen to hold" into "the best of
+# everything harvested so far", and it is also the only way the viral slot ever
+# fills while pullpush is down.
+POOL_LOW = 40        # unused rows this channel can still choose from
+POOL_WINDOWS = 8     # archive reads one refill is allowed to spend
 
-    Every subreddit is walked top-down independently: the cursor for one is the
-    weakest post already used out of ITS OWN band, so a sub whose band is spent
-    returns nothing and the next one answers instead. That is what makes the
-    viral band survivable at all - no single sub has a year of 40k posts in it.
+# One refill per process. A run asks the pool twice - once for the loud band and
+# once for the ordinary one - and if the first refill did not lift it above the
+# mark (every archive down, or the subs simply spent), the second must not pay
+# for the same eight requests again.
+_refilled = False
 
-    "Best" is contested() - the argument, not the score. Every sub is read
-    rather than stopping at the first one that fills the pool: a pool taken from
-    whichever sub was drawn first cannot be ranked, since the ranking's whole
-    job is to choose BETWEEN the subs. That costs one request per sub per run.
+
+def _cursor(db, sub: str) -> int:
+    """Where pullpush's downward walk resumes for this sub.
+
+    The weakest score already HARVESTED, not the weakest already used: the pool
+    is the frontier now, and a walk keyed on `seen` would re-fetch everything
+    harvested but not yet spent. Deliberately not per language either - what has
+    been fetched has been fetched, whoever ends up telling it.
     """
-    db = _db()
-    out = []
-    seen = {r[0] for r in db.execute("SELECT id FROM seen WHERE lang=?",
-                                     (OUTPUT_LANG,))}
-    # Still shuffled, so that a tie in the ranking does not always fall the same
-    # way - twenty-six of the first twenty-seven stories came from one sub back
-    # when the order was fixed and the loop stopped at the first full pool.
-    for sub in random.sample(SUBREDDITS, len(SUBREDDITS)):
-        # Per channel, like the seen set above. A shared cursor would start the
-        # second channel wherever the first one has already got to, and every
-        # story between the two positions would never be told in that language.
-        row = db.execute(
-            "SELECT MIN(score) FROM seen WHERE sub=? AND lang=? AND score>=?",
-            (sub, OUTPUT_LANG, floor)).fetchone()
-        top = min(row[0], ceiling) if row[0] else ceiling
-        if top <= floor:
-            log.info("r/%s: nothing left above %d, trying another sub", sub, floor)
-            continue
+    (low,) = db.execute(
+        "SELECT MIN(score) FROM (SELECT score FROM pool WHERE sub=? "
+        "UNION ALL SELECT score FROM seen WHERE sub=?)", (sub, sub)).fetchone()
+    return low or 10_000_000
 
+
+def _store(db, sub: str, posts: list[dict]) -> int:
+    """Put the usable posts of one archive read into the pool, return how many.
+
+    The body is filtered on here and then dropped: it is the only large field,
+    seen.db is committed on every run, and a pool that carried 2 KB of text per
+    row would put megabytes of binary churn into the history. What survives is
+    an index - id, band, and the two signals ranking needs. _bodies() fetches
+    the text back for the handful of rows a run actually looks at.
+    """
+    rows = []
+    for p in posts:
+        if p.get("score", 0) < MIN_SCORE or not _usable(p):
+            continue
+        title, text = _clean(p["title"]), _clean(p["selftext"])
+        # cheapest possible gate: reject here and the story never costs an LLM call
+        if hit := safety.blocked(title, text):
+            log.info("skipping %s (%s)", p["id"], hit)
+            continue
+        rows.append((p["id"], sub, p["score"], p.get("num_comments", 0),
+                     p.get("upvote_ratio") or 0.0, title, time.time()))
+    before = db.total_changes
+    db.executemany("INSERT OR IGNORE INTO pool(id, sub, score, comments, ratio, "
+                   "title, ts) VALUES (?,?,?,?,?,?,?)", rows)
+    return db.total_changes - before
+
+
+def refill(db, windows: int = POOL_WINDOWS) -> int:
+    """Harvest into the pool: `windows` archive reads spread over the subs.
+
+    Shuffled, so a tie in the ranking does not always fall the same way -
+    twenty-six of the first twenty-seven stories came from one sub back when the
+    order was fixed. pullpush is asked first because its walk is ordered by
+    score and therefore reaches the loud band on purpose; arctic shift only ever
+    reaches it by luck, which is what the measurement above is about.
+    """
+    added = 0
+    subs = random.sample(SUBREDDITS, len(SUBREDDITS))
+    for i in range(windows):
+        sub = subs[i % len(subs)]
+        top = _cursor(db, sub)
+        if top <= MIN_SCORE:
+            log.info("r/%s: nothing left above %d, trying another sub", sub, MIN_SCORE)
+            continue
         try:
             posts = _pullpush(sub, top)
         except DOWN as e:
@@ -230,51 +312,115 @@ def _harvest(limit: int, floor: int, ceiling: int) -> list[dict]:
             except DOWN as e:
                 log.warning("r/%s: no source available (%s), skipping", sub, e)
                 continue
+        got = _store(db, sub, posts)
+        log.info("r/%s: %d new candidates out of %d", sub, got, len(posts))
+        added += got
+    db.commit()
+    return added
 
-        found = 0
-        for p in posts:
-            # Capped per sub, or one sub with a hundred usable posts fills the
-            # pool on its own again and the ranking has nothing to choose from.
-            if found >= limit:
-                break
-            # The ceiling is enforced here and not only in the request, because
-            # arctic shift cannot filter on score - its window comes back with
-            # the whole band range in it. pullpush already caps at `top`, which
-            # is the tighter of the two, so this changes nothing for it.
-            if p["id"] in seen or not floor <= p["score"] < ceiling or not _usable(p):
-                continue
-            title, text = _clean(p["title"]), _clean(p["selftext"])
-            # cheapest possible gate: reject here and the story never costs an LLM call
-            hit = safety.blocked(title, text)
-            if hit:
-                log.info("skipping %s (%s)", p["id"], hit)
-                continue
-            found += 1
-            out.append({"id": p["id"], "sub": sub, "score": p["score"],
-                        "title": title, "text": text,
-                        "rank": contested(title, p.get("num_comments", 0),
-                                          p["score"])})
-        log.info("r/%s: %d candidates out of %d", sub, found, len(posts))
+
+def _bodies(ids: list[str]) -> dict[str, dict]:
+    """The full posts behind a handful of pool rows, in one request for all.
+
+    Raises the DOWN family when neither archive answers: a run that cannot read
+    the bodies has nothing to tell, and that is the same failure as an empty
+    pool, not a reason to spend a story on a half-read post.
+    """
+    joined = ",".join(ids)
+    try:
+        data = _api(ARCTIC_IDS, ids=joined)
+    except DOWN as e:
+        log.warning("arctic shift unavailable (%s), trying pullpush", e)
+        data = _api(API, ids=joined)
+    return {p["id"]: p for p in data}
+
+
+def _pick(limit: int, floor: int, ceiling: int) -> list[dict]:
+    """Up to `limit` unused pool stories inside [floor, ceiling), best first.
+
+    "Best" is contested() - the argument, not the score. Nothing here spreads
+    the answer across subs on purpose; that is refill()'s job, which shuffles
+    and reads every sub in turn. A cap here would be theatre anyway - a run
+    takes the FIRST story the prompt accepts, so the only row that really
+    matters is the top one.
+    """
+    global _refilled
+    db = _db()
+    subs = ",".join("?" * len(SUBREDDITS))
+    unused = (f"SELECT id, sub, score, comments, ratio, title FROM pool "
+              f"WHERE sub IN ({subs}) AND score >= ? AND score < ? AND id NOT IN "
+              "(SELECT id FROM seen WHERE lang=?)")
+    rows = db.execute(unused, (*SUBREDDITS, floor, ceiling, OUTPUT_LANG)).fetchall()
+
+    # Two reasons to go harvesting, and the band one is not covered by the
+    # count: a pool holding two hundred ordinary stories and no loud one is
+    # comfortably above the mark and still has nothing to answer the viral slot
+    # with. Without this the loud band would go quiet for good the moment the
+    # ordinary one filled up.
+    if not _refilled:
+        (left,) = db.execute(
+            f"SELECT COUNT(*) FROM pool WHERE sub IN ({subs}) AND id NOT IN "
+            "(SELECT id FROM seen WHERE lang=?)",
+            (*SUBREDDITS, OUTPUT_LANG)).fetchone()
+        if not rows or left < POOL_LOW:
+            log.info("pool: %d left to choose from, %d of them in [%d, %d) - "
+                     "refilling", left, len(rows), floor, ceiling)
+            _refilled = True
+            log.info("pool: +%d rows", refill(db))
+            rows = db.execute(unused,
+                              (*SUBREDDITS, floor, ceiling, OUTPUT_LANG)).fetchall()
+
+    ranked = [{"id": pid, "sub": sub, "score": score, "title": title,
+               "rank": contested(title, comments, score, ratio)}
+              for pid, sub, score, comments, ratio, title in
+              sorted(rows, key=lambda r: contested(r[5], r[3], r[2], r[4]),
+                     reverse=True)[:limit]]
+    if not ranked:
+        log.info("pool: nothing in [%d, %d) for this channel", floor, ceiling)
+        db.close()
+        return []
+
+    try:
+        full = _bodies([p["id"] for p in ranked])
+    except DOWN as e:
+        log.error("no archive available for the bodies (%s) - nothing this run", e)
+        db.close()
+        return []
+
+    out = []
+    for p in ranked:
+        raw = full.get(p["id"])
+        # Gone since it was harvested, or edited down to nothing. Drop the row:
+        # left in place it would rank just as high next run and cost the same
+        # request again.
+        if raw is None or not _tellable(raw):
+            log.info("%s is gone or can no longer be told, dropping it", p["id"])
+            db.execute("DELETE FROM pool WHERE id=?", (p["id"],))
+            continue
+        title, text = _clean(raw["title"]), _clean(raw["selftext"])
+        if hit := safety.blocked(title, text):
+            log.info("skipping %s (%s)", p["id"], hit)
+            db.execute("DELETE FROM pool WHERE id=?", (p["id"],))
+            continue
+        out.append({**p, "title": title, "text": text})
+    db.commit()
     db.close()
-    # Contested first. main.py walks this list in order and stops once it has
-    # its videos, so the order IS the priority.
-    out.sort(key=lambda p: p["rank"], reverse=True)
-    return out[:limit]
+    return out
 
 
 def fetch(limit: int = 3) -> list[dict]:
     """Return up to `limit` unused stories from the ordinary band."""
-    return _harvest(limit, MIN_SCORE, MAX_SCORE)
+    return _pick(limit, MIN_SCORE, MAX_SCORE)
 
 
 def fetch_viral(limit: int = 3) -> list[dict]:
     """The same, from above the MAX_SCORE ceiling: the day's one loud story.
 
-    Deliberately not filtered any further. What made a post reach 40k is the
-    point of taking it, so the choice of which loud story works is left to the
-    prompt's own SKIP gate, which throws out news and meta anyway.
+    Deliberately not filtered any further. What made a post reach the viral
+    floor is the point of taking it, so the choice of which loud story works is
+    left to the prompt's own SKIP gate, which throws out news and meta anyway.
     """
-    return _harvest(limit, VIRAL_MIN_SCORE, 10_000_000)
+    return _pick(limit, VIRAL_MIN_SCORE, 10_000_000)
 
 
 def viral_due() -> bool:
@@ -449,7 +595,8 @@ def next_planned() -> dict | None:
             continue
         return {"id": p["id"], "sub": p["subreddit"], "score": p["score"],
                 "title": title, "text": text, "parts": e["parts"],
-                "rank": contested(title, p.get("num_comments", 0), p["score"])}
+                "rank": contested(title, p.get("num_comments", 0), p["score"],
+                                  p.get("upvote_ratio"))}
     return None
 
 
@@ -621,6 +768,53 @@ if __name__ == "__main__":
         with _db() as db:
             db.execute("DELETE FROM seen WHERE id LIKE '_selftest%'")
         assert viral_due()
+
+    # The ranking. Ordering is the whole job here - main.py takes the first
+    # story the prompt accepts, so whatever sorts to the top IS the choice.
+    assert _disputed(None) == _disputed(0) == 0.0, "an absent ratio is not a calm one"
+    assert _disputed(0.98) == 0.0 and _disputed(0.70) == 1.0
+    assert _disputed(0.60) == 1.0, "past the far end it saturates, not overflows"
+    assert abs(_disputed(0.85) - 0.4) < 0.01, _disputed(0.85)
+    # the pair actually measured on 2026-08-12: 1054 upvotes with 897 comments
+    # at 0.85 is the fight, 7555 with 862 at 0.96 is the story everyone shared
+    assert (contested("AITA for spraying my BIL", 897, 1054, 0.85)
+            > contested("AITA for spilling my wine", 862, 7555, 0.96)), \
+        "the argued-over story has to outrank the agreed-with one"
+
+    # The pool: what a run chooses from. Rows are planted rather than harvested,
+    # since what is being tested is the reading - the band, a story already
+    # spent in THIS language, the order, and a row whose post has gone since.
+    _real = (SUBREDDITS, _refilled, _bodies)
+    globals()["SUBREDDITS"] = ["_selftest_sub", "_selftest_other"]
+    globals()["_refilled"] = True                 # no archive is to be touched
+    globals()["_bodies"] = lambda ids: {
+        i: {"id": i, "selftext": "x" * 500, "over_18": False, "title": "A story"}
+        for i in ids if i != "_sp_gone"}
+    _planted = [("_sp_quiet", "_selftest_sub", MIN_SCORE + 10, 20, 0.99),
+                ("_sp_fight", "_selftest_sub", MIN_SCORE + 10, 900, 0.72),
+                ("_sp_spent", "_selftest_sub", MIN_SCORE + 10, 900, 0.72),
+                ("_sp_gone", "_selftest_other", MIN_SCORE + 10, 50, 0.72),
+                ("_sp_loud", "_selftest_other", VIRAL_MIN_SCORE + 1, 900, 0.72)]
+    with _db() as db:
+        db.executemany("INSERT OR REPLACE INTO pool(id, sub, score, comments, "
+                       "ratio, title, ts) VALUES (?,?,?,?,?,?,?)",
+                       [(*row, "A story", time.time()) for row in _planted])
+        db.execute("INSERT OR REPLACE INTO seen(id, score, sub, ts, lang) "
+                   "VALUES ('_sp_spent', 0, '_selftest_sub', 0, ?)", (OUTPUT_LANG,))
+
+    got = [p["id"] for p in _pick(3, MIN_SCORE, MAX_SCORE)]
+    assert got == ["_sp_fight", "_sp_quiet"], got
+    assert [p["id"] for p in _pick(1, MIN_SCORE, MAX_SCORE)] == ["_sp_fight"], \
+        "the argued-over row has to come first"
+    assert [p["id"] for p in _pick(3, VIRAL_MIN_SCORE, 10_000_000)] == ["_sp_loud"], \
+        "the loud band answers on its own"
+    with _db() as db:
+        (left,) = db.execute("SELECT COUNT(*) FROM pool WHERE id='_sp_gone'").fetchone()
+        assert left == 0, "a post that has gone must not be ranked again"
+        db.execute("DELETE FROM pool WHERE id LIKE '_sp_%'")
+        db.execute("DELETE FROM seen WHERE id LIKE '_sp_%'")
+    globals()["SUBREDDITS"], globals()["_refilled"], globals()["_bodies"] = _real
+    print("pool and ranking ok")
 
     # The plan reader. It decides publication ORDER, so a plan it reads wrong
     # is a plan that is not being followed - and nothing downstream would say
