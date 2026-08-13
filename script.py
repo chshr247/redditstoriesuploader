@@ -263,17 +263,24 @@ WEAK_TITLE = {
         r")", re.IGNORECASE),
 }
 
-# Nine is what the prompt asks for; ten is the slack. A title states one fact
-# now, and a fact that needs eleven words is carrying its own explanation - which
-# is the story's job, not the card's. Past this the title also stops fitting the
-# feed's ~40-character cut, which is the whole reason it got short.
-MAX_TITLE_WORDS = 10
-# A split story gets ONE title for all of its parts, so that title has to hold
-# the whole setup rather than one video's opening - "Начальница сказала, что я
-# никто, и я перестала делать её работу" is the shape, and it does not fit in
-# ten. Two words of slack and no more: the card sets at 82px between 120px
-# margins, where twelve Russian words still come out on three lines.
-MAX_TITLE_WORDS_MULTI = 12
+# Ten was the number while a title stated one bare fact. It states two now - a
+# finished statement, then the turn that makes it absurd - and the second half
+# does not fit in what is left after the first.
+#
+# One number for ordinary videos and split ones alike. The split story's own
+# wider ceiling was also twelve, so raising this one collapsed the two into the
+# same value; a ceiling that no longer distinguishes anything is a constant
+# pretending to be a rule, so it is gone rather than kept at parity.
+#
+# Two costs, both measured rather than assumed. The card sets at 82px between
+# 120px margins, and twelve Russian words take FOUR lines, not the three the
+# old comment here claimed - "Я чуть не потеряла сознание в баре, а мой парень
+# продолжал танцевать" is the fixture that shows it. Still legible, and it is
+# the cover frame, so it is taller rather than broken. And twelve words is
+# about 4.8 seconds of narrated card against 3.6 for nine - the card IS the
+# hook, so if retention at three seconds moves the wrong way, this is the first
+# number to put back.
+MAX_TITLE_WORDS = 12
 
 # Numbers spelled out in the title: "восемьсот долларов" where "800 долларов"
 # belongs. Full words only - a stem like "пят" would fire on "пятница".
@@ -295,6 +302,27 @@ SPELLED_NUMBER = {
         r"|hundreds?|thousands?|millions?|billions?|grand)\b|\b\d+\s?k\b",
         re.IGNORECASE),
 }
+
+
+def _spelled_number(t: str, lang: str) -> str:
+    """The number written out in letters, or "" - "140 тысяч" is not one.
+
+    The rule bans a figure the eye cannot catch while scrolling, and it used to
+    fire on the scale word alone. That swept up the mixed form as well: "140
+    тысяч" HAS its digit, reads faster than "140000", and is what a person
+    actually writes - two titles in a row were refused for it. So the complaint
+    only stands when nothing in front of the scale word is a digit.
+
+    English gets the same test and keeps its own exception for free: "20k"
+    matches with the digit INSIDE the match rather than before it, so it is
+    still refused - that one is about the ear, not the eye, since the engine
+    reads it as one mumbled syllable.
+    """
+    for m in SPELLED_NUMBER[lang].finditer(t):
+        if not re.search(r"\d[\d\s]*$", t[:m.start()]):
+            return m.group()
+    return ""
+
 
 # The currency word after a figure. It buys nothing - the sum is the hook, not
 # the unit - and costs three syllables of the ~40 characters the feed shows.
@@ -377,30 +405,27 @@ def _kin_fault(text: str, lang: str = "") -> str:
 _TURN_WORDS = {"ru": '"а" or "но"', "en": '"and" or "but"'}
 
 
-def _title_fault(title: str, lang: str = "", multi: bool = False) -> str:
-    """Empty when the title is usable, otherwise what to tell the model.
-
-    `multi` is a split story, whose one title serves every part and is allowed
-    the wider ceiling - see MAX_TITLE_WORDS_MULTI.
-    """
+def _title_fault(title: str, lang: str = "") -> str:
+    """Empty when the title is usable, otherwise what to tell the model."""
     lang = lang or OUTPUT_LANG
-    cap = MAX_TITLE_WORDS_MULTI if multi else MAX_TITLE_WORDS
     t = plain(title).strip()
     if not t:
         return "the TITLE line is missing"
-    if len(t.split()) > cap:
-        return f"the TITLE is {len(t.split())} words, keep it under {cap}"
+    if len(t.split()) > MAX_TITLE_WORDS:
+        return (f"the TITLE is {len(t.split())} words, keep it under "
+                f"{MAX_TITLE_WORDS}")
     if WEAK_TITLE[lang].match(t):
         return ("the TITLE states a position or gives advice instead of showing "
                 "a moment - rewrite it as the single sharpest thing that "
                 "happened, in concrete words")
-    n = SPELLED_NUMBER[lang].search(t)
+    n = _spelled_number(t, lang)
     if n:
-        return (f"the TITLE spells the number \"{n.group()}\" out in letters - "
-                "write the whole figure in digits, \"20000\" not \"20 тысяч\""
+        return (f"the TITLE spells the number \"{n}\" out in letters - start it "
+                "with a digit, \"20000\" or \"20 тысяч\", never \"двадцать тысяч\""
                 if lang == "ru" else
-                f"the TITLE writes the number \"{n.group()}\" out in words - "
-                "write the whole figure in digits, \"20000\" not \"20 thousand\"")
+                f"the TITLE writes the number \"{n}\" out in words - start it "
+                "with a digit, \"20000\" or \"20 thousand\", never \"twenty "
+                "thousand\"")
     c = CURRENCY[lang].search(t)
     if c:
         return (f"the TITLE names a currency in \"{c.group().strip()}\" - drop "
@@ -646,8 +671,7 @@ def _parse_parts(raw: str, post: dict, parts: int,
 
     # Once, not per part: one title, one complaint, and a rewrite that is not
     # told the same thing three times over.
-    faults += [f for f in (_title_fault(title, multi=parts > 1),
-                           _kin_fault(title)) if f]
+    faults += [f for f in (_title_fault(title), _kin_fault(title)) if f]
     return gender or guess_gender(post), out, faults
 
 
@@ -829,6 +853,13 @@ if __name__ == "__main__":
     assert ru("Свекровь потребовала 800 долларов за комнату")
     assert ru("Свекровь потребовала $800 за комнату")
     assert not ru("Соседка прислала счёт на 80000 за свой потоп")
+    # ...but the MIXED form keeps its digit, so it is not "spelled out" at all.
+    # Refusing it cost two titles in a row before the rule was narrowed.
+    assert not ru("Я сэкономил 140 тысяч на технике из-за ошибки")
+    assert not ru("Фирма потеряла 100 тысяч из-за одного запрета")
+    assert ru("Брат занял пять тысяч и пропал перед свадьбой"), "no digit, no pass"
+    assert _spelled_number("140 тысяч", "ru") == ""
+    assert _spelled_number("сто сорок тысяч", "ru") == "сто"
     # ordinary words that merely start like a numeral must not trip it
     assert not ru("В четверг похороны, а в пятницу она спросила про деньги")
     assert not ru("Он оставил пятно на платье, а виноватой стала я")
@@ -888,8 +919,10 @@ if __name__ == "__main__":
     assert en("Dad wants thirty percent of my paycheck")
     assert en("My brother borrowed 5000 dollars and vanished")
     assert en("My brother borrowed $5000 and vanished before the wedding")
-    assert en("Neighbor billed me 20k for her own flood")
+    assert en("Neighbor billed me 20k for her own flood"), \
+        "the digit is INSIDE the match, so the narrowing must not save 20k"
     assert not en("Neighbor billed me 80000 for her own flood")
+    assert not en("Neighbor billed me 80 thousand for her own flood")
     # ordinary words must not trip the numeral check
     assert not en("Mom took my car keys on my wedding day")
     assert not en("He left a stain on the dress and blamed me")
@@ -1004,15 +1037,13 @@ if __name__ == "__main__":
     assert any(f.startswith("part 2") and "TITLE" in f for f in f9), f9
     # ...and the shared title is checked ONCE, however many parts there are
     assert sum("the TITLE is" in f for f in f9) <= 1, f9
-    # It also gets the wider ceiling, because it carries a whole story. Asserted
-    # on the length complaint alone - these fixtures trip the markup rules too,
-    # and it is the ceiling being tested.
+    # One ceiling, and a split story's shared title answers to the same one -
+    # it used to have its own, wider, until raising this number made the two
+    # equal. Asserted on the length complaint alone: this fixture trips the
+    # markup rules too, and it is the ceiling being tested.
     over = " ".join(["слово"] * (MAX_TITLE_WORDS + 1))
     assert f"keep it under {MAX_TITLE_WORDS}" in _title_fault(over)
-    assert "keep it under" not in _title_fault(over, multi=True)
-    assert f"keep it under {MAX_TITLE_WORDS_MULTI}" in _title_fault(
-        " ".join(["слово"] * (MAX_TITLE_WORDS_MULTI + 1)), multi=True), \
-        "the wider ceiling is still a ceiling"
+    assert "keep it under" not in _title_fault(" ".join(["слово"] * MAX_TITLE_WORDS))
     # only the last part may address the viewer, and only it must
     RAW_BAD = RAW2.replace("И тут я услышала её шаги на лестнице.",
                            "[curious] Как думаете, что было дальше?")
