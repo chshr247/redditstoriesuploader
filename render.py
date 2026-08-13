@@ -111,32 +111,48 @@ def _ts(sec: float) -> str:
 
 
 def _sung(words: list[dict], title_end: float) -> list[tuple[float, float, str]]:
-    """(start, end, card text) per word: the whole title, that word lit.
+    """(start, end, card text) for the title card: a cover frame, then windows.
 
-    This is what the card is for. A static block of text is read in about a
-    second and then sits there for two more with nothing happening on it, which
-    is most of the hook spent on a still image. Lighting the word being spoken
-    puts movement exactly where the eye already is, and unlike _accent() it
-    fires on EVERY title rather than the one in five that carries a figure.
+    Frame ONE carries the whole title and nothing else. TikTok takes a video's
+    cover from its opening frame, so that frame has to be the finished line
+    rather than the first two words of it - it is one frame at FPS, nobody
+    reads it in playback, and it is not there to be read.
 
-    The whole title stays on screen throughout - this is not a word-by-word
-    reveal. A viewer who reads faster than the narrator speaks has to be able
-    to finish early; that is what a title card is for, and hiding the end of it
-    would trade the hook for a gimmick.
+    Everything after it is a PAIR of words, both in CARD_TEXT, with whichever
+    one is being spoken lit in CARD_ACCENT. The pair holds still while the
+    accent walks from its first word to its second, and only once the second
+    has been spoken does the next pair arrive. A sliding window that stepped
+    one word at a time was the first attempt and reads worse: every word moves
+    on every step, so nothing on the card is ever a fixed point for the eye.
+    Here the text moves once per two words and the colour does the rest.
 
-    One Dialogue event per word rather than one animated line. An ASS override
-    block applies from where it sits to the END of the line, so per-word \\t
-    animations are inherited by every word after them and accumulate - the
-    first attempt lit the whole tail of the title instead of one word. Static
-    colour on separate events has no such reach.
+    The card used to hold the whole title static with one word coloured, which
+    put movement where the eye already was but left three seconds of a still
+    block of text around it - read in about a second, then two more of nothing
+    happening, which is most of the hook spent on a still image.
 
-    Timings come from the title's own take, so the highlight follows the actual
+    What that trades away is the reader who is faster than the narrator: the
+    end of the title is no longer on screen to be finished early. The cover
+    frame is where the whole line still exists.
+
+    Words are grouped exactly as the story's cards are, so a pair is never
+    spent on "в" alone - see _group(). An odd title leaves its last unit
+    standing by itself, which is a pair with nothing left to fill it.
+
+    One Dialogue event per lit word rather than one animated line. An ASS
+    override block applies from where it sits to the END of the line, so
+    per-word \\t animations are inherited by every word after them and
+    accumulate - the first attempt lit the whole tail of the title instead of
+    one word. Static colour on separate events has no such reach.
+
+    Timings come from the title's own take, so the accent follows the actual
     voice rather than an estimate: a word the narrator lingers on stays lit.
     """
+    grouped = _group(words)
     clean = []
-    for i, w in enumerate(words):
+    for i, w in enumerate(grouped):
         text = safety.mask(re.sub(r"[{}\\]", "", w["word"]))
-        if i == len(words) - 1:
+        if i == len(grouped) - 1:
             # _cued() ends the take on a full stop so the title does not run
             # into the story; the card never showed that stop and still must not
             text = re.sub(r"[.!?]+$", "", text)
@@ -145,19 +161,22 @@ def _sung(words: list[dict], title_end: float) -> list[tuple[float, float, str]]
     if not clean:
         return []
 
-    out = []
+    # One frame, in the same centiseconds _ts() will round it to, so the cover
+    # and the first pair cannot both be live on any frame - two Dialogue
+    # events on one layer would draw over each other.
+    frame = round(1 / FPS, 2)
+    out = [(0.0, frame, " ".join(t for _, t in clean))]
     for i, (start, _) in enumerate(clean):
         end = clean[i + 1][0] if i + 1 < len(clean) else title_end
+        # the cover frame has already run, so the first pair opens after it
+        start = max(start, frame)
         if end <= start:
             continue
-        lit = " ".join(
-            f"{{\\c{CARD_ACCENT}&}}{t}{{\\c{CARD_TEXT}&}}" if n == i else t
-            for n, (_, t) in enumerate(clean))
-        out.append((start, end, lit))
-    # a card that starts before the first word would flash uncoloured, so the
-    # first event simply opens with the card rather than waiting for it
-    if out:
-        out[0] = (0.0, out[0][1], out[0][2])
+        # the pair this unit belongs to, whether it opens or closes it
+        lo = i - i % 2
+        out.append((start, end, " ".join(
+            f"{{\\c{CARD_ACCENT}&}}{t}{{\\c{CARD_TEXT}&}}" if lo + n == i else t
+            for n, (_, t) in enumerate(clean[lo:lo + 2]))))
     return out
 
 
@@ -247,9 +266,10 @@ def build_ass(words: list[dict], path, title: str = "", title_end: float = 0,
     """
     lines = [ASS_HEADER]
     if title and title_end > 0:
-        # the scale-up belongs to the card appearing, so it rides the first
-        # event only - later ones are already at full size
-        pop = r"{\fscx85\fscy85\t(0,180,\fscx100\fscy100)}"
+        # No scale-up on the card. It used to ride the first event, back when
+        # that event was the card arriving; the card is now the first frame of
+        # the video, so there is nothing for it to arrive over - and a cover
+        # frame caught at 85% is a cover frame with the title cropped small.
         marker = _part_line(part)
         cards = _sung(title_words, title_end) if title_words else []
         if not cards:
@@ -260,9 +280,9 @@ def build_ass(words: list[dict], path, title: str = "", title_end: float = 0,
             # accents and all - plain() is what keeps both off the card
             cards = [(0.0, title_end,
                       _accent(safety.mask(script.plain(re.sub(r"[{}\\]", "", title)))))]
-        for i, (start, end, text) in enumerate(cards):
-            lines.append(f"Dialogue: 0,{_ts(start)},{_ts(end)},Card,,0,0,0,,"
-                         + (pop if i == 0 else "") + text + marker)
+        for start, end, text in cards:
+            lines.append(
+                f"Dialogue: 0,{_ts(start)},{_ts(end)},Card,,0,0,0,,{text}{marker}")
     styles = _styles(words)
     words = _group(words)
     for i, w in enumerate(words):
@@ -788,7 +808,8 @@ if __name__ == "__main__":
     _ass = OUT_DIR / "_check_part.ass"
     build_ass([], _ass, "Соседка прислала счёт", 1.2, _tw, part=2)
     _txt = _ass.read_text("utf-8")
-    assert _txt.count(f"\\N{{\\fs{CARD_PART_SIZE}") == len(_tw), _txt
+    # one window per word, plus the cover frame in front of them
+    assert _txt.count(f"\\N{{\\fs{CARD_PART_SIZE}") == len(_tw) + 1, _txt
     assert f"{PART_WORD['ru']} 2" in _txt, _txt
     # ...on every event of the card, so it does not blink with the lit word
     for _line in _txt.splitlines():
@@ -810,6 +831,10 @@ if __name__ == "__main__":
     def _w(t, s, e):
         return {"word": t, "start": s, "end": e}
 
+    def _bare(card: str) -> str:
+        """A card's words with every ASS override stripped - what is on screen."""
+        return re.sub(r"\{[^}]*\}", "", card).strip()
+
     # The accent must find what prompts.py promised, and nothing else. Colour
     # is reset to the Card style's own primary, so the two are asserted equal
     # here - drift between them would tint the rest of the title.
@@ -825,25 +850,49 @@ if __name__ == "__main__":
     for t in ("счёт на 80000 за потоп", "сказала «этот ребёнок не наш»"):
         assert _accent(t).count(CARD_ACCENT) == _accent(t).count(CARD_TEXT)
 
-    # The card lights up word by word, and every word gets both edges: one
-    # animation onto the accent, one back. A word that only got the first would
-    # stay lit and the card would fill up red instead of tracking the voice.
+    # Frame one is the whole title - that is the frame TikTok lifts as the
+    # cover, so it must carry the finished line and not the first window.
     tw = [_w("Соседка", 0.0, 0.4), _w("прислала", 0.4, 0.9), _w("счёт.", 0.9, 1.4)]
     cards = _sung(tw, 1.6)
-    assert len(cards) == len(tw), cards
+    cover, windows = cards[0], cards[1:]
+    assert cover[0] == 0.0 and cover[2] == "Соседка прислала счёт", cover
+    assert CARD_ACCENT not in cover[2], "the cover frame is not lit, it is read"
+    # ...and it lasts exactly one frame, so playback never shows the jump
+    assert _ts(cover[1]) == _ts(1 / FPS), cover
+    # after it, one event per word
+    assert len(windows) == len(tw), windows
     # exactly ONE word is lit at a time. The first attempt animated a single
     # line and every word inherited the ones before it, so the whole tail of
     # the title lit up at once - this is the assertion that would have caught it.
-    for start, end, text in cards:
+    for start, end, text in windows:
         assert text.count(CARD_ACCENT) == 1, text
-    # the whole title stays on screen the whole time - this is not a reveal
-    for _, _, text in cards:
-        assert all(w["word"].rstrip(".") in text for w in tw), text
-    assert [round(s, 2) for s, _, _ in cards] == [0.0, 0.4, 0.9]
-    assert [round(e, 2) for _, e, _ in cards] == [0.4, 0.9, 1.6]
-    # the lit word walks forward, and the cued full stop never reaches the card
-    assert cards[0][2].startswith(f"{{\\c{CARD_ACCENT}&}}Соседка")
-    assert cards[2][2].endswith(f"{{\\c{CARD_ACCENT}&}}счёт{{\\c{CARD_TEXT}&}}")
+    # the cover frame owns the first frame, so the first pair starts after it
+    assert [round(s, 2) for s, _, _ in windows] == [round(1 / FPS, 2), 0.4, 0.9]
+    assert [round(e, 2) for _, e, _ in windows] == [0.4, 0.9, 1.6]
+    # The pair HOLDS while the accent walks across it - both events show the
+    # same two words. A sliding window would have moved the text every step,
+    # and this is the assertion that tells the two apart.
+    assert windows[0][2] == f"{{\\c{CARD_ACCENT}&}}Соседка{{\\c{CARD_TEXT}&}} прислала"
+    assert windows[1][2] == f"Соседка {{\\c{CARD_ACCENT}&}}прислала{{\\c{CARD_TEXT}&}}"
+    assert _bare(windows[0][2]) == _bare(windows[1][2]), "the pair must not move"
+    # ...and only then does the next pair arrive. An odd title leaves its last
+    # word standing alone - with no trailing space, which libass would set as a
+    # visible gap on a centred line
+    assert windows[2][2] == f"{{\\c{CARD_ACCENT}&}}счёт{{\\c{CARD_TEXT}&}}"
+    # never more than a pair on screen, however the words grouped
+    for _, _, text in windows:
+        assert len(_bare(text).split()) <= 4, text
+    # no event may overlap the cover frame: two Card events live on one frame
+    # draw over each other, and the cover is the one that loses
+    assert all(_ts(s) >= _ts(cover[1]) for s, _, _ in windows), windows
+    # a one-letter word must not be lit on its own, exactly as it gets no card
+    # of its own in the story - _group() is what both the card and the story go
+    # through, so "в" arrives glued to the word it belongs with
+    narrow = _sung([_w("Тёща", 0.0, 0.4), _w("в", 0.4, 0.5),
+                    _w("нашей", 0.5, 1.0), _w("квартире.", 1.0, 1.5)], 1.6)
+    assert len(narrow) == 4, narrow          # cover + three events, not four
+    assert f"{{\\c{CARD_ACCENT}&}}в нашей{{\\c{CARD_TEXT}&}}" in narrow[2][2], narrow[2]
+    assert _bare(narrow[1][2]) == _bare(narrow[2][2]) == "Тёща в нашей", narrow
     # timings absent: the card must still render, via the figure/quote accent
     assert _sung([], 3.0) == []
 
