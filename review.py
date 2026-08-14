@@ -20,6 +20,7 @@ nothing else about the text beyond what _title_fault() already checks.
 """
 import json
 import logging
+import re
 import subprocess
 import time
 
@@ -42,7 +43,7 @@ ACCEPT = {"+", "да", "ок", "ok", "ага", "yes"}
 REJECT = {"-", "нет", "скип", "skip", "no", "мимо", "хуйня"}
 
 _COLS = ("post_id", "issue", "ts", "gender", "sub", "score", "written",
-         "answered", "title")
+         "answered", "title", "body")
 
 
 def _db():
@@ -58,7 +59,12 @@ def _db():
     db.execute("CREATE TABLE IF NOT EXISTS review("
                "post_id TEXT, lang TEXT, issue INT, ts REAL, gender TEXT, "
                "sub TEXT, score INT, written TEXT, answered INT DEFAULT 0, "
-               "title TEXT DEFAULT '', PRIMARY KEY(post_id, lang))")
+               "title TEXT DEFAULT '', body TEXT DEFAULT '', "
+               "PRIMARY KEY(post_id, lang))")
+    # `body` arrived after `title`; a row written before it keeps '' and the
+    # story is narrated as the model wrote it, which is what '' means anyway.
+    if "body" not in {c[1] for c in db.execute("PRAGMA table_info(review)")}:
+        db.execute("ALTER TABLE review ADD COLUMN body TEXT DEFAULT ''")
     return db
 
 
@@ -105,12 +111,23 @@ def _body(post: dict, written: list) -> str:
         f"r/{post['sub']} · {post['score']} · https://redd.it/{post['id']}\n\n"
         f"**Название от модели:**\n\n`{title}`\n\n"
         f"{parts}\n\n---\n"
+        f"**Первая строка комментария:**\n"
         f"`+` — пойдёт название модели.\n"
         f"`-` — история снимается совсем, рендера не будет.\n"
-        f"Любой другой комментарий станет названием. Поставь `[emphasis]` перед "
-        f"словом, на котором строка поворачивает: не первое и не последнее, "
-        f"до {script.MAX_TITLE_WORDS} слов, одно предложение.\n"
-        f"Молчание {HOURS} ч — уходит вариант модели.")
+        f"Что угодно ещё — станет названием. Поставь `[emphasis]` перед словом, "
+        f"на котором строка поворачивает: не первое и не последнее, "
+        f"до {script.MAX_TITLE_WORDS} слов, одно предложение.\n\n"
+        f"**Через пустую строку — новый текст истории**, если хочешь его "
+        f"переписать. Ничего после пустой строки не значит, что текст модели "
+        f"идёт как есть. Части до последней обрываются на самом интересном, без "
+        f"вопроса. Последняя закрывается вопросом зрителю с меткой настроения и "
+        f"одним `[emphasis]` — `[doubtful] А вы бы [emphasis] сделали так же?`; "
+        f"а если просто оборвёшь текст без вопроса, подставится вопрос модели. "
+        f"Каждая часть — около {script._target_words()} слов вместе с названием, "
+        f"оно читается в начале каждой.\n\n"
+        + (f"Частей {len(written)}, раздели их строкой из трёх дефисов. Можно "
+           f"прислать меньше, но не меньше двух.\n\n" if len(written) > 1 else "")
+        + f"Молчание {HOURS} ч — уходит вариант модели.")
 
 
 def park(post: dict, gender: str, written: list[tuple[str, str]]) -> int:
@@ -134,34 +151,98 @@ def park(post: dict, gender: str, written: list[tuple[str, str]]) -> int:
 
 # -------------------------------------------------------------------- the reply
 
-def _choose(comments: list[dict], owner: str, model_title: str,
-            answered: int) -> tuple[str, str, int]:
-    """(title, complaint, comment_id) for the newest comment the owner wrote.
+def _choose(comments: list[dict], owner: str, written: list, answered: int
+            ) -> tuple[str, list, str, int]:
+    """(title, bodies, complaint, comment_id) for the owner's newest comment.
 
-    Only one of title/complaint is ever set, and `title` has three states rather
-    than two: a string is the title to render, "" is nothing decided yet, and
-    None is the story thrown away - a title nobody wants to write is usually a
-    story nobody wants to watch, and that verdict has to be sayable.
+    The comment is read in the shape the model answers in: a first line, then a
+    blank line, then the narration. The first line is the title, `+` to keep the
+    model's, or `-` to throw the story away. Everything after the blank line
+    replaces the narration - one entry per part, split on a line of three
+    dashes exactly as the model writes them. Nothing after the blank line means
+    only the title was touched, and `bodies` comes back empty.
+
+    `title` has three states rather than two: a string is the title to render,
+    "" is nothing decided yet, and None is the story dropped - a title nobody
+    wants to write is usually a story nobody wants to watch, and that verdict
+    has to be sayable. `complaint` excludes the other two.
 
     `answered` is the id of the last comment already judged, so a title that was
     refused is refused once and not once every half hour for six hours.
+
+    `written` is what the model wrote - [[title, body], ...] - and is read for
+    three things: the title `+` accepts, how many parts the story has, and the
+    closing question to fall back on when a rewrite arrives without one.
     """
     mine = [c for c in comments if c["user"]["login"].lower() == owner.lower()]
     if not mine or mine[-1]["id"] <= answered:
-        return "", "", 0
+        return "", [], "", 0
     last = mine[-1]
-    text = " ".join(last["body"].split())
+    split = re.split(r"\n[ \t]*\n", last["body"].strip(), maxsplit=1)
+    head, tail = split[0], (split[1] if len(split) > 1 else "")
+    text = " ".join(head.split())
     verdict = text.strip("`.! ").lower()
     if verdict in REJECT:
-        return None, "", last["id"]
-    if verdict in ACCEPT:
-        return model_title, "", last["id"]
-    # The user's line goes through the same gate the model's does. It is the
-    # only check there is on a hand-written title, and the one it fails most is
-    # the [emphasis] marker - which is not decoration: it drives the Fish cue
-    # and the card's word-by-word accent run.
-    fault = script._title_fault(text, OUTPUT_LANG)
-    return ("", fault, last["id"]) if fault else (text, "", last["id"])
+        return None, [], "", last["id"]
+
+    title = written[0][0] if verdict in ACCEPT else text
+    if verdict not in ACCEPT:
+        # The user's line goes through the same gate the model's does. It is the
+        # only check there is on a hand-written title, and the one it fails most
+        # is the [emphasis] marker - which is not decoration: it drives the Fish
+        # cue and the card's word-by-word accent run.
+        if fault := script._title_fault(text, OUTPUT_LANG):
+            return "", [], fault, last["id"]
+
+    # Split on the separator the model itself writes, so a story rewritten by
+    # hand is punctuated exactly like the answer it replaces.
+    bodies = [script._clean(c) for c in script.PART_SEP.split(tail) if c.strip()]
+    # A closing question is required and is a nuisance to type: a mood cue, one
+    # [emphasis], and not on the last word. So a rewrite that simply ends -
+    # ends, no question mark at all - keeps the one the model already wrote for
+    # this story. Only when there is none: a question that IS there and is
+    # marked up wrong is the author's to fix, not ours to replace.
+    if bodies and not script.plain(bodies[-1]).rstrip().endswith("?"):
+        if cta := script.split_cta(written[-1][1])[1]:
+            bodies[-1] = f"{bodies[-1].rstrip()} {cta}"
+    if fault := _body_fault(bodies, title, len(written)):
+        return "", [], fault, last["id"]
+    return title, bodies, "", last["id"]
+
+
+def _body_fault(bodies: list[str], title: str, parts: int) -> str:
+    """Empty when a hand-written narration is usable, otherwise why not.
+
+    The same things the model's own text has to satisfy, and no more: how many
+    parts there are, the kin words a young viewer stumbles over, the ending -
+    only the LAST part closes on the question to the viewer, the ones before it
+    stop on the cliffhanger - and the length, which is a duration in disguise.
+    Nothing downstream bounds a video's length, so a narration typed twice as
+    long is simply a video twice as long.
+
+    Length is per part and counts the title, because the title is narrated at
+    the head of every part even though it is written once.
+    """
+    if not bodies:
+        return ""
+    if parts == 1 and len(bodies) > 1:
+        return ("это история на одно видео — убери разделители из трёх дефисов, "
+                "текст идёт одним куском")
+    if parts > 1 and not 2 <= len(bodies) <= parts:
+        return (f"история написана в {parts} частях, а в комментарии "
+                f"{len(bodies)} — раздели текст строкой из трёх дефисов, "
+                f"от 2 до {parts} частей")
+    target = script._target_words()
+    for i, body in enumerate(bodies, 1):
+        label = f"часть {i}: " if len(bodies) > 1 else ""
+        if fault := (script._kin_fault(body)
+                     or script._ending_fault(body, final=i == len(bodies))):
+            return label + fault
+        total = script._words(title) + script._words(body)
+        if not script._fits(total, target):
+            return (f"{label}в названии и тексте вместе {total} слов, надо около "
+                    f"{target} — {'сократи' if total > target else 'дополни'}")
+    return ""
 
 
 def _comments(issue: int) -> list[dict]:
@@ -195,10 +276,11 @@ def _poll(timeout: bool) -> dict | None:
     r["written"] = json.loads(r["written"])
     model_title = r["written"][0][0]
     if r["title"]:
-        return r        # chosen already; a previous run just failed to render it
+        # Chosen already; a previous run just failed to render it.
+        return _final(r, json.loads(r["body"]) if r["body"] else [])
 
-    title, fault, cid = _choose(_comments(r["issue"]), _owner(),
-                                model_title, r["answered"])
+    title, bodies, fault, cid = _choose(_comments(r["issue"]), _owner(),
+                                        r["written"], r["answered"])
     if title is None:
         # Thrown away, and it does not come back: the post was marked used when
         # it was written, which is exactly the record needed here.
@@ -206,9 +288,12 @@ def _poll(timeout: bool) -> dict | None:
         close(r["post_id"], "Снято, рендера не будет.")
         return None
     if cid:
+        r["title"] = title
         with _db() as db:
-            db.execute("UPDATE review SET answered=?, title=? WHERE post_id=? "
-                       "AND lang=?", (cid, title, r["post_id"], OUTPUT_LANG))
+            db.execute("UPDATE review SET answered=?, title=?, body=? WHERE "
+                       "post_id=? AND lang=?",
+                       (cid, title, json.dumps(bodies, ensure_ascii=False),
+                        r["post_id"], OUTPUT_LANG))
     if fault:
         _gh("issue", "comment", str(r["issue"]), "--body",
             f"Не приму: {fault}.\n\nНапиши ещё раз, или `+` — возьму вариант модели.")
@@ -228,6 +313,20 @@ def _poll(timeout: bool) -> dict | None:
                        (title, r["post_id"], OUTPUT_LANG))
 
     r["title"] = title
+    return _final(r, bodies)
+
+
+def _final(r: dict, bodies: list[str]) -> dict:
+    """Fold the chosen title and any rewritten narration into `written`.
+
+    Callers get one shape whoever wrote what: [(title, body), ...], the title
+    the same on every entry because a split story carries one. A rewrite may
+    come back with fewer parts than the model wrote - _body_fault() allows two
+    up to what was written, exactly the band _parse_parts() allows the model -
+    so the rewritten list replaces `written` rather than being zipped into it.
+    """
+    bodies = bodies or [b for _, b in r["written"]]
+    r["written"] = [(r["title"], b) for b in bodies]
     return r
 
 
@@ -289,41 +388,106 @@ if __name__ == "__main__":
             print("still waiting on a title")
         sys.exit(0)
 
-    OWNER, MODEL = "chshr247", "Я [emphasis] закрыла камеру сестре мужа ладонью, хотя она обещала"
+    OWNER = "chshr247"
+    MODEL = "Я [emphasis] закрыла камеру сестре мужа ладонью, хотя она обещала"
+    MODEL_CTA = "[curious] А вы бы [emphasis] поверили ей на слово?"
+    ONE = [[MODEL, "Модель написала историю. " * 20 + MODEL_CTA]]
+    THREE = [[MODEL, "Часть первая."], [MODEL, "Часть вторая."],
+             [MODEL, "Часть третья кончилась. " + MODEL_CTA]]
 
     def c(i, login, body):
         return {"id": i, "user": {"login": login}, "body": body}
 
     # nobody has said anything
-    assert _choose([], OWNER, MODEL, 0) == ("", "", 0)
+    assert _choose([], OWNER, ONE, 0) == ("", [], "", 0)
     # a stranger cannot title a video on this channel, whatever they write
     assert _choose([c(1, "randomguy", "Мой [emphasis] заголовок про кота")],
-                   OWNER, MODEL, 0) == ("", "", 0)
+                   OWNER, ONE, 0) == ("", [], "", 0)
     # ...not even when the owner has already answered underneath them
     strangers = [c(1, "randomguy", "[emphasis] чужой заголовок сюда"), c(2, OWNER, "+")]
-    assert _choose(strangers, OWNER, MODEL, 0) == (MODEL, "", 2)
+    assert _choose(strangers, OWNER, ONE, 0) == (MODEL, [], "", 2)
     # accepting the model, in the shapes a phone actually types
     for word in ("+", "да", "ОК", "`+`", "да!"):
-        assert _choose([c(3, OWNER, word)], OWNER, MODEL, 0)[0] == MODEL, word
+        assert _choose([c(3, OWNER, word)], OWNER, ONE, 0)[0] == MODEL, word
     # throwing the story away - None, and never "" which means "not decided"
     for word in ("-", "нет", "СКИП", "`-`", "хуйня"):
-        got = _choose([c(3, OWNER, word)], OWNER, MODEL, 0)
-        assert got == (None, "", 3), (word, got)
+        got = _choose([c(3, OWNER, word)], OWNER, ONE, 0)
+        assert got == (None, [], "", 3), (word, got)
     # a stranger cannot drop this channel's story either
-    assert _choose([c(1, "randomguy", "-")], OWNER, MODEL, 0) == ("", "", 0)
+    assert _choose([c(1, "randomguy", "-")], OWNER, ONE, 0) == ("", [], "", 0)
     # a title of one's own, and the newest one wins
     mine = "Я [emphasis] заказал взрослое меню детям, а сестра жены наггетсы"
-    got, fault, cid = _choose([c(4, OWNER, "+"), c(5, OWNER, mine)], OWNER, MODEL, 0)
-    assert (got, fault, cid) == (mine, "", 5), (got, fault, cid)
+    got, body, fault, cid = _choose([c(4, OWNER, "+"), c(5, OWNER, mine)],
+                                    OWNER, ONE, 0)
+    assert (got, body, fault, cid) == (mine, [], "", 5), (got, body, fault, cid)
     # the same gate the model answers to - here, a missing [emphasis]
-    got, fault, cid = _choose([c(6, OWNER, "Просто заголовок без метки")],
-                              OWNER, MODEL, 0)
+    got, _, fault, cid = _choose([c(6, OWNER, "Просто заголовок без метки")],
+                                 OWNER, ONE, 0)
     assert not got and "emphasis" in fault and cid == 6, (got, fault)
     # ...and a refusal is delivered once, not on every run for six hours
-    assert _choose([c(6, OWNER, "Просто заголовок без метки")], OWNER, MODEL, 6) \
-        == ("", "", 0)
-    # a multi-line comment is one line by the time it is a title
-    got, _, _ = _choose([c(7, OWNER, f"{mine}\n\nвот так")], OWNER, MODEL, 0)
-    assert "\n" not in got and got.startswith("Я [emphasis] заказал"), got
+    assert _choose([c(6, OWNER, "Просто заголовок без метки")], OWNER, ONE, 6) \
+        == ("", [], "", 0)
+
+    # A narration of one's own, under the blank line. Long enough to pass the
+    # budget and closed with a question, which is what the format is built on.
+    story = ("Я работал в ночную смену и однажды нашёл в подсобке коробку. " * 16
+             + "[doubtful] А вы бы [emphasis] открыли её на моём месте?")
+    got, bodies, fault, cid = _choose([c(8, OWNER, f"{mine}\n\n{story}")],
+                                      OWNER, ONE, 0)
+    assert (got, fault) == (mine, ""), (got, fault)
+    assert len(bodies) == 1, bodies
+    assert bodies[0].startswith("Я работал") and bodies[0].endswith("месте?")
+    # ...and it works under a bare `+` too: the model's title, my text
+    got, bodies, fault, _ = _choose([c(9, OWNER, f"+\n\n{story}")], OWNER, ONE, 0)
+    assert (got, fault) == (MODEL, "") and bodies, (got, fault, bodies)
+    # no blank line means the title alone was touched
+    assert _choose([c(10, OWNER, mine)], OWNER, ONE, 0)[1] == []
+    # A rewrite that just ends, with no question at all, borrows the model's -
+    # the markup it needs is a nuisance to type and the model already typed it.
+    plain_story = "Я работал в ночную смену и нашёл в подсобке коробку. " * 18
+    got, bodies, fault, _ = _choose([c(11, OWNER, f"{mine}\n\n{plain_story}")],
+                                    OWNER, ONE, 0)
+    assert (got, fault) == (mine, ""), (got, fault)
+    assert bodies[0].endswith(MODEL_CTA), bodies[0][-80:]
+    # ...but a question that IS there and is marked up wrong stays the author's
+    # to fix. Silently replacing it would throw away what they meant to ask.
+    _, _, fault, _ = _choose([c(12, OWNER, f"{mine}\n\n{plain_story}Ну как вам?")],
+                             OWNER, ONE, 0)
+    assert "mood cue" in fault, fault
+    # on a split it is the LAST part that borrows it, and only that one
+    got, bodies, fault, _ = _choose(
+        [c(13, OWNER, f"+\n\n{plain_story}\n---\n{plain_story}")], OWNER, THREE, 0)
+    assert fault == "" and len(bodies) == 2, (fault, len(bodies))
+    assert bodies[1].endswith(MODEL_CTA) and not bodies[0].endswith(MODEL_CTA)
+    # ...nor is one that would make a video of the wrong length
+    short = "Коротко и всё. [doubtful] А вы бы [emphasis] сделали так же?"
+    _, _, fault, _ = _choose([c(12, OWNER, f"{mine}\n\n{short}")], OWNER, ONE, 0)
+    assert "слов" in fault, fault
+    # A split story rewritten by hand: parts split on the model's own separator,
+    # and only the last one closes on the question to the viewer.
+    mid = "Я работал в ночную смену и однажды нашёл в подсобке коробку. " * 17
+    three = f"{mid}\n---\n{mid}\n---\n{story}"
+    got, bodies, fault, _ = _choose([c(13, OWNER, f"{mine}\n\n{three}")],
+                                    OWNER, THREE, 0)
+    assert (got, fault) == (mine, ""), (got, fault)
+    assert len(bodies) == 3 and bodies[-1].endswith("месте?"), len(bodies)
+    assert "---" not in bodies[0] and bodies[0].startswith("Я работал")
+    # merging three into two is allowed - the same band the model may answer in
+    assert _choose([c(14, OWNER, f"+\n\n{mid}\n---\n{story}")],
+                   OWNER, THREE, 0)[2] == ""
+    # ...but not into one, and not into four
+    for bad in (story, f"{mid}\n---\n{mid}\n---\n{mid}\n---\n{story}"):
+        _, _, fault, _ = _choose([c(15, OWNER, f"+\n\n{bad}")], OWNER, THREE, 0)
+        assert "частях" in fault, fault
+    # a middle part that closes on the question is not a middle part
+    _, _, fault, _ = _choose([c(16, OWNER, f"+\n\n{story}\n---\n{story}")],
+                             OWNER, THREE, 0)
+    assert fault.startswith("часть 1:"), fault
+    # and a one-part story must not arrive in pieces
+    _, _, fault, _ = _choose([c(17, OWNER, f"+\n\n{mid}\n---\n{story}")],
+                             OWNER, ONE, 0)
+    assert "одно видео" in fault, fault
+    # the title alone still works on a split, as it always did
+    assert _choose([c(18, OWNER, mine)], OWNER, THREE, 0)[:2] == (mine, [])
 
     print("review ok")
