@@ -21,6 +21,7 @@ from pathlib import Path
 
 import publish
 import render
+import review
 import script
 import source
 import voice
@@ -76,15 +77,45 @@ def _render(title: str, body: str, gender: str, key: str, sub: str,
     return out
 
 
-def make_video(post: dict) -> Path:
-    """One post, one video. Marks the post used only once the mp4 exists."""
-    gender, written = script.write_script(post)
-    title, body = written[0]
-    # The score travels with the file: youtube.py decides by band and the post
-    # is out of reach by then - seen.db keeps it per story, not per rendered mp4.
-    out = _render(title, body, gender, post["id"], post["sub"],
-                  meta={"score": post["score"]})
+def write_and_park(post: dict, n: int = 1) -> None:
+    """Write the story and hand its title to the user. Renders nothing.
+
+    The post is marked used here rather than at the render, for the reason
+    make_split() always marked it early: the text is safer in sqlite than the
+    story is loose in the pool, where the next run would write it a second time
+    while the first is still waiting for an answer.
+    """
+    gender, written = script.write_script(post, parts=n)
+    if n > 1 and len(written) < 2:
+        log.info("model returned one part, %s will publish as a single video",
+                 post["id"])
+    review.park(post, gender, written)
     source.mark_used(post["id"], post["score"], post["sub"])
+
+
+def make_reviewed(r: dict) -> Path:
+    """Render the parked story under the title that came back off the issue.
+
+    The chosen title replaces the model's on EVERY part. A split story has one
+    title by construction - it is narrated and lit at the head of each part -
+    and all of the parts were written against it in a single call.
+    """
+    post = {"id": r["post_id"], "sub": r["sub"], "score": r["score"]}
+    written = [(r["title"], body) for _, body in r["written"]]
+    if len(written) > 1:
+        source.queue_parts(post, written, r["gender"],
+                           voice.pick_voice(r["gender"]), issue=r["issue"])
+        out = make_part(source.next_part())
+    else:
+        # The score travels with the file: youtube.py decides by band and the
+        # post is out of reach by then - seen.db keeps it per story, not per
+        # rendered mp4. The issue travels the same way and for the same reason:
+        # publish.py puts the caption back into the issue the title came from.
+        out = _render(written[0][0], written[0][1], r["gender"], post["id"],
+                      post["sub"],
+                      meta={"score": post["score"], "issue": r["issue"]})
+    # Last, so a render that dies leaves the answer on the row for a retry.
+    review.rendered(r["post_id"])
     return out
 
 
@@ -99,28 +130,8 @@ def make_part(p: dict) -> Path:
         return out
     return _render(p["title"], p["body"], p["gender"], key, p["sub"],
                    fish_voice=p["voice"],
-                   meta={"post_id": p["post_id"], "part": p["n"], "total": p["total"]})
-
-
-def make_split(post: dict, n: int) -> Path:
-    """Write the post as n videos, store them all, render the first.
-
-    The post is marked used here rather than when the last part ships: every
-    part's text is already in sqlite by then, so the story is safer stored than
-    it would be left loose in the pool for a second run to pick up again.
-    """
-    gender, written = script.write_script(post, parts=n)
-    if len(written) < 2:
-        log.info("model returned one part, publishing %s as a single video", post["id"])
-        title, body = written[0]
-        out = _render(title, body, gender, post["id"], post["sub"],
-                      meta={"score": post["score"]})
-        source.mark_used(post["id"], post["score"], post["sub"])
-        return out
-
-    source.queue_parts(post, written, gender, voice.pick_voice(gender))
-    source.mark_used(post["id"], post["score"], post["sub"])
-    return make_part(source.next_part())
+                   meta={"post_id": p["post_id"], "part": p["n"],
+                         "total": p["total"], "issue": p["issue"]})
 
 
 def _room() -> int:
@@ -191,12 +202,32 @@ def main(count: int = 1, force: bool = False) -> int:
             source.fail_part(part["post_id"], part["n"])
             failed += 1
 
+    # A story whose title is with the user owns the next slot, on the same
+    # grounds a queued part does: it is written, it is paid for, and it is one
+    # answer away from being a video. Nothing new is written while one waits -
+    # a second unanswered story is a second one nobody asked for, and at two
+    # runs an hour that is how a day's tokens go into a queue of questions.
+    if len(done) < count and (r := review.ready()):
+        log.info("%s: title settled, rendering", r["post_id"])
+        try:
+            done.append(make_reviewed(r))
+        except Exception:
+            log.exception("failed on %s after its title came back", r["post_id"])
+            failed += 1
+
+    if review.waiting():
+        log.info("a title is still with the user - nothing new written this run")
+    # Asked BEFORE the LLM call and never after: a story written with no issue
+    # to ask on is a story nobody can answer, and the next run would pay for it
+    # again. Better to skip the slot than to buy the same script every tick.
+    elif len(done) < count and (why := review.ok()):
+        log.error("cannot reach GitHub to ask for a title (%s) - writing nothing", why)
     # A plan is an ORDER, so while one is running it is the only source: the
     # pool below cannot be consulted even as a fallback, because a story taken
     # from it publishes ahead of the next planned one and the order is gone.
     # A run with nothing to do is the cheaper failure - the plan is finite and
     # the pool is waiting at the end of it.
-    if len(done) < count and (left := source.plan_left()):
+    elif len(done) < count and (left := source.plan_left()):
         log.info("plan: %d stories still to publish", left)
         if part:
             # Its remaining parts come first by definition, and this run has
@@ -221,7 +252,7 @@ def main(count: int = 1, force: bool = False) -> int:
                 log.info("plan: r/%s [%d] %d part(s): %s", p["sub"], p["score"],
                          n, p["title"][:60])
                 try:
-                    done.append(make_split(p, n) if n > 1 else make_video(p))
+                    write_and_park(p, n)
                 except script.Unsuitable as e:
                     # burned, exactly as in the pool below: the plan moves on to
                     # the next story rather than offering this one again for ever
@@ -244,8 +275,10 @@ def main(count: int = 1, force: bool = False) -> int:
             return 1
 
         for p in posts:
-            if len(done) >= count:
-                break
+            # One story is written per run, not `count` of them: it is parked
+            # for a title rather than rendered, so nothing here can add to
+            # `done` and the loop would otherwise write the whole pool out to
+            # issues in one go. It only walks on when a story turns out unusable.
             # Asked fresh each time rather than tracked in a flag: a split that
             # queues its parts and then dies on the render has still used up the
             # day's one story, and a SKIP before any of that has not.
@@ -255,7 +288,8 @@ def main(count: int = 1, force: bool = False) -> int:
                      p["score"], " LOUD" if p["score"] >= LOUD_AT else "",
                      p.get("rank", 0), n, p["title"][:60])
             try:
-                done.append(make_split(p, n) if n > 1 else make_video(p))
+                write_and_park(p, n)
+                break
             except script.Unsuitable as e:
                 # burn it so the same dud is not reconsidered next run
                 source.mark_used(p["id"], p["score"], p["sub"])
@@ -269,7 +303,11 @@ def main(count: int = 1, force: bool = False) -> int:
     for f in done:
         print(f)
     log.info("%d ready, %d skipped, %d failed", len(done), skipped, failed)
-    if len(done) < count:
+    # A run that only wrote a story and asked for its title has produced no
+    # video and must say so with a non-zero exit: the workflow reads that as
+    # "nothing to upload" and stops before youtube.py, which is exactly right.
+    # It is not the pool running dry, so it does not get that warning.
+    if len(done) < count and not review.waiting():
         log.warning("wanted %d, got %d - pool ran out", count, len(done))
     return 0 if done else 1
 
@@ -288,12 +326,35 @@ if __name__ == "__main__":
         source.fetch = lambda *a: []
         make_part = lambda p: rendered.append(p) or Path("stub.mp4")  # noqa: E731
         publish.due = lambda: "only 0.4h since the last draft"
+        # nothing is out for review in any of the part cases below, and asking
+        # GitHub about it would put a subprocess and a network call in a test
+        # whose whole point is which branch runs
+        review.ready, review.waiting, review.ok = lambda: None, lambda: False, lambda: ""
         assert main(1) == 1 and not rendered, "a part must wait for TikTok's clock"
         assert main(1, force=True) == 0 and rendered, "--force renders it anyway"
         rendered.clear()
         publish.due = lambda: ""
         assert main(1) == 0 and len(rendered) == 1, "and so does an open gap"
-        print("part gating ok")
+
+        # A title with the user stops the run from writing a second story: at
+        # two runs an hour that is the difference between one question and a
+        # day's worth of them, all paid for and none of them answered.
+        rendered.clear()
+        source.next_part = lambda: None
+        written = []
+        source.fetch = lambda *a: [{"id": "y", "sub": "s", "score": 1, "title": "t"}]
+        globals()["write_and_park"] = lambda p, n=1: written.append(p["id"])
+        review.waiting = lambda: True
+        assert main(1) == 1 and not written, "a pending title must block the pool"
+        review.waiting = lambda: False
+        assert main(1) == 1 and written == ["y"], "and let it through once answered"
+        # ...and the answer, when it comes, renders without touching the pool
+        written.clear()
+        review.ready = lambda: {"post_id": "y", "sub": "s", "score": 1,
+                                "gender": "male", "title": "T", "written": [["m", "b"]]}
+        globals()["make_reviewed"] = lambda r: rendered.append(r) or Path("stub.mp4")
+        assert main(1) == 0 and len(rendered) == 1 and not written, (rendered, written)
+        print("part gating and title review ok")
         sys.exit(0)
 
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
