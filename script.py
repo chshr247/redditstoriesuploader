@@ -581,6 +581,38 @@ def _ending_fault(body: str, final: bool = True) -> str:
     return _cta_fault(cta)
 
 
+def _emphasis_fault(body: str) -> str:
+    """Empty when the narration is stressed sentence by sentence.
+
+    One [emphasis] per sentence, never two - a rule the prompt has always stated
+    and nothing has ever checked. The title's mark is checked, the closing
+    question's is checked, and the two hundred words between them were not: a
+    narration can arrive with a single mark in the whole text, read flat by the
+    voice engine, and pass every other gate on its way to the render. Measured
+    on one story told three times over, the count came back 20, 1 and 19, so the
+    drift is not a rare miss - it is a coin flip.
+
+    Two thirds rather than all of them. The point is to catch a narration that
+    is not marked up at all, not to send one back over a short sentence somebody
+    left bare.
+    """
+    sentences = [s for s in SENTENCE.split(body.strip()) if plain(s).strip()]
+    if not sentences:
+        return ""
+    marked = 0
+    for s in sentences:
+        n = s.lower().count("[emphasis]")
+        if n > 1:
+            return (f"one sentence carries {n} [emphasis] - it takes exactly "
+                    "one, in front of the word that sentence exists to deliver")
+        marked += n
+    if marked * 3 < len(sentences) * 2:
+        return (f"only {marked} of the {len(sentences)} sentences carry an "
+                "[emphasis] - every sentence takes one, in front of the word it "
+                "exists to deliver")
+    return ""
+
+
 def guess_gender(post: dict) -> str:
     """Fallback when the model forgets the tag: Reddit's own (28F) / (25M) markers."""
     m = re.search(r"\b\d{1,2}\s*([MFmf])\b", f"{post.get('title', '')} {post.get('text', '')}")
@@ -669,7 +701,8 @@ def _parse_parts(raw: str, post: dict, parts: int,
         label = f"part {i}: " if parts > 1 else ""
         faults += [label + f for f in
                    (_kin_fault(body),
-                    _ending_fault(body, final=i == len(chunks)))
+                    _ending_fault(body, final=i == len(chunks)),
+                    _emphasis_fault(body))
                    if f]
         # The title is narrated at the head of every part, so it counts against
         # every part's budget even though it is written once.
@@ -762,6 +795,23 @@ if __name__ == "__main__":
     assert (g3, t3, b3) == ("female", "Просто первая строка", "и тело."), (g3, t3, b3)
     assert guess_gender({"title": "TIFU by ignoring my (28F) sister"}) == "female"
     assert guess_gender({"title": "TIFU by losing my keys"}) == "male"
+
+    # One [emphasis] a sentence in the narration - the rule the prompt states
+    # and nothing checked until a real answer came back with one mark in 189
+    # words and passed every other gate on its way to the render.
+    _one = "Я [emphasis] пришла домой. Он [emphasis] молчал. Свет [emphasis] горел."
+    assert _emphasis_fault(_one) == "", _emphasis_fault(_one)
+    assert _emphasis_fault("") == ""
+    _bare = "Я пришла домой. Он молчал. Свет [emphasis] горел. Дверь была открыта."
+    assert "1 of the 4" in _emphasis_fault(_bare), _emphasis_fault(_bare)
+    # one bare sentence in a marked-up text is not worth a rewrite
+    assert _emphasis_fault(
+        "Я [emphasis] пришла. Он [emphasis] молчал. Свет горел.") == ""
+    assert "carries 2" in _emphasis_fault("Я [emphasis] пришла [emphasis] домой.")
+    # a cue in front of a sentence must not hide it from the count
+    _cued = ("[nervous] Я [emphasis] открыла дверь. [me, calm] «Ты [emphasis] дома?» "
+             "[sighing] Он [emphasis] не ответил.")
+    assert _emphasis_fault(_cued) == "", _emphasis_fault(_cued)
 
     # cues must survive in the body and vanish from the title and the word count
     assert strip_tags("[nervous] Я открыл. [shocked] Она знала.") == "Я открыл. Она знала."
@@ -1023,9 +1073,11 @@ if __name__ == "__main__":
     # half that is not the last
     RAW2 = ("NARRATOR: female\n"
             "TITLE: Свекровь [emphasis] потребовала ключи, а я сменила замки\n\n"
-            "Тело первой части. И тут я услышала её шаги на лестнице.\n"
+            "Тело [emphasis] первой части. И тут я услышала её [emphasis] шаги "
+            "на лестнице.\n"
             "---\n"
-            "Тело второй части. [doubtful] А вы бы её [emphasis] пустили в дом?")
+            "Тело [emphasis] второй части. [doubtful] А вы бы её [emphasis] "
+            "пустили в дом?")
     g4, p4, f4 = _parse_parts(RAW2, {"title": "", "text": ""}, 2, 6)
     assert g4 == "female" and len(p4) == 2, (g4, p4)
     # plain(), because a part keeps its markup all the way to voice.speak_parts
@@ -1035,18 +1087,19 @@ if __name__ == "__main__":
     # the whole point of the shape: both parts carry the SAME title, so the card
     # and the voice open every video of the story on one line
     assert p4[0][0] == p4[1][0], p4
-    assert p4[1][1].startswith("Тело второй"), p4[1]
+    assert plain(p4[1][1]).startswith("Тело второй"), p4[1]
     # the fixture is deliberately far off six words; nothing else may be wrong
     assert all("words" in f for f in f4), f4
     assert all(f.startswith("part ") for f in f4), "faults must name their part"
     # a later part writing its own TITLE: is the model reverting to the old
     # shape. The line must be stripped rather than narrated as the part's first
     # sentence, and it must be complained about so the rewrite drops it.
-    RAW_TITLED = RAW2.replace("Тело второй части.",
-                              "TITLE: Свекровь пришла с полицией\n\nТело второй части.")
+    RAW_TITLED = RAW2.replace(
+        "Тело [emphasis] второй части.",
+        "TITLE: Свекровь пришла с полицией\n\nТело [emphasis] второй части.")
     _, p9, f9 = _parse_parts(RAW_TITLED, {"title": "", "text": ""}, 2, 6)
     assert p9[1][0] == p4[0][0], "the shared title must survive a stray one"
-    assert p9[1][1].startswith("Тело второй"), p9[1]
+    assert plain(p9[1][1]).startswith("Тело второй"), p9[1]
     assert any(f.startswith("part 2") and "TITLE" in f for f in f9), f9
     # ...and the shared title is checked ONCE, however many parts there are
     assert sum("the TITLE is" in f for f in f9) <= 1, f9
@@ -1058,11 +1111,12 @@ if __name__ == "__main__":
     assert f"keep it under {MAX_TITLE_WORDS}" in _title_fault(over)
     assert "keep it under" not in _title_fault(" ".join(["слово"] * MAX_TITLE_WORDS))
     # only the last part may address the viewer, and only it must
-    RAW_BAD = RAW2.replace("И тут я услышала её шаги на лестнице.",
-                           "[curious] Как думаете, что было дальше?")
+    RAW_BAD = RAW2.replace("И тут я услышала её [emphasis] шаги на лестнице.",
+                           "[curious] Как [emphasis] думаете, что было дальше?")
     _, _, f7 = _parse_parts(RAW_BAD, {"title": "", "text": ""}, 2, 6)
     assert any(f.startswith("part 1") and "not the last" in f for f in f7), f7
-    RAW_BAD2 = RAW2.replace("[doubtful] А вы бы её [emphasis] пустили в дом?", "И она ушла.")
+    RAW_BAD2 = RAW2.replace("[doubtful] А вы бы её [emphasis] пустили в дом?",
+                             "И она [emphasis] ушла.")
     _, _, f8 = _parse_parts(RAW_BAD2, {"title": "", "text": ""}, 2, 6)
     assert any(f.startswith("part 2") and "question" in f for f in f8), f8
     # one part where two were asked for is a fault, not a silent single video
