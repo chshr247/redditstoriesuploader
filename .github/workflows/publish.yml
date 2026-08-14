@@ -196,6 +196,23 @@ jobs:
           python-version: "3.13"
           cache: pip
 
+      # Deliberately NOT behind the gate, and ahead of it. The gate decides
+      # whether a VIDEO can be made, and reading a comment is not making one -
+      # a slot opens every few hours, so a title judged only inside the gate
+      # would leave a misplaced [emphasis] unanswered for most of the six hours
+      # its author has to fix it. This runs on every tick instead: it accepts a
+      # title, refuses a bad one with the reason, or drops a dropped story, and
+      # writes the answer onto the row so the next gated run just renders.
+      # Never fatal - the pipeline published without any of this until now.
+      # Costs one gh call on the ticks where nothing is out for review.
+      - name: Has the title come back?
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pip install -q python-dotenv
+          python review.py --check
+
       # Deliberately ahead of ffmpeg, the caches and the dependency install.
       # Most hourly runs are refused, and a refused run has to cost seconds -
       # otherwise thirteen runs a day each pay for an apt-get first and find
@@ -544,8 +561,15 @@ jobs:
                 --assignee "${{ github.repository_owner }}" \
                 --body-file -
 
+      # Not tied to the gate any more. The title check above runs on every tick,
+      # gate or no gate, and it writes to seen.db: which comment it has already
+      # judged, and the title once one is accepted. Thrown away with the runner,
+      # both come back - the same comment is judged again half an hour later and
+      # refused again with the same complaint, every tick, until it is answered.
+      # The step already no-ops on a clean file, so running it always costs a
+      # `git status` on the ticks that changed nothing.
       - name: Keep the state file
-        if: always() && steps.gate.outputs.go == 'true'
+        if: always()
         run: |
           if [ -n "$(git status --porcelain seen.db)" ]; then
             git config user.name  "github-actions[bot]"

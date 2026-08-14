@@ -18,20 +18,31 @@ import os
 import re
 import sys
 
-from openai import OpenAI
-
 # prompts.py is not in this repo. This one is public and must stay public, so
 # the prompt set lives in a private one cloned to .private/ - by CI with a
 # deploy key, by hand for local work. Nothing else is over there, and putting
 # the directory on the path rather than copying the file out of it keeps one
 # copy to edit instead of two to keep in step.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".private"))
-try:
-    import prompts
-except ImportError:
-    raise SystemExit(
-        "prompts.py not found - clone the private repo into .private/ "
-        "(git clone https://github.com/chshr247/reddit-prompts.git .private)") from None
+
+
+def _prompts():
+    """(SYSTEM, MULTI), imported on use rather than at import time.
+
+    Both this and the OpenAI SDK belong to write_script() and to nothing else,
+    and CI checks the private repo out only for a run that is going to call the
+    model. Keeping them out of module scope is what lets review.py - which
+    imports this file for _title_fault() and the word ceiling - run its title
+    check on every tick, ahead of the gate, with nothing installed but dotenv.
+    """
+    try:
+        import prompts
+    except ImportError:
+        raise SystemExit(
+            "prompts.py not found - clone the private repo into .private/ "
+            "(git clone https://github.com/chshr247/reddit-prompts.git .private)"
+        ) from None
+    return prompts.SYSTEM, prompts.MULTI
 
 import safety
 from config import (LLM_BASE_URL, LLM_MODEL, OPENAI_API_KEY, OUTPUT_LANG,
@@ -65,11 +76,10 @@ LANG_NAME = {"ru": "Russian", "en": "English"}
 
 log = logging.getLogger(__name__)
 
-# One set of instructions per channel language, kept in prompts.py: the
-# examples are most of the prompt, and examples in the wrong language teach
-# the wrong thing. MULTI is still appended to SYSTEM, so an ordinary video
-# keeps hitting the provider's prefix cache on SYSTEM alone.
-SYSTEM, MULTI = prompts.SYSTEM, prompts.MULTI
+# One set of instructions per channel language, kept in prompts.py and read
+# through _prompts(): the examples are most of the prompt, and examples in the
+# wrong language teach the wrong thing. MULTI is still appended to SYSTEM, so an
+# ordinary video keeps hitting the provider's prefix cache on SYSTEM alone.
 
 # A separator line the model actually produces, and nothing else: the prompt
 # bans markup, so a bare rule can only be the one we asked for.
@@ -685,6 +695,9 @@ def write_script(post: dict, parts: int = 1) -> tuple[str, list[tuple[str, str]]
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is empty - fill in .env")
 
+    from openai import OpenAI
+
+    SYSTEM, MULTI = _prompts()
     client = OpenAI(api_key=OPENAI_API_KEY, base_url=LLM_BASE_URL or None)
     target = _target_words()
     lang = OUTPUT_LANG
@@ -1062,7 +1075,7 @@ if __name__ == "__main__":
 
     # the prompt set has to exist for the channel this process is, or the run
     # dies deep inside write_script() with a KeyError instead of here
-    assert OUTPUT_LANG in SYSTEM and OUTPUT_LANG in WEAK_TITLE, OUTPUT_LANG
+    assert OUTPUT_LANG in _prompts()[0] and OUTPUT_LANG in WEAK_TITLE, OUTPUT_LANG
 
     print(f"logic ok: {OUTPUT_LANG}, {_wpm()} wpm, target {tw} words "
           f"for {TARGET_SEC}+{CTA_SEC} sec")
