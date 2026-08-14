@@ -176,10 +176,15 @@ def waiting() -> bool:
                                (OUTPUT_LANG,)).fetchone())
 
 
-def ready() -> dict | None:
-    """The parked story with its final title, or None while it is still out.
+def _poll(timeout: bool) -> dict | None:
+    """Read the issue and act on it. Returns the story when it is ready to go.
 
-    Renders on the model's own title once HOURS have passed - see the constant.
+    `timeout` is the only difference between the two callers. check() runs on
+    every tick, ahead of the gate, and answers the user: it accepts a title, it
+    refuses a bad one, it drops a dropped story. ready() runs in a gated run,
+    the one that can actually render, and it alone may decide that HOURS have
+    passed with no answer - a fallback that fires hours before anything could
+    render on it would start the clock in the wrong place.
     """
     with _db() as db:
         row = db.execute(f"SELECT {','.join(_COLS)} FROM review WHERE lang=? "
@@ -210,7 +215,7 @@ def ready() -> dict | None:
         log.info("%s: title refused (%s)", r["post_id"], fault)
         return None
     if not title:
-        if time.time() - r["ts"] < HOURS * 3600:
+        if not timeout or time.time() - r["ts"] < HOURS * 3600:
             return None
         _gh("issue", "comment", str(r["issue"]),
             "--body", f"{HOURS} ч без ответа — ушло название модели.")
@@ -224,6 +229,24 @@ def ready() -> dict | None:
 
     r["title"] = title
     return r
+
+
+def ready() -> dict | None:
+    """The parked story with its final title, or None while it is still out."""
+    return _poll(timeout=True)
+
+
+def check() -> str:
+    """Answer the user without rendering anything. Safe outside the gate.
+
+    The render has to happen in a run that can publish - out/ dies with the
+    runner - so it waits for a slot, and slots open every few hours. Judging a
+    title does not: this runs on every tick, so a misplaced [emphasis] comes
+    back in half an hour instead of three, and by the time a slot opens the
+    answer is already on the row.
+    """
+    r = _poll(timeout=False)
+    return r["title"] if r else ""
 
 
 def rendered(post_id: str) -> None:
@@ -251,7 +274,20 @@ def close(post_id: str, note: str) -> None:
 
 
 if __name__ == "__main__":
+    import sys
+
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+    # The gate does not guard this and must not: it decides whether a video can
+    # be made, and reading a comment is not making one.
+    if "--check" in sys.argv:
+        if not waiting():
+            print("nothing is out for review")
+        elif t := check():
+            print(f"title settled: {t}")
+        else:
+            print("still waiting on a title")
+        sys.exit(0)
 
     OWNER, MODEL = "chshr247", "Я [emphasis] закрыла камеру сестре мужа ладонью, хотя она обещала"
 
