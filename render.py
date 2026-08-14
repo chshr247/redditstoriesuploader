@@ -61,6 +61,14 @@ CARD_ACCENT = "&H001A1ACC"
 # Both quote shapes, because the channels use different ones - «» and “”.
 ACCENT = re.compile(r"\d+|«[^»]*»|“[^”]*”")
 CARD_POP_MS = 70           # how fast the card's highlight moves onto a word
+# How long the whole title holds before the pairs begin. It was one frame, on
+# the belief that TikTok lifts the cover from frame zero; it does not - uploads
+# land in the inbox and TikTok picks the cover itself, and on 2026-08-14 it
+# picked out of the first pair's window, so the cover read "Дочь разрушила"
+# instead of the title. Frame zero is verified correct, it is just not the frame
+# they take. Wide enough to catch that pick, short enough to stay a cover rather
+# than a still.
+COVER_SEC = 0.6
 # "Часть 2", set under the title inside the same box. Small and grey: it is a
 # label, not part of the hook, and it must not compete with the line above it
 # for the second the card has. It is drawn here and nowhere else in the video -
@@ -111,12 +119,13 @@ def _ts(sec: float) -> str:
 
 
 def _sung(words: list[dict], title_end: float) -> list[tuple[float, float, str]]:
-    """(start, end, card text) for the title card: a cover frame, then windows.
+    """(start, end, card text) for the title card: a cover, then windows.
 
-    Frame ONE carries the whole title and nothing else. TikTok takes a video's
-    cover from its opening frame, so that frame has to be the finished line
-    rather than the first two words of it - it is one frame at FPS, nobody
-    reads it in playback, and it is not there to be read.
+    The opening COVER_SEC carry the whole title and nothing else. TikTok picks
+    the cover of an inbox draft itself, and it picks out of the opening - so the
+    opening has to be the finished line rather than the first two words of it.
+    It was one frame until 2026-08-14, on the belief that frame zero is what
+    gets lifted; frame zero is right and is not what they took.
 
     Everything after it is a PAIR of words, both in CARD_TEXT, with whichever
     one is being spoken lit in CARD_ACCENT. The pair holds still while the
@@ -161,15 +170,16 @@ def _sung(words: list[dict], title_end: float) -> list[tuple[float, float, str]]
     if not clean:
         return []
 
-    # One frame, in the same centiseconds _ts() will round it to, so the cover
-    # and the first pair cannot both be live on any frame - two Dialogue
-    # events on one layer would draw over each other.
-    frame = round(1 / FPS, 2)
-    out = [(0.0, frame, " ".join(t for _, t in clean))]
+    # In the same centiseconds _ts() will round it to, so the cover and the
+    # first pair cannot both be live on any frame - two Dialogue events on one
+    # layer would draw over each other. Never past the card itself: a title
+    # shorter than COVER_SEC keeps the cover and drops every window below.
+    cover_end = round(min(COVER_SEC, title_end), 2)
+    out = [(0.0, cover_end, " ".join(t for _, t in clean))]
     for i, (start, _) in enumerate(clean):
         end = clean[i + 1][0] if i + 1 < len(clean) else title_end
-        # the cover frame has already run, so the first pair opens after it
-        start = max(start, frame)
+        # the cover has already run, so the first pair opens after it
+        start = max(start, cover_end)
         if end <= start:
             continue
         # the pair this unit belongs to, whether it opens or closes it
@@ -803,12 +813,12 @@ if __name__ == "__main__":
     # being read out. Ahead of the mp3 gate below on purpose - this needs no
     # audio and it is the assertion that catches the marker leaking into the
     # voice track, so it must run even when out/ is empty.
-    _tw = [{"word": "Соседка", "start": 0.0, "end": 0.4},
-           {"word": "прислала", "start": 0.4, "end": 0.9}]
+    _tw = [{"word": "Соседка", "start": 0.0, "end": 0.7},
+           {"word": "прислала", "start": 0.7, "end": 1.2}]
     _ass = OUT_DIR / "_check_part.ass"
-    build_ass([], _ass, "Соседка прислала счёт", 1.2, _tw, part=2)
+    build_ass([], _ass, "Соседка прислала счёт", 1.5, _tw, part=2)
     _txt = _ass.read_text("utf-8")
-    # one window per word, plus the cover frame in front of them
+    # one window per word, plus the cover in front of them
     assert _txt.count(f"\\N{{\\fs{CARD_PART_SIZE}") == len(_tw) + 1, _txt
     assert f"{PART_WORD['ru']} 2" in _txt, _txt
     # ...on every event of the card, so it does not blink with the lit word
@@ -850,25 +860,29 @@ if __name__ == "__main__":
     for t in ("счёт на 80000 за потоп", "сказала «этот ребёнок не наш»"):
         assert _accent(t).count(CARD_ACCENT) == _accent(t).count(CARD_TEXT)
 
-    # Frame one is the whole title - that is the frame TikTok lifts as the
-    # cover, so it must carry the finished line and not the first window.
-    tw = [_w("Соседка", 0.0, 0.4), _w("прислала", 0.4, 0.9), _w("счёт.", 0.9, 1.4)]
-    cards = _sung(tw, 1.6)
+    # The opening is the whole title - that is what TikTok lifts as the cover,
+    # so it must carry the finished line and not the first window.
+    tw = [_w("Соседка", 0.0, 0.6), _w("прислала", 0.7, 1.1), _w("счёт.", 1.2, 1.7)]
+    cards = _sung(tw, 2.0)
     cover, windows = cards[0], cards[1:]
     assert cover[0] == 0.0 and cover[2] == "Соседка прислала счёт", cover
-    assert CARD_ACCENT not in cover[2], "the cover frame is not lit, it is read"
-    # ...and it lasts exactly one frame, so playback never shows the jump
-    assert _ts(cover[1]) == _ts(1 / FPS), cover
-    # after it, one event per word
+    assert CARD_ACCENT not in cover[2], "the cover is not lit, it is read"
+    # ...and it holds long enough that TikTok's own pick lands inside it. One
+    # frame was the bug: the pick came out of the first pair instead.
+    assert cover[1] == COVER_SEC > 3 / FPS, cover
+    # after it, one event per word that still has room left
     assert len(windows) == len(tw), windows
+    # a title shorter than the cover is all cover and no windows - the cover
+    # must not outlive the card it opens
+    assert _sung([_w("Съехали", 0.0, 0.3)], 0.4) == [(0.0, 0.4, "Съехали")]
     # exactly ONE word is lit at a time. The first attempt animated a single
     # line and every word inherited the ones before it, so the whole tail of
     # the title lit up at once - this is the assertion that would have caught it.
     for start, end, text in windows:
         assert text.count(CARD_ACCENT) == 1, text
-    # the cover frame owns the first frame, so the first pair starts after it
-    assert [round(s, 2) for s, _, _ in windows] == [round(1 / FPS, 2), 0.4, 0.9]
-    assert [round(e, 2) for _, e, _ in windows] == [0.4, 0.9, 1.6]
+    # the cover owns the opening, so the first pair starts after it
+    assert [round(s, 2) for s, _, _ in windows] == [COVER_SEC, 0.7, 1.2], windows
+    assert [round(e, 2) for _, e, _ in windows] == [0.7, 1.2, 2.0], windows
     # The pair HOLDS while the accent walks across it - both events show the
     # same two words. A sliding window would have moved the text every step,
     # and this is the assertion that tells the two apart.
@@ -882,14 +896,14 @@ if __name__ == "__main__":
     # never more than a pair on screen, however the words grouped
     for _, _, text in windows:
         assert len(_bare(text).split()) <= 4, text
-    # no event may overlap the cover frame: two Card events live on one frame
-    # draw over each other, and the cover is the one that loses
+    # no event may overlap the cover: two Card events live on one frame draw
+    # over each other, and the cover is the one that loses
     assert all(_ts(s) >= _ts(cover[1]) for s, _, _ in windows), windows
     # a one-letter word must not be lit on its own, exactly as it gets no card
     # of its own in the story - _group() is what both the card and the story go
     # through, so "в" arrives glued to the word it belongs with
-    narrow = _sung([_w("Тёща", 0.0, 0.4), _w("в", 0.4, 0.5),
-                    _w("нашей", 0.5, 1.0), _w("квартире.", 1.0, 1.5)], 1.6)
+    narrow = _sung([_w("Тёща", 0.0, 0.7), _w("в", 0.7, 0.8),
+                    _w("нашей", 0.8, 1.3), _w("квартире.", 1.3, 1.9)], 2.1)
     assert len(narrow) == 4, narrow          # cover + three events, not four
     assert f"{{\\c{CARD_ACCENT}&}}в нашей{{\\c{CARD_TEXT}&}}" in narrow[2][2], narrow[2]
     assert _bare(narrow[1][2]) == _bare(narrow[2][2]) == "Тёща в нашей", narrow
