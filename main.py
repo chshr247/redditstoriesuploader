@@ -101,7 +101,10 @@ def make_reviewed(r: dict) -> Path:
     and all of the parts were written against it in a single call.
     """
     post = {"id": r["post_id"], "sub": r["sub"], "score": r["score"]}
-    written = [(r["title"], body) for _, body in r["written"]]
+    # Already final: review.py has folded the chosen title and any narration
+    # rewritten by hand into it, and a rewrite may have merged three parts into
+    # two - so the count comes from here and not from what the model wrote.
+    written = r["written"]
     if len(written) > 1:
         source.queue_parts(post, written, r["gender"],
                            voice.pick_voice(r["gender"]), issue=r["issue"])
