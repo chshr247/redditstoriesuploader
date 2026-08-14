@@ -690,6 +690,14 @@ def upload_next(direct: bool = False, private: bool = True,
     # so anything added below would land in the issue body.
     state = await_send(pid)
     print(f"STATE: {state}")
+    # Where the caption goes: the issue the title was chosen on. A story is one
+    # case there - asked for, answered, then published - so its caption belongs
+    # in it rather than in an issue of its own, and every part of a split story
+    # comments into the same one as it is sent. Nothing here closes it: a draft
+    # sits in the app until a human taps publish, and an open issue is what says
+    # so. Zero means the file predates the review flow and the workflow opens an
+    # issue for it as it always did.
+    print(f"ISSUE: {meta.get('issue', 0)}")
     # A draft gets no caption from the API, so this print IS the caption and
     # the workflow forwards it to be pasted by hand. Withheld on FAILED alone -
     # there is then no draft to publish, and a reminder about one is worse than

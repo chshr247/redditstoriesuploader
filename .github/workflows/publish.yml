@@ -366,12 +366,18 @@ jobs:
       # seen.db would still mark it used.
       - name: Make one video and publish it
         if: steps.gate.outputs.go == 'true'
+        # review.py opens the title issue and reads the answer off it with gh.
+        # Without a token here the run cannot ask, and main.py deliberately
+        # writes nothing at all rather than pay the LLM for a script nobody can
+        # answer for - so a missing token costs slots, silently, until noticed.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           # --force reaches main.py too: the awaited part is otherwise rendered
           # only in a run that may send it, and a forced run is exactly the one
           # that may send it regardless of the clock.
           if ! python main.py 1 ${{ (inputs.force == true || inputs.force_tiktok == true) && '--force' || '' }}; then
-            echo "::warning::no video produced this run (story pool dry or all skipped)"
+            echo "::warning::no video this run (title out for review, pool dry, or all skipped)"
             exit 0
           fi
 
@@ -459,7 +465,17 @@ jobs:
           # the blank lines behind it. Dropping a line beats matching the id,
           # which would tie this to the shape TikTok happens to give them.
           caption=$(printf '%s\n' "$caption" | head -n -1)
-          if [ -n "$caption" ]; then
+          # One story is one issue: the one its title was chosen on. The caption
+          # goes back there as a comment, so approving a story and publishing it
+          # are two entries in one thread instead of two unrelated issues - and
+          # every part of a split story comments into that same thread. Zero, or
+          # absent, means the file was made before the review flow existed, and
+          # then this opens an issue exactly as it used to.
+          issue=$(sed -n 's/^ISSUE: //p' /tmp/tiktok.out | tail -1)
+          if [ -n "$caption" ] && [ -n "$issue" ] && [ "$issue" != "0" ]; then
+            printf 'Черновик ушёл в инбокс TikTok. Подпись:\n\n%s\n' "$caption" \
+              | gh issue comment "$issue" --body-file -
+          elif [ -n "$caption" ]; then
             # The channel is in the title because the reminder is useless
             # without it: the two TikTok accounts are unrelated, and the only
             # thing that says which app account to publish from is this line.

@@ -69,8 +69,14 @@ def _db():
     db.execute("CREATE TABLE IF NOT EXISTS parts("
                "post_id TEXT, n INT, total INT, title TEXT, body TEXT, "
                "gender TEXT, voice TEXT, sub TEXT, ts REAL, "
-               "done INT DEFAULT 0, tries INT DEFAULT 0, "
+               "done INT DEFAULT 0, tries INT DEFAULT 0, issue INT DEFAULT 0, "
                "PRIMARY KEY(post_id, n))")
+    # The issue the story's title was chosen on, carried so every part's caption
+    # lands back in it - one story is one case, and a split one would otherwise
+    # open a fresh issue per part. Added later; rows written before this keep 0,
+    # which reads as "no issue" and falls back to opening one.
+    if "issue" not in {c[1] for c in db.execute("PRAGMA table_info(parts)")}:
+        db.execute("ALTER TABLE parts ADD COLUMN issue INT DEFAULT 0")
     # Candidates harvested ahead of time, so choosing a story and finding one
     # are no longer the same act - see POOL_LOW. Not per language: what has been
     # harvested is available to every channel whose sub list covers it, and
@@ -658,26 +664,29 @@ def next_planned() -> dict | None:
 # ---------------------------------------------------------------- split stories
 
 def queue_parts(post: dict, parts: list[tuple[str, str]], gender: str,
-                voice: str) -> None:
+                voice: str, issue: int = 0) -> None:
     """Store every part of a split story. Part 1 is rendered straight away.
 
     The voice id is stored with them on purpose: pick_voice() draws at random,
     and a story that changes narrator halfway sounds like two different videos
-    stitched together.
+    stitched together. `issue` travels for the same reason - the parts are one
+    story, told under one title chosen in one place, and their captions belong
+    back in that place.
     """
     now = time.time()
     with _db() as db:
         db.executemany(
             "INSERT OR REPLACE INTO parts(post_id, n, total, title, body, "
-            "gender, voice, sub, ts, done, tries, lang) "
-            "VALUES (?,?,?,?,?,?,?,?,?,0,0,?)",
+            "gender, voice, sub, ts, done, tries, lang, issue) "
+            "VALUES (?,?,?,?,?,?,?,?,?,0,0,?,?)",
             [(post["id"], i, len(parts), title, body, gender, voice, post["sub"],
-              now, OUTPUT_LANG)
+              now, OUTPUT_LANG, issue)
              for i, (title, body) in enumerate(parts, 1)])
     log.info("%s: queued %d parts", post["id"], len(parts))
 
 
-_PART_COLS = ("post_id", "n", "total", "title", "body", "gender", "voice", "sub")
+_PART_COLS = ("post_id", "n", "total", "title", "body", "gender", "voice",
+              "sub", "issue")
 
 
 def next_part() -> dict | None:
