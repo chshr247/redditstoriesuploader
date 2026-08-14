@@ -1,0 +1,88 @@
+name: review
+
+# Answer a title the moment it is written, instead of on the next tick.
+#
+# publish.yml already judges titles on every tick, twice an hour, and that
+# stays - it is what catches an answer written while nothing was running. This
+# is the fast path: comment, and the verdict comes back in under a minute.
+on:
+  issue_comment:
+    types: [created]
+
+# The SAME group publish.yml uses, and that is the whole reason this is safe to
+# add: both write seen.db, and two runs writing it at once lose one of them.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  check:
+    # Only the owner's comments, for two reasons that happen to agree. The repo
+    # is public, so anyone can comment, and review.py trusts nobody else either
+    # - a run for a stranger's comment could only ever decide to do nothing.
+    # And the bot itself comments here: the caption of a draft, the reason a
+    # title was refused. Without this line every one of those would start
+    # another run, which would comment, which would start another.
+    if: >-
+      github.event.comment.user.login == github.repository_owner &&
+      !github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write        # the verdict is written into seen.db and pushed
+      issues: write          # ...and said out loud on the issue
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      # Which channel this issue belongs to, read out of the review table by
+      # issue number. Not parsed out of the title: an issue title in a public
+      # repo is whatever somebody typed, and a channel is not a thing to guess
+      # at - the Russian answer reaching the English story would publish one
+      # channel's text under the other's name. An issue with no row is not a
+      # review issue at all (a TikTok draft reminder, or anything else someone
+      # opened), and this stops.
+      - name: Whose issue is this?
+        id: who
+        env:
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          pip install -q python-dotenv
+          lang=$(python review.py --lang-of "$ISSUE")
+          if [ -z "$lang" ]; then
+            echo "issue #$ISSUE is not waiting on a title - nothing to do"
+          fi
+          echo "lang=$lang" >> "$GITHUB_OUTPUT"
+
+      - name: Read the answer
+        if: steps.who.outputs.lang != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUTPUT_LANG: ${{ steps.who.outputs.lang }}
+        run: python review.py --check
+
+      # The same reason publish.yml keeps it: the run records which comment it
+      # has already judged. Thrown away with the runner, the next run judges it
+      # again and repeats the same complaint. Rebase and retry rather than merge
+      # - seen.db is binary and a conflict here is a state file to reconcile by
+      # hand, never something to resolve automatically.
+      - name: Keep the state file
+        if: always() && steps.who.outputs.lang != ''
+        run: |
+          [ -n "$(git status --porcelain seen.db)" ] || { echo "unchanged"; exit 0; }
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add seen.db
+          git commit -m "state: title review (${{ steps.who.outputs.lang }}) [skip ci]"
+          for i in 1 2 3; do
+            git push && exit 0
+            git pull --rebase --no-rebase-merges origin main || {
+              echo "::error::seen.db conflicts with origin/main - the verdict above is NOT recorded"
+              exit 1
+            }
+          done
+          echo "::error::seen.db still unpushed after 3 tries"
+          exit 1

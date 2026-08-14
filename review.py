@@ -377,6 +377,17 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
+    # Which channel owns an issue, asked by number and answered from the table
+    # rather than from the "[ru]" in its title. A comment arriving on GitHub has
+    # to reach the right channel and only that one, and the title of an issue in
+    # a public repo is whatever anyone typed - the row is the fact.
+    if "--lang-of" in sys.argv:
+        n = int(sys.argv[sys.argv.index("--lang-of") + 1])
+        with _db() as db:
+            row = db.execute("SELECT lang FROM review WHERE issue=?", (n,)).fetchone()
+        print(row[0] if row else "")
+        sys.exit(0)
+
     # The gate does not guard this and must not: it decides whether a video can
     # be made, and reading a comment is not making one.
     if "--check" in sys.argv:
