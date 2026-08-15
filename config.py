@@ -91,8 +91,39 @@ LLM_MODEL = os.getenv("LLM_MODEL", "gpt-5-mini")
 # DeepSeek and friends speak the OpenAI protocol; empty means api.openai.com
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
 
-TTS_BACKEND = os.getenv("TTS_BACKEND", "fish")     # fish | edge
+# `or` rather than a getenv default, because an unset repository variable
+# arrives as an empty string and not as absent - see chan_env() above.
+TTS_BACKEND = os.getenv("TTS_BACKEND", "") or "eleven"    # eleven | fish | edge
 TTS_VOICE = os.getenv("TTS_VOICE", "en-US-BrianMultilingualNeural")   # edge only
+
+# --- ElevenLabs (https://elevenlabs.io/app/settings/api-keys) ---
+# Primary since 2026-08-15. Fish stays behind it as the fallback: when the
+# month's credits run out ElevenLabs answers 401 quota_exceeded, and voice.py
+# switches the rest of the run over rather than dropping a video.
+ELEVEN_API_KEY = os.getenv("ELEVEN_API_KEY", "")
+# multilingual_v2 is the one that both speaks Russian and returns timestamps.
+# v3 understands the [cue] syntax but has no timestamp endpoint, and timings are
+# not optional here - they are what lights up the subtitles.
+ELEVEN_MODEL = os.getenv("ELEVEN_MODEL", "") or "eleven_multilingual_v2"
+# Voice ids from elevenlabs.io/app/voice-library, per gender and per channel for
+# the same reason the fish lists are - see FISH_VOICES_MALE below. No default:
+# an empty list here means this channel has no ElevenLabs narrator and falls
+# straight through to fish.
+ELEVEN_VOICES_MALE = [v.strip() for v in chan_env("ELEVEN_VOICES_MALE").split(",") if v.strip()]
+ELEVEN_VOICES_FEMALE = [v.strip() for v in chan_env("ELEVEN_VOICES_FEMALE").split(",") if v.strip()]
+# The only thing steering delivery on this backend. Fish takes [cues] and reads
+# them; multilingual_v2 would read the brackets out loud, so the cues are
+# stripped and these two are what is left to tune against a flat, even read.
+#   stability - LOWER is more expressive. 0.5 is the API default and is the
+#               register that sounded like grey stone on fish; 0.35 gives the
+#               narration somewhere to move. Below ~0.25 it starts wandering
+#               between takes, and the title, story and question of one video
+#               stop sounding like one person.
+#   style     - pushes the voice further towards how its sample was performed.
+#               Costs latency and, past ~0.4, stability. 0 is off.
+# Tune by ear on a real story, not on one sentence - see `python voice.py`.
+ELEVEN_STABILITY = float(os.getenv("ELEVEN_STABILITY", "") or 0.35)
+ELEVEN_STYLE = float(os.getenv("ELEVEN_STYLE", "") or 0.25)
 
 # --- Fish Audio (https://fish.audio/app/developers) ---
 FISH_API_KEY = os.getenv("FISH_API_KEY", "")
@@ -346,6 +377,9 @@ if __name__ == "__main__":
     print(f"OK: channel {CHANNEL}, {len(SUBREDDITS)} subs, "
           f"{TARGET_SEC}s (floor {MIN_SEC}s), score from {MIN_SCORE}, "
           f"loud at {LOUD_AT}")
+    print(f"    tts: {TTS_BACKEND}"
+          f"   eleven: {len(ELEVEN_VOICES_MALE)}m/{len(ELEVEN_VOICES_FEMALE)}f"
+          f" {'key set' if ELEVEN_API_KEY else 'NO KEY'}")
     print(f"    voices: {len(FISH_VOICES_MALE)} male, {len(FISH_VOICES_FEMALE)} female"
           f"   yt token: {'set' if YT_REFRESH_TOKEN else 'MISSING'} ({YT_REFRESH_KEY})"
           f"   tiktok token: {'set' if TIKTOK_REFRESH_TOKEN else 'MISSING'}")
