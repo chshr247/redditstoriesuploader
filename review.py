@@ -119,7 +119,9 @@ def _body(post: dict, written: list) -> str:
         f"до {script.MAX_TITLE_WORDS} слов, одно предложение.\n\n"
         f"**Через пустую строку — новый текст истории**, если хочешь его "
         f"переписать. Если после пустой строки ничего нет, текст модели идёт "
-        f"как есть. Части до последней обрываются на самом интересном, без "
+        f"как есть. **Один вопрос и больше ничего** — заменится только "
+        f"закрывающий вопрос, текст останется моделевский. "
+        f"Части до последней обрываются на самом интересном, без "
         f"вопроса. Последняя закрывается вопросом зрителю с меткой настроения и "
         f"одним `[emphasis]` — `[doubtful] А вы бы [emphasis] сделали так же?`; "
         f"а если просто оборвёшь текст без вопроса, подставится вопрос модели. "
@@ -199,6 +201,17 @@ def _choose(comments: list[dict], owner: str, written: list, answered: int
     # Split on the separator the model itself writes, so a story rewritten by
     # hand is punctuated exactly like the answer it replaces.
     bodies = [script._clean(c) for c in script.PART_SEP.split(tail) if c.strip()]
+    # One question and nothing else swaps ONLY the closing question, and the
+    # narration stays the model's. Without this, changing the last sentence
+    # means retyping the whole story - twice over on a split, where the question
+    # lives at the end of the last part and four hundred words stand in front of
+    # it. Checked before the borrow below, whose condition is the opposite one.
+    if len(bodies) == 1 and _only_question(bodies[0]):
+        if fault := script._cta_fault(bodies[0]):
+            return "", [], fault, last["id"]
+        question = bodies[0]
+        bodies = [b for _, b in written]
+        bodies[-1] = f"{script.split_cta(bodies[-1])[0]} {question}".strip()
     # A closing question is required and is a nuisance to type: a mood cue, one
     # [emphasis], and not on the last word. So a rewrite that simply ends -
     # ends, no question mark at all - keeps the one the model already wrote for
@@ -210,6 +223,18 @@ def _choose(comments: list[dict], owner: str, written: list, answered: int
     if fault := _body_fault(bodies, title, len(written)):
         return "", [], fault, last["id"]
     return title, bodies, "", last["id"]
+
+
+def _only_question(body: str) -> bool:
+    """One sentence, and it is a question - the shape that means "just the CTA".
+
+    A narration is never one sentence, so there is nothing this can be confused
+    with. It has to be checked before the borrow in _choose(), which fires on
+    the opposite condition: a text that does NOT end on a question.
+    """
+    sentences = [s for s in script.SENTENCE.split(body.strip())
+                 if script.plain(s).strip()]
+    return len(sentences) == 1 and script.plain(body).rstrip().endswith("?")
 
 
 def _body_fault(bodies: list[str], title: str, parts: int) -> str:
@@ -404,9 +429,11 @@ if __name__ == "__main__":
     OWNER = "chshr247"
     MODEL = "Я [emphasis] закрыла камеру сестре мужа ладонью, хотя она обещала"
     MODEL_CTA = "[curious] А вы бы [emphasis] поверили ей на слово?"
-    ONE = [[MODEL, "Модель написала историю. " * 20 + MODEL_CTA]]
-    THREE = [[MODEL, "Часть первая."], [MODEL, "Часть вторая."],
-             [MODEL, "Часть третья кончилась. " + MODEL_CTA]]
+    ONE = [[MODEL, "Модель написала историю. " * 60 + MODEL_CTA]]
+    FILLER = "Модель написала эту часть сама. " * 37
+    THREE = [[MODEL, FILLER + "И тут всё оборвалось."],
+             [MODEL, FILLER + "И тут оборвалось снова."],
+             [MODEL, FILLER + MODEL_CTA]]
 
     def c(i, login, body):
         return {"id": i, "user": {"login": login}, "body": body}
@@ -476,6 +503,25 @@ if __name__ == "__main__":
     short = "Коротко и всё. [doubtful] А вы бы [emphasis] сделали так же?"
     _, _, fault, _ = _choose([c(12, OWNER, f"{mine}\n\n{short}")], OWNER, ONE, 0)
     assert "слов" in fault, fault
+    # One question and nothing else swaps only the closing question: the model's
+    # narration survives, with its old question cut off the end of the last part.
+    NEWQ = "[curious] А вы бы [emphasis] пошли к директору из-за оценки?"
+    got, bodies, fault, _ = _choose([c(19, OWNER, f"{mine}\n\n{NEWQ}")],
+                                    OWNER, ONE, 0)
+    assert (got, fault) == (mine, ""), (got, fault)
+    assert len(bodies) == 1 and bodies[0].endswith(NEWQ), bodies[0][-90:]
+    assert MODEL_CTA not in bodies[0], "the old question was left in place"
+    assert bodies[0].startswith("Модель написала историю."), bodies[0][:40]
+    # ...and on a split it lands at the end of the LAST part and nowhere else
+    got, bodies, fault, _ = _choose([c(20, OWNER, f"+\n\n{NEWQ}")], OWNER, THREE, 0)
+    assert fault == "" and len(bodies) == 3, (fault, len(bodies))
+    assert bodies[-1].endswith(NEWQ) and not bodies[0].endswith(NEWQ), bodies
+    assert bodies[0] == THREE[0][1], bodies[0][:50]
+    # a question with no mood cue is refused like any other
+    _, _, fault, _ = _choose([c(21, OWNER, f"{mine}\n\nА вы бы пошли к директору?")],
+                             OWNER, ONE, 0)
+    assert "mood cue" in fault, fault
+
     # A split story rewritten by hand: parts split on the model's own separator,
     # and only the last one closes on the question to the viewer.
     mid = "Я работал в ночную смену и однажды нашёл в подсобке коробку. " * 17
