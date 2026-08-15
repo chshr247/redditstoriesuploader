@@ -345,7 +345,12 @@ if __name__ == "__main__":
         rendered.clear()
         source.next_part = lambda: None
         written = []
-        source.fetch = lambda *a: [{"id": "y", "sub": "s", "score": 1, "title": "t"}]
+        # "text" included on purpose: part_count() reads it, and whether it is
+        # reached depends on source.multipart_today(), which reads the live
+        # seen.db. A stub without it passes or raises depending on what the
+        # channel published today, which is not something a test may depend on.
+        source.fetch = lambda *a: [{"id": "y", "sub": "s", "score": 1,
+                                    "title": "t", "text": "x" * 500}]
         globals()["write_and_park"] = lambda p, n=1: written.append(p["id"])
         review.waiting = lambda: True
         assert main(1) == 1 and not written, "a pending title must block the pool"
