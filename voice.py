@@ -1,15 +1,25 @@
 """Step 3: narration text -> mp3 + per-word timings.
 
-Two backends, and they differ in where timings come from:
+Three backends, and they differ in where timings come from:
 
-  edge  - edge-tts emits WordBoundary events while synthesizing, so timings
-          are authoritative: the engine reports what it itself spoke.
-  fish  - Fish Audio returns audio and nothing else. Timings are recovered
-          locally with whisper. We take whisper's TIMES but never its TEXT -
-          it mishears ("все семьи" for "всей семье"), so the script's own
-          words are aligned onto its timeline with difflib.
+  eleven - ElevenLabs, the primary. Its /with-timestamps endpoint hands back
+           the audio and a start/end for every CHARACTER it was given, so the
+           timings are the engine's own and whisper never runs.
+  edge   - edge-tts emits WordBoundary events while synthesizing, so timings
+           are authoritative too: the engine reports what it itself spoke.
+  fish   - Fish Audio returns audio and nothing else. Timings are recovered
+           locally with whisper. We take whisper's TIMES but never its TEXT -
+           it mishears ("все семьи" for "всей семье"), so the script's own
+           words are aligned onto its timeline with difflib.
+
+Delivery cues ([urgent hook], [sad], the speaker labels) are a Fish feature.
+They are written into every script regardless and stripped on the way to the
+screen, so the eleven and edge paths simply narrate the stripped text - which
+also means a script never has to be rewritten when the backend changes under
+it, including mid-run when ElevenLabs runs out of credit.
 """
 import asyncio
+import base64
 import difflib
 import json
 import logging
@@ -23,13 +33,23 @@ import edge_tts
 from num2words import num2words
 
 import script
-from config import (FISH_API_KEY, FISH_BODY_CUE, FISH_CTA_CUE, FISH_MODEL,
-                    FISH_SPEED, FISH_TITLE_CUE, FISH_VOICES_FEMALE,
-                    FISH_VOICES_MALE, OUT_DIR, OUTPUT_LANG, TTS_BACKEND,
-                    TTS_VOICE, WHISPER_SIZE)
+from config import (ELEVEN_API_KEY, ELEVEN_MODEL, ELEVEN_STABILITY,
+                    ELEVEN_STYLE, ELEVEN_VOICES_FEMALE,
+                    ELEVEN_VOICES_MALE, FISH_API_KEY, FISH_BODY_CUE,
+                    FISH_CTA_CUE, FISH_MODEL, FISH_SPEED, FISH_TITLE_CUE,
+                    FISH_VOICES_FEMALE, FISH_VOICES_MALE, OUT_DIR, OUTPUT_LANG,
+                    TTS_BACKEND, TTS_VOICE, WHISPER_SIZE)
 
 TICKS_PER_SEC = 10_000_000
 FISH_URL = "https://api.fish.audio/v1/tts"
+ELEVEN_URL = "https://api.elevenlabs.io/v1/text-to-speech/{}/with-timestamps"
+
+# Which backend this process is actually using. TTS_BACKEND is the intent;
+# this is what is left of it after ElevenLabs runs out of credit, and it is
+# module state on purpose - once the month's quota is gone it is gone for every
+# video in the run, and retrying it per take would cost a request each time.
+_backend = TTS_BACKEND
+_fallback_voice = ""    # the fish narrator picked when eleven died mid-video
 
 # ponytail: pacing knob for edge. Fish has its own, FISH_SPEED.
 RATE = "+0%"
@@ -78,6 +98,67 @@ def _fish_synth(text: str, mp3_path, speed: float, voice: str = "") -> None:
             mp3_path.write_bytes(r.read())
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"fish {e.code}: {e.read().decode()[:300]}") from None
+
+
+# ----------------------------------------------------------- eleven backend
+
+def _eleven_synth(text: str, mp3_path, speed: float, voice: str) -> list[tuple]:
+    """Synthesize and return [(word, start, end)] straight from the engine.
+
+    The endpoint answers with base64 audio plus a start and an end for every
+    character of the text it was handed, so the word timings are exact and
+    whisper is not needed at all. `alignment` is the timing of OUR characters;
+    `normalized_alignment` is the engine's rewritten copy, which we never see
+    and cannot line words up against.
+    """
+    if not ELEVEN_API_KEY:
+        raise RuntimeError("ELEVEN_API_KEY is empty")
+    if not voice:
+        raise RuntimeError("no ElevenLabs voice id configured for this channel")
+    body = {"text": text, "model_id": ELEVEN_MODEL,
+            # speed is how main.py stretches a short video to clear MIN_SEC;
+            # ElevenLabs takes 0.7-1.2 and refuses anything outside it.
+            # stability and style are the whole of the delivery control here -
+            # the [cues] fish reads never reach this engine. See config.py.
+            "voice_settings": {"speed": max(0.7, min(1.2, speed)),
+                               "stability": ELEVEN_STABILITY,
+                               "style": ELEVEN_STYLE,
+                               "use_speaker_boost": True}}
+    req = urllib.request.Request(
+        ELEVEN_URL.format(voice), data=json.dumps(body).encode(),
+        headers={"xi-api-key": ELEVEN_API_KEY,
+                 "Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=300) as r:
+            answer = json.load(r)
+    except urllib.error.HTTPError as e:
+        # 401 with "quota_exceeded" is the month running out, and it is the
+        # case this fallback exists for - but a 400 on one odd line would lose
+        # the video just as completely, so every failure falls through to fish.
+        raise RuntimeError(f"eleven {e.code}: {e.read().decode()[:300]}") from None
+
+    mp3_path.write_bytes(base64.b64decode(answer["audio_base64"]))
+    return _eleven_words(answer["alignment"])
+
+
+def _eleven_words(a: dict) -> list[tuple]:
+    """Character timings -> word timings, split on whitespace."""
+    words, cur, start, end = [], "", 0.0, 0.0
+    for ch, s, e in zip(a["characters"], a["character_start_times_seconds"],
+                        a["character_end_times_seconds"]):
+        if ch.isspace():
+            if cur:
+                words.append((cur, start, end))
+            cur = ""
+            continue
+        if not cur:
+            start = s
+        cur, end = cur + ch, e
+    if cur:
+        words.append((cur, start, end))
+    if not words:
+        raise RuntimeError("eleven returned an empty alignment")
+    return words
 
 
 # A bare digit is language-neutral on the page and English in fish's mouth:
@@ -172,12 +253,7 @@ def _norm(w: str) -> str:
 
 
 def _align(text: str, mp3_path) -> list[dict]:
-    """Our words on whisper's timeline.
-
-    Whisper's tokens never match ours exactly - it mishears, splits hyphens
-    and drops punctuation. difflib anchors the parts that do match; the runs
-    in between get spread evenly across the gap between anchors.
-    """
+    """Our words on whisper's timeline (the fish path)."""
     global _whisper
     if _whisper is None:
         from faster_whisper import WhisperModel
@@ -189,7 +265,17 @@ def _align(text: str, mp3_path) -> list[dict]:
     heard = [(w.word, w.start, w.end) for s in segments for w in s.words]
     if not heard:
         raise RuntimeError(f"whisper heard nothing in {mp3_path.name}")
+    return _align_to(text, heard)
 
+
+def _align_to(text: str, heard: list[tuple]) -> list[dict]:
+    """Our words onto someone else's timeline.
+
+    The engine's tokens never match ours exactly - whisper mishears, and both
+    engines are handed spelled-out numbers while the subtitles keep the digits.
+    difflib anchors the parts that do match; the runs in between get spread
+    evenly across the gap between anchors.
+    """
     ours = text.split()
     matcher = difflib.SequenceMatcher(
         None, [_norm(w) for w in ours], [_norm(h[0]) for h in heard], autojunk=False)
@@ -205,7 +291,7 @@ def _align(text: str, mp3_path) -> list[dict]:
                              "end": round(float(end), 3)}
 
     matched = sum(t is not None for t in timed)
-    log.info("aligned %d/%d words (whisper heard %d)", matched, len(ours), len(heard))
+    log.info("aligned %d/%d words (engine gave %d)", matched, len(ours), len(heard))
     if matched < len(ours) * 0.5:
         log.warning("weak alignment - subtitles may drift")
 
@@ -247,38 +333,82 @@ def duration(path) -> float:
 
 
 def pick_voice(gender: str = "male") -> str:
-    """A fish voice matching the narrator. Empty list means fish's default."""
-    pool = FISH_VOICES_FEMALE if gender == "female" else FISH_VOICES_MALE
+    """A voice id matching the narrator, from the pool the current backend owns.
+
+    Empty means "whatever the engine defaults to", which fish accepts and
+    ElevenLabs does not - there an empty id is what sends the run to fish.
+    """
+    male, female = (ELEVEN_VOICES_MALE, ELEVEN_VOICES_FEMALE) if _backend == "eleven" \
+        else (FISH_VOICES_MALE, FISH_VOICES_FEMALE)
+    pool = female if gender == "female" else male
     if not pool:
-        pool = FISH_VOICES_MALE or FISH_VOICES_FEMALE
+        pool = male or female
         if pool:
             log.warning("no %s voices configured, falling back", gender)
     return random.choice(pool) if pool else ""
 
 
+def _fish_voice(voice: str, gender: str) -> str:
+    """The fish narrator for a video that started out on ElevenLabs.
+
+    A pinned id belongs to whichever backend picked it, and an ElevenLabs id
+    means nothing to fish - so a fallback has to draw a new one. It is
+    remembered for the run rather than drawn per take, or the title, the story
+    and the closing question of the one video that straddles the switch come
+    back in three different voices.
+    """
+    global _fallback_voice
+    if voice in FISH_VOICES_MALE or voice in FISH_VOICES_FEMALE:
+        return voice
+    # empty lands here too, and deliberately: an unconfigured ElevenLabs
+    # channel pins nothing, and passing that empty id straight through would
+    # narrate in fish's house voice instead of one of the two we chose.
+    _fallback_voice = _fallback_voice or pick_voice(gender)
+    return _fallback_voice
+
+
 def speak(text: str, name: str, voice: str = TTS_VOICE, rate: str = RATE,
-          speed: float = FISH_SPEED, fish_voice: str | None = None) -> tuple:
-    """Synthesize into out/<name>.mp3 and out/<name>.json. Returns (mp3, words)."""
+          speed: float = FISH_SPEED, fish_voice: str | None = None,
+          gender: str = "male") -> tuple:
+    """Synthesize into out/<name>.mp3 and out/<name>.json. Returns (mp3, words).
+
+    `fish_voice` is the pinned narrator for whichever backend is running - the
+    name predates ElevenLabs and is kept because the id also travels through
+    main.py and seen.db under it.
+    """
+    global _backend
     mp3 = OUT_DIR / f"{name}.mp3"
 
     # cues steer the engine and are never seen; accents steer nothing at all
     # (measured, see ACCENTS in script.py) and must not be seen either, so
     # subtitles and alignment only ever get the plain text
     readable = script.plain(text)
+    pinned = pick_voice(gender) if fish_voice is None else fish_voice
 
-    if TTS_BACKEND == "fish":
+    if _backend == "eleven":
+        try:
+            # cues are fish syntax and eleven would read the brackets out loud,
+            # so it gets the stripped text - spelled out, same as fish, because
+            # a bare digit is read in English there too
+            words = _align_to(readable, _eleven_synth(spell(readable), mp3,
+                                                      speed, pinned))
+        except RuntimeError as e:
+            log.error("elevenlabs: %s", e)
+            log.error("falling back to fish for the rest of this run")
+            _backend = "fish"
+
+    if _backend == "fish":
         # the engine hears words, whisper hears words, but `readable` still
         # carries the digits - difflib just misses those tokens and _fill_gaps
         # times them from the anchors either side
-        _fish_synth(spell(text), mp3, speed,
-                    pick_voice() if fish_voice is None else fish_voice)
+        _fish_synth(spell(text), mp3, speed, _fish_voice(pinned, gender))
         words = _align(readable, mp3)
-    else:
-        # edge has no cue syntax and would read the brackets out loud
+    elif _backend == "edge":
+        # edge has no cue syntax and would read the brackets out loud either
         words = asyncio.run(_edge_stream(readable, mp3, voice, rate))
 
     if not words or mp3.stat().st_size == 0:
-        raise RuntimeError(f"{TTS_BACKEND} returned nothing for {name!r}")
+        raise RuntimeError(f"{_backend} returned nothing for {name!r}")
 
     # Who says each word is known only here, where the cues are still attached;
     # the aligner works on the stripped text and produces the same word order.
@@ -310,6 +440,11 @@ def _cued(text: str, cue: str, sep: str = ", ") -> str:
     The cue rides along to the engine and is stripped before anything is
     displayed, so the card and the description stay clean either way.
 
+    It is attached whatever the backend is, even though only fish reads it: the
+    other two are handed script.plain() of the same text and never see it, and
+    keeping it there is what lets a run switch backends mid-video without the
+    script being written for the wrong engine.
+
     The closing question arrives with a mood cue of its own, chosen for how the
     story ended. That wording is the specific one, so it leads - but the
     delivery constraint in `cue` has to survive, because the take that won the
@@ -330,7 +465,7 @@ def _cued(text: str, cue: str, sep: str = ", ") -> str:
     text = text.rstrip()
     if text[-1:] not in script.TERMINAL:
         text += "."
-    if TTS_BACKEND != "fish" or not cue:
+    if not cue:
         return text
 
     # A cue longer than script.TAG allows is not recognised as a cue: it stays
@@ -394,21 +529,24 @@ def speak_parts(title: str, body: str, name: str, gap: float = 0.0,
     # the title's own timings are what light the card up word by word - they
     # were always computed here and thrown away
     t_mp3, t_words = speak(_cued(title, FISH_TITLE_CUE), f"{name}_title",
-                           rate=rate, speed=speed, fish_voice=fish_voice)
+                           rate=rate, speed=speed, fish_voice=fish_voice,
+                           gender=gender)
     b_mp3, b_words = speak(_cued(story, FISH_BODY_CUE, " "), f"{name}_body",
-                           rate=rate, speed=speed, fish_voice=fish_voice)
+                           rate=rate, speed=speed, fish_voice=fish_voice,
+                           gender=gender)
     parts, words = [t_mp3, b_mp3], list(b_words)
 
     if cta:
         c_mp3, c_words = speak(_cued(cta, FISH_CTA_CUE), f"{name}_cta",
-                               rate=rate, speed=speed, fish_voice=fish_voice)
+                               rate=rate, speed=speed, fish_voice=fish_voice,
+                               gender=gender)
         body_end = duration(b_mp3)
         words += [{**w, "start": round(w["start"] + body_end, 3),
                    "end": round(w["end"] + body_end, 3)} for w in c_words]
         parts.append(c_mp3)
 
     if fish_voice:
-        log.info("%s: %s voice %s", name, gender, fish_voice[:8])
+        log.info("%s: %s %s voice %s", name, _backend, gender, fish_voice[:8])
 
     title_end = duration(t_mp3) + gap
     merged = OUT_DIR / f"{name}.mp3"
@@ -441,6 +579,22 @@ if __name__ == "__main__":
     assert filled[1]["start"] == 1.0 and abs(filled[1]["end"] - 3.0) < 0.01
     tail = _fill_gaps([None, None], ["x", "y"], 2.0)
     assert [w["word"] for w in tail] == ["x", "y"] and tail[1]["end"] == 2.0
+
+    # ElevenLabs times CHARACTERS, and the words we hand back are what the
+    # subtitles are cut from - a space that lands inside a word, or one that
+    # starts a new one late, shifts every caption after it.
+    chars = list("Привет мир!")
+    align = {"characters": chars,
+             "character_start_times_seconds": [i / 10 for i in range(len(chars))],
+             "character_end_times_seconds": [(i + 1) / 10 for i in range(len(chars))]}
+    assert _eleven_words(align) == [("Привет", 0.0, 0.6), ("мир!", 0.7, 1.1)], \
+        _eleven_words(align)
+    # and the same aligner both backends share still puts OUR text - digits and
+    # all - on those timings
+    spelled = _align_to("У 5 друзей", [("У", 0.0, 0.1), ("пяти", 0.2, 0.5),
+                                       ("друзей", 0.6, 1.0)])
+    assert [w["word"] for w in spelled] == ["У", "5", "друзей"], spelled
+    assert spelled[2]["start"] == 0.6, spelled
 
     # a digit that reaches fish is read in English, so none may survive - and
     # the spelled form has to fit the phrase, or the fix trades an English
@@ -535,6 +689,6 @@ if __name__ == "__main__":
     assert all(a["start"] <= b["start"] for a, b in zip(words, words[1:])), "out of order"
 
     dur = duration(mp3)
-    print(f"ok: {mp3.name} via {TTS_BACKEND}, {dur:.1f}s, {len(words)} words")
+    print(f"ok: {mp3.name} via {_backend}, {dur:.1f}s, {len(words)} words")
     print(f"measured pace: {len(words) / dur * 60:.0f} wpm  (WPM['{OUTPUT_LANG}'] in script.py)")
     print("first words:", [(w["word"], w["start"]) for w in words[:5]])

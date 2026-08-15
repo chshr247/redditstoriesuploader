@@ -95,6 +95,15 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
       LLM_MODEL: ${{ vars.LLM_MODEL }}
+      # ElevenLabs is the primary engine and fish the fallback for when its
+      # credits run out, so both sets of voices are handed to every job.
+      TTS_BACKEND: ${{ vars.TTS_BACKEND }}
+      ELEVEN_API_KEY: ${{ secrets.ELEVEN_API_KEY }}
+      ELEVEN_MODEL: ${{ vars.ELEVEN_MODEL }}
+      ELEVEN_VOICES_MALE: ${{ vars.ELEVEN_VOICES_MALE }}
+      ELEVEN_VOICES_FEMALE: ${{ vars.ELEVEN_VOICES_FEMALE }}
+      ELEVEN_VOICES_MALE_EN: ${{ vars.ELEVEN_VOICES_MALE_EN }}
+      ELEVEN_VOICES_FEMALE_EN: ${{ vars.ELEVEN_VOICES_FEMALE_EN }}
       FISH_API_KEY: ${{ secrets.FISH_API_KEY }}
       FISH_MODEL: ${{ vars.FISH_MODEL }}
       FISH_VOICES_MALE: ${{ vars.FISH_VOICES_MALE }}
