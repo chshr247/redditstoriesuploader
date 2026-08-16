@@ -420,13 +420,19 @@ if __name__ == "__main__":
         #
         # DataImpulse offers two ways to pin it and this accepts either.
         # Measured 2026-08-16 against api.ipify.org, four calls each:
-        #   :823    the rotating gateway - 176.5.52.3, 176.3.81.210,
-        #           176.7.143.232, a new address every single call. Pinned only
-        #           by a session id written into the LOGIN, `;sessid.<name>`.
-        #   :10000  a sticky port - 47.65.241.239 four times out of four. The
-        #           port itself holds the address, so no sessid is needed.
+        #   :823    the rotating gateway - four calls, four different
+        #           addresses. Pinned only by a session id written into the
+        #           LOGIN, `;sessid.<name>`.
+        #   :10000  a sticky port - four calls, one address. The port itself
+        #           holds it, so no sessid is needed.
         # Either way it must be pinned SOMEHOW, and per account: two channels
         # behind one address is the single thing a proxy is here to prevent.
+        #
+        # The addresses themselves are deliberately NOT written down here. This
+        # repository is public - it serves the policy pages the platforms
+        # review - so an exit IP recorded next to a TikTok posting tool would
+        # tie the account to the address the proxy exists to separate it from.
+        # Measurements go in the private runbook; only what they proved stays.
         if "dataimpulse" in TIKTOK_PROXY:
             from urllib.parse import urlsplit as _split
             assert "sessid." in TIKTOK_PROXY or _split(TIKTOK_PROXY).port != 823, \
