@@ -19,3 +19,12 @@ assets/bg/
 assets/ad/
 .env.*
 !.env.example
+# State the local TikTok poster writes. Deliberately NOT tracked: seen.db
+# is rewritten by every CI run, so a row put there by this machine lives
+# until the next pull - and a lost "this went out" row means it goes out
+# again. Nothing here needs to travel; one machine writes it and reads it.
+seen_local_*.db
+# The tau checkout, if it ever gets cloned into this directory instead of
+# beside it. It is somebody else's repo with its own git, and the cookie jar
+# under it is a live session - neither belongs in a public repository.
+tau/
