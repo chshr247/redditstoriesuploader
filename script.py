@@ -46,7 +46,7 @@ def _prompts():
 
 import safety
 from config import (LLM_BASE_URL, LLM_MODEL, OPENAI_API_KEY, OUTPUT_LANG,
-                    TARGET_SEC)
+                    TARGET_SEC, VOICE_SPEEDUP)
 
 
 class Unsuitable(Exception):
@@ -65,6 +65,11 @@ class Unsuitable(Exception):
 # all of it clear of the MIN_SEC floor, so no video gets re-voiced slower.
 # The spread between voices is still wider than the word tolerance, which is
 # the open problem noted in todo.md item 3 and is not specific to a language.
+#
+# This is the ENGINE's rate and nothing else - what fish produces, before
+# VOICE_SPEEDUP touches it. The budget is counted at _heard_wpm() instead, and
+# the distinction is load-bearing: re-measure THIS number with the speed-up off,
+# or the factor gets applied twice and the scripts come out a fifth too long.
 WPM = {"ru": 150, "en": 177}
 TOLERANCE = 0.15
 # The closing question is spoken too, so it needs its own slice of the budget.
@@ -103,7 +108,21 @@ def part_count(post: dict) -> int:
 
 
 def _wpm() -> int:
+    """What the ENGINE speaks at, measured on its own output by `python voice.py`."""
     return WPM.get(OUTPUT_LANG, WPM["en"])
+
+
+def _heard_wpm() -> float:
+    """What the VIEWER hears, which is the engine's rate times the speed-up.
+
+    The two were the same thing until VOICE_SPEEDUP existed, and conflating them
+    afterwards cost the English channel eleven percent of every video. The budget
+    is a duration expressed in words, so it has to be counted at the rate the
+    finished file actually plays at: 230 words of engine speech is 78 seconds
+    before the shift and 70 after it, so a channel aiming at 75 shipped 67 and
+    left the story eight seconds of detail short. Measured on hu9xlv, 2026-08-16.
+    """
+    return _wpm() * VOICE_SPEEDUP
 
 
 # How much may sit inside one bracket. A cue past this ceiling is not a cue:
@@ -229,8 +248,13 @@ def _target_words() -> int:
 
     CTA_SEC rides on top of TARGET_SEC so the closing question is paid for out
     of extra runtime instead of out of the ending.
+
+    Counted at the rate the FINISHED video plays at, not the engine's - see
+    _heard_wpm(). On a channel with no speed-up the two are identical and this
+    changes nothing; on one with a speed-up it is the difference between
+    hitting TARGET_SEC and falling short of it by the whole factor.
     """
-    return round((TARGET_SEC + CTA_SEC) / 60 * _wpm())
+    return round((TARGET_SEC + CTA_SEC) / 60 * _heard_wpm())
 
 
 def _fits(total: int, target: int) -> bool:
@@ -849,7 +873,14 @@ if __name__ == "__main__":
     assert plain(t_acc) == "Замок", plain(t_acc)
     tw = _target_words()
     assert _fits(tw, tw) and not _fits(tw * 2, tw) and not _fits(3, tw)
-    assert tw > round(TARGET_SEC / 60 * _wpm()), "the CTA needs its own words"
+    assert tw > round(TARGET_SEC / 60 * _heard_wpm()), "the CTA needs its own words"
+    # The budget is a duration in disguise, so it has to be counted at the rate
+    # the finished file plays at. Off by the speed-up factor it aims short by
+    # exactly that much - eleven percent of every English video, story included.
+    assert abs(tw / _heard_wpm() * 60 - (TARGET_SEC + CTA_SEC)) < 1, \
+        f"{tw} words is not {TARGET_SEC + CTA_SEC}s at {_heard_wpm():.0f} wpm"
+    assert (_heard_wpm() == _wpm()) == (VOICE_SPEEDUP == 1.0), \
+        "the speed-up must move the heard rate and nothing else"
 
     # Both languages are checked on every run, whichever channel this process
     # is. A rule that only holds for the channel you happen to be testing is
@@ -1131,8 +1162,10 @@ if __name__ == "__main__":
     # dies deep inside write_script() with a KeyError instead of here
     assert OUTPUT_LANG in _prompts()[0] and OUTPUT_LANG in WEAK_TITLE, OUTPUT_LANG
 
-    print(f"logic ok: {OUTPUT_LANG}, {_wpm()} wpm, target {tw} words "
-          f"for {TARGET_SEC}+{CTA_SEC} sec")
+    print(f"logic ok: {OUTPUT_LANG}, engine {_wpm()} wpm"
+          + (f" x{VOICE_SPEEDUP} = {_heard_wpm():.0f} heard"
+             if VOICE_SPEEDUP != 1.0 else "")
+          + f", target {tw} words for {TARGET_SEC}+{CTA_SEC} sec")
 
     if OPENAI_API_KEY:
         import source
@@ -1145,6 +1178,6 @@ if __name__ == "__main__":
         for i, (title, body) in enumerate(written, 1):
             w = _words(title) + _words(body)
             print(f"\nTITLE {i}/{len(written)}: {title}\n\n{body}\n"
-                  f"[{w} words -> ~{w / _wpm() * 60:.0f} sec]")
+                  f"[{w} words -> ~{w / _heard_wpm() * 60:.0f} sec of video]")
     else:
         print("OPENAI_API_KEY not set - live run skipped")

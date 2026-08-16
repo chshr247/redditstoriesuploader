@@ -121,7 +121,12 @@ jobs:
       # variable rather than a constant because it is a taste knob that wants
       # trying at 1.10 and 1.15 without a push. Unset arrives empty, which
       # config.py reads as absent, so both channels fall back to 1.0 = off.
-      VOICE_SPEEDUP_EN: ${{ vars.VOICE_SPEEDUP_EN || '1.12' }}
+      VOICE_SPEEDUP_EN: ${{ vars.VOICE_SPEEDUP_EN || '1.25' }}
+      # What that shift costs, taken back - see VOICE_DEHISS_DB in config.py.
+      # Here for the same reason as the line above: it is a listening call, and
+      # trying -4 against -10 should not need a push. Unset falls through to
+      # the code default, which is what this value is.
+      VOICE_DEHISS_DB_EN: ${{ vars.VOICE_DEHISS_DB_EN || '-7' }}
       YT_HASHTAGS_EN: ${{ vars.YT_HASHTAGS_EN }}
       # Pause TikTok for one channel without touching YouTube: set the variable
       # to 0. Unset arrives here as an empty string, which config.py reads as
