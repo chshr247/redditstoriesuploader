@@ -133,6 +133,15 @@ jobs:
       # "not set" and therefore as enabled.
       TIKTOK_ENABLED: ${{ vars.TIKTOK_ENABLED }}
       TIKTOK_ENABLED_EN: ${{ vars.TIKTOK_ENABLED_EN }}
+      # Which transport the channel's videos actually leave by. CI never sends
+      # on `tau` - it renders, ships an artifact and records a handoff, and the
+      # drafts step is skipped for a locally-posted channel - but it has to KNOW,
+      # because one thing keys off it here: INBOX_CAP. That is TikTok's ceiling
+      # on pending INBOX shares, five per rolling day, checked ahead of the part
+      # exemption. A channel posting straight to the profile has no inbox, so on
+      # `api` the gate would refuse a sixth video a day over a limit that does
+      # not apply to it - reachable at four a day plus a split story's parts.
+      TIKTOK_BACKEND_EN: ${{ vars.TIKTOK_BACKEND_EN }}
       # drafts a day; above YouTube's allowance on purpose, see config.py
       TIKTOK_PER_DAY: ${{ vars.TIKTOK_PER_DAY || '4' }}
       # A real knob for the same reason YT_MIN_GAP_HOURS is one, and tunable
