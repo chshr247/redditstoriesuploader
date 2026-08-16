@@ -308,6 +308,23 @@ TIKTOK_TAU_UA = chan_env("TIKTOK_TAU_UA")
 # prevent. Read by the fork's login browser and its signer too, so it covers
 # the cookie and the signature, not just the upload.
 TIKTOK_PROXY = chan_env("TIKTOK_PROXY")
+# Where the signer's browsers live, and deliberately NOT playwright's default
+# of %LOCALAPPDATA%\ms-playwright.
+#
+# The fork's venv is usually built on the Python that Windows offers first,
+# which is the Microsoft Store one - and a Store app gets a VIRTUALISED
+# AppData\Local, redirected into its package's LocalCache. Every child it
+# spawns inherits that view. So the browsers install into the real directory,
+# where cmd and node can see them, and the node the fork spawns looks into the
+# redirected copy and finds nothing. Diagnosed 2026-08-16: the same
+# fs.existsSync on the same path answered true from cmd and false from the
+# fork's python, which is the whole of the "Failed to parse signature data"
+# this project spent two days on in August.
+#
+# Anywhere outside AppData is immune, so it goes beside the checkout. Shared,
+# like TIKTOK_TAU_DIR: it is a path to a browser, not a credential.
+TIKTOK_TAU_BROWSERS = chan_env("TIKTOK_TAU_BROWSERS", shared=True) or (
+    str(Path(TIKTOK_TAU_DIR) / "ms-playwright") if TIKTOK_TAU_DIR else "")
 
 # --- YouTube (https://console.cloud.google.com -> OAuth client, type Desktop) ---
 # The OAuth client belongs to the Cloud project, not to a channel: any Google

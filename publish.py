@@ -61,8 +61,9 @@ from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL,
                     TIKTOK_BACKEND, TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET,
                     TIKTOK_ENABLED, TIKTOK_MIN_GAP_HOURS, TIKTOK_PER_DAY,
                     TIKTOK_PROXY, TIKTOK_PUBLIC, TIKTOK_REFRESH_KEY,
-                    TIKTOK_REFRESH_TOKEN, TIKTOK_TAU_DIR, TIKTOK_TAU_PYTHON,
-                    TIKTOK_TAU_UA, TIKTOK_TAU_USER, chan_key, save_env)
+                    TIKTOK_REFRESH_TOKEN, TIKTOK_TAU_BROWSERS, TIKTOK_TAU_DIR,
+                    TIKTOK_TAU_PYTHON, TIKTOK_TAU_UA, TIKTOK_TAU_USER,
+                    chan_key, save_env)
 
 API = "https://open.tiktokapis.com/v2"
 AUTH_URL = "https://www.tiktok.com/v2/auth/authorize/"
@@ -431,6 +432,13 @@ def _upload_tau(mp4, title: str, private: bool = True, body: str = "") -> str:
     # parses (it is ASCII) and the error message arrives as mojibake, which is
     # the worst of both.
     env["PYTHONIOENCODING"] = "utf-8"
+    # The signer is node, spawned by the fork's python, and if that python came
+    # from the Microsoft Store its children see a REDIRECTED AppData\Local -
+    # so playwright's default browser directory is one the installer wrote to
+    # and the signer cannot see. Pointing both at a path outside AppData is
+    # what keeps them looking in the same place. See TIKTOK_TAU_BROWSERS.
+    if TIKTOK_TAU_BROWSERS:
+        env["PLAYWRIGHT_BROWSERS_PATH"] = TIKTOK_TAU_BROWSERS
     log.info("tau: posting %s as %s%s", Path(mp4).name, TIKTOK_TAU_USER,
              " (private)" if private else " (PUBLIC)")
     try:
