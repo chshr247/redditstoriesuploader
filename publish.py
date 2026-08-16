@@ -1,12 +1,25 @@
-"""Step 5: upload a finished mp4 to TikTok, through the Content Posting API.
+"""Step 5: upload a finished mp4 to TikTok.
 
-Two targets, and the default is the quiet one:
+Two backends, chosen per channel by TIKTOK_BACKEND, sharing every queue rule
+between them - the count, the gap, the pause and the part exemption are about
+the channel, not about how the bytes leave.
 
-  drafts (default) - scope video.upload, endpoint .../inbox/video/init/.
-      Lands in the app's inbox; you tap publish yourself. Works with an
-      unaudited app, which is what a new developer account has.
-  direct  (--direct) - scope video.publish, endpoint .../video/init/.
-      Posts for real. TikTok only grants that scope to audited apps.
+  api (default) - the official Content Posting API. Two targets of its own:
+
+      drafts (default) - scope video.upload, endpoint .../inbox/video/init/.
+          Lands in the app's inbox; you tap publish yourself. Works with an
+          unaudited app, which is what a new developer account has.
+      direct  (--direct) - scope video.publish, endpoint .../video/init/.
+          Posts for real. TikTok only grants that scope to audited apps.
+
+  tau - our patched fork of makiisthenes/TiktokAutoUploader, run as a
+      subprocess. It drives the web endpoints with a saved browser cookie, so
+      it posts for real WITH the caption and needs nobody. It also breaks
+      TikTok's ToS and can cost the account - see todo.md section 11 and the
+      runbook in the tau checkout. Opt-in, never the default, no CI.
+
+Default is drafts on purpose: nothing here posts publicly unless you ask, and
+that holds for both backends - --public is what lifts it, on either.
 
     python publish.py --auth              one-time, gets the refresh token
     python publish.py --next              send the oldest unsent mp4
@@ -17,15 +30,10 @@ Two targets, and the default is the quiet one:
     python publish.py out/<id>.mp4 [--direct] [--public]
 
 A draft carries no caption - TikTok's inbox endpoint takes the file and nothing
-else, the text is typed in the app at publish time. So --next prints the caption
-it would have used; that print is the only place it exists.
-
-There was a second backend here for a while: a patched fork of
-makiisthenes/TiktokAutoUploader driving the web endpoints with a saved browser
-cookie, which posted for real, caption and all. It is gone - it never worked
-outside a hand-held session (a headless Chromium that had to be reinstalled to
-sign, a rotating proxy that timed out mid-upload), and every failure of it was
-silent on CI. See todo.md section 11 for what it cost and what it taught.
+else, the text is typed in the app at publish time. So on the api backend
+--next prints the caption it would have used; that print is the only place it
+exists. The tau backend sends the caption with the video and prints nothing,
+because there the print would read as a job still to do.
 """
 import hashlib
 import json
@@ -35,6 +43,7 @@ import random
 import re
 import secrets
 import sqlite3
+import subprocess
 import sys
 import time
 import urllib.error
@@ -47,11 +56,13 @@ from pathlib import Path
 import facts as facts_        # `facts` is the local variable in caption()
 import source
 import tags as tags_          # `tags` is the local variable in caption()
-from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL, OUT_DIR,
-                    PART_GAP_HOURS, PART_WORD, TIKTOK_CLIENT_KEY,
-                    TIKTOK_CLIENT_SECRET, TIKTOK_ENABLED, TIKTOK_MIN_GAP_HOURS,
-                    TIKTOK_PER_DAY, TIKTOK_PUBLIC, TIKTOK_REFRESH_KEY,
-                    TIKTOK_REFRESH_TOKEN, chan_key, save_env)
+from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL,
+                    LOCAL_DB_PATH, OUT_DIR, PART_GAP_HOURS, PART_WORD,
+                    TIKTOK_BACKEND, TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET,
+                    TIKTOK_ENABLED, TIKTOK_MIN_GAP_HOURS, TIKTOK_PER_DAY,
+                    TIKTOK_PROXY, TIKTOK_PUBLIC, TIKTOK_REFRESH_KEY,
+                    TIKTOK_REFRESH_TOKEN, TIKTOK_TAU_DIR, TIKTOK_TAU_PYTHON,
+                    TIKTOK_TAU_UA, TIKTOK_TAU_USER, chan_key, save_env)
 
 API = "https://open.tiktokapis.com/v2"
 AUTH_URL = "https://www.tiktok.com/v2/auth/authorize/"
@@ -68,6 +79,10 @@ SCOPES = os.getenv("TIKTOK_SCOPES", "video.upload")
 REDIRECT = os.getenv("TIKTOK_REDIRECT", "http://localhost:8080/callback")
 CHUNK = 10_000_000        # the size TikTok's own docs use in their example
 TITLE_MAX = 2200          # UTF-16 runes, per the direct-post reference
+# The tau backend uploads the file, then waits on a headless Chromium to
+# compute a signature. Generous on purpose: the failure this guards against is
+# a hung browser, and a real send on a slow line is not it.
+TAU_TIMEOUT = int(os.getenv("TIKTOK_TAU_TIMEOUT", 1800))
 
 log = logging.getLogger(__name__)
 
@@ -323,6 +338,128 @@ def _send(upload_url: str, path: Path, spans: list) -> None:
 
 def upload(mp4, title: str, direct: bool = False, private: bool = True,
            body: str = "") -> str:
+    """Send the file by whichever backend this channel runs. Returns an id.
+
+    This is the whole of the difference between the two. Everything around it -
+    which file is next, whether today's allowance has room, how long since the
+    last one, whether the channel is paused - is about the channel and stays
+    shared, which is why none of it had to move.
+    """
+    if TIKTOK_BACKEND == "tau":
+        return _upload_tau(mp4, title, private=private, body=body)
+    return _upload_api(mp4, title, direct=direct, private=private, body=body)
+
+
+def _tau_python() -> str:
+    """The fork's own interpreter, never ours.
+
+    It wants playwright, moviepy and undetected-chromedriver from git. Letting
+    that share this venv is how both end up broken, so the checkout carries its
+    own and we go looking for it rather than importing anything.
+    """
+    if TIKTOK_TAU_PYTHON:
+        return TIKTOK_TAU_PYTHON
+    root = Path(TIKTOK_TAU_DIR)
+    for rel in ("Scripts/python.exe", "bin/python"):
+        if (exe := root / ".venv" / rel).exists():
+            return str(exe)
+    raise RuntimeError(
+        f"no venv under {root / '.venv'} - create one as the tau runbook says, "
+        f"or point {chan_key('TIKTOK_TAU_PYTHON', True)} at an interpreter")
+
+
+# Printed by the fork on success, and only there - see tau-synergy.patch.
+_CREATION_ID = re.compile(r"^creation_id=(\S+)", re.M)
+
+
+def _upload_tau(mp4, title: str, private: bool = True, body: str = "") -> str:
+    """Post for real through the patched fork. Returns "tau:<creation_id>".
+
+    There is no draft here and no --direct to ask for one: the fork drives the
+    web endpoints and those publish. `private` is the brake, and a real one -
+    visibility_type=1 puts the video up private, which is what --next does
+    unless told --public. Same default as the API path and for the same reason.
+
+    The caption goes WITH the video here, which is the point of the whole
+    exercise: on the API path it can only be printed and retyped by hand.
+    """
+    if not TIKTOK_TAU_DIR or not TIKTOK_TAU_USER:
+        raise RuntimeError(
+            f"backend tau needs {chan_key('TIKTOK_TAU_DIR', True)} and "
+            f"{chan_key('TIKTOK_TAU_USER')} set - see the tau runbook")
+    if not TIKTOK_PROXY:
+        # Not fatal. Running without a proxy is a bad idea, not a broken
+        # config - but it is a bad idea that is invisible unless something
+        # says so, and with two channels it means both accounts share an IP.
+        log.warning("%s is unset: this posts from the real IP, and every "
+                    "channel on this machine shares it",
+                    chan_key("TIKTOK_PROXY"))
+    if not TIKTOK_TAU_UA:
+        # Same shape of problem: it works, and it works while presenting a
+        # browser the account has never been seen in.
+        log.warning("%s is unset: the fork will invent a random user agent, "
+                    "so this upload will not look like the browser that "
+                    "logged in", chan_key("TIKTOK_TAU_UA"))
+
+    text = caption(title, body=body)
+    cmd = [_tau_python(), "cli.py", "upload",
+           "-u", TIKTOK_TAU_USER,
+           "-v", str(Path(mp4).resolve()),
+           "-t", text,
+           "-vi", "1" if private else "0",
+           "-ai", "1" if DECLARE_AI else "0"]
+    if TIKTOK_PROXY:
+        cmd += ["-p", TIKTOK_PROXY]
+
+    # cwd is load-bearing: the fork reads ./config.txt and resolves CookiesDir
+    # against the working directory, so it has to run from its own root. The
+    # proxy is passed twice on purpose - the flag reaches the uploader's
+    # requests session, the environment variable is what the patched login
+    # browser and the patched signer read. Miss the second and the signature
+    # subprocess still goes out over the real IP, which was the whole bug.
+    env = {**os.environ}
+    if TIKTOK_PROXY:
+        env["TIKTOK_PROXY"] = TIKTOK_PROXY
+    if TIKTOK_TAU_UA:
+        # Read by the patched upload_video in place of a random one, and by the
+        # signer, so the signature is computed under the agent it is signing
+        # for rather than a second unrelated browser.
+        env["TIKTOK_UA"] = TIKTOK_TAU_UA
+    # We read the child as UTF-8. On Windows a piped python writes cp1252 by
+    # default, and the one thing we would want to read is the failure it prints
+    # - which contains the caption, in Cyrillic. Without this the id still
+    # parses (it is ASCII) and the error message arrives as mojibake, which is
+    # the worst of both.
+    env["PYTHONIOENCODING"] = "utf-8"
+    log.info("tau: posting %s as %s%s", Path(mp4).name, TIKTOK_TAU_USER,
+             " (private)" if private else " (PUBLIC)")
+    try:
+        r = subprocess.run(cmd, cwd=TIKTOK_TAU_DIR, env=env, capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=TAU_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"tau upload timed out after {TAU_TIMEOUT}s. The video may or may "
+            f"not have posted - check the account before running again, "
+            f"nothing was written to the queue.") from None
+    out = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode != 0:
+        raise RuntimeError(f"tau upload failed (exit {r.returncode}):\n{out[-1500:]}")
+    if not (m := _CREATION_ID.search(out)):
+        # Upstream exits 0 on paths that posted nothing, which is exactly what
+        # the patch's creation_id line exists to tell apart. No line, no post:
+        # do not write a row claiming there was one, or the file is marked sent
+        # and never goes out again.
+        raise RuntimeError(
+            "tau exited 0 but printed no creation_id - either the checkout is "
+            "unpatched (apply tau-synergy.patch) or the upload failed "
+            f"quietly:\n{out[-1500:]}")
+    log.info("tau: posted %s as %s", Path(mp4).name, m.group(1))
+    return f"tau:{m.group(1)}"
+
+
+def _upload_api(mp4, title: str, direct: bool = False, private: bool = True,
+                body: str = "") -> str:
     """Upload the file. Returns publish_id. Drafts unless direct=True."""
     mp4 = Path(mp4)
     size = mp4.stat().st_size
@@ -370,7 +507,16 @@ def upload(mp4, title: str, direct: bool = False, private: bool = True,
 
 
 def status(publish_id: str) -> dict:
-    """What became of an upload."""
+    """What became of an upload. API backend only, and that is not a gap.
+
+    A tau: row has no publish_id to ask about - the fork drives the web
+    endpoints, which hand back a creation id that /status/fetch/ has never
+    heard of. Saying so beats a 400 that reads like a broken token.
+    """
+    if publish_id.startswith("tau:"):
+        raise RuntimeError(
+            f"{publish_id} was posted through the tau backend; the Content "
+            "Posting API knows nothing about it. Look at the account.")
     r = _post(f"{API}/post/publish/status/fetch/",
               {"publish_id": publish_id}, access_token())
     return r.get("data", r)
@@ -446,8 +592,10 @@ def stale(hours: float = 6.0) -> list[tuple]:
                           ).fetchall()
     out = []
     for f, pid, ts in rows:
-        # Ids from the retired local backend are not TikTok's and asking about
-        # one gets an error, not an answer. See the note at the top of the file.
+        # A tau: id is not a publish_id and asking about one gets an error, not
+        # an answer - see status(). Nor is there anything to be stuck on: that
+        # backend posts to the profile directly, with no inbox in between and
+        # nothing left for a human to tap.
         if not pid or not pid.startswith("v_"):
             continue
         # Twice, because this endpoint is genuinely flaky - measured 2026-08-06,
@@ -475,11 +623,74 @@ def stale(hours: float = 6.0) -> list[tuple]:
 
 # --------------------------------------------------------------------- queue
 
+def _db_path() -> Path:
+    """Which file holds this channel's TikTok state.
+
+    The api backend runs on CI, and CI commits seen.db back to the repo, so
+    that is where its rows belong. The tau backend runs on somebody's desk,
+    writing into a file CI rewrites twice an hour - and the moment a pull is
+    resolved in CI's favour, the row saying a video went out is gone, the file
+    returns to pending(), and the next --next posts it again. Publicly, now.
+
+    Observed rather than predicted: it happened on the first merge to main.
+
+    ...but CI still runs this module for a tau channel - the gate asks due()
+    before it renders anything - and on a runner the local file does not exist.
+    Read literally that means "nothing was ever sent", so the count is 0 and
+    the gap is infinite on every tick, and a channel meant to produce four
+    videos a day produces one every half hour. So the split is by MACHINE and
+    not by backend alone: the desk keeps its untracked file, CI counts its own
+    handoffs in the tracked one. GITHUB_ACTIONS is set by GitHub on every
+    runner and by nothing else, and the default when it is absent is the safe
+    direction - a desk that reads it wrong writes to the file that is its own.
+    """
+    if TIKTOK_BACKEND == "tau" and not os.getenv("GITHUB_ACTIONS"):
+        return LOCAL_DB_PATH
+    return DB_PATH
+
+
+def _adopt(db) -> None:
+    """Move this channel's existing rows into the local file, once.
+
+    Switching a channel to tau must not make its history look unsent, or every
+    already-published video is a candidate to go out again.
+
+    Handoff rows are the exception and must NOT come across. They say "CI made
+    this and shipped it here", which is the opposite of "this went out" - the
+    whole point of one is that the desk still owes it a post. Adopted as sent,
+    every video CI had queued up would be marked done on the first run here and
+    silently never posted, which is the same two-day silence in a new costume.
+    """
+    if not DB_PATH.exists():
+        return
+    src = sqlite3.connect(DB_PATH)
+    try:
+        cols = {c[1] for c in src.execute("PRAGMA table_info(tiktok)")}
+    except sqlite3.Error:
+        return
+    if "file" not in cols:
+        return
+    # A db written before the backend column existed is all api by definition.
+    backend = "backend" if "backend" in cols else "'api'"
+    rows = src.execute(
+        "SELECT file, publish_id, ts, channel, " + backend +
+        f" FROM tiktok WHERE channel=? AND {backend}!='handoff'",
+        (CHANNEL,)).fetchall()
+    src.close()
+    if rows:
+        db.executemany("INSERT OR IGNORE INTO tiktok(file, publish_id, ts,"
+                       " channel, backend) VALUES (?,?,?,?,?)", rows)
+        log.info("adopted %d row(s) for channel %s into %s",
+                 len(rows), CHANNEL, LOCAL_DB_PATH.name)
+
+
 def _db():
     # Separate table from youtube's `uploaded`: the two platforms are not in
     # step. A video can sit in the TikTok inbox for days before it is published
     # by hand, and a failed TikTok run must not hide the video from YouTube.
-    db = sqlite3.connect(DB_PATH)
+    path = _db_path()
+    first = path is LOCAL_DB_PATH and not path.exists()
+    db = sqlite3.connect(path)
     db.execute("CREATE TABLE IF NOT EXISTS tiktok("
                "file TEXT PRIMARY KEY, publish_id TEXT, ts REAL)")
     # Which TikTok account it went to. The two are unrelated accounts with a
@@ -490,17 +701,34 @@ def _db():
     if "channel" not in cols:
         db.execute("ALTER TABLE tiktok ADD COLUMN channel TEXT")
         db.execute("UPDATE tiktok SET channel=?", (DEFAULT_CHANNEL,))
+    # Which transport sent it, because the id in publish_id means two different
+    # things and only one of them can be asked about later. The id says which
+    # for rows written before the column existed - a "tau:" prefix is minted
+    # nowhere else - so they are backfilled from it rather than all called api,
+    # which would label the one surviving tau post as something status() would
+    # then be asked about.
+    if "backend" not in cols:
+        db.execute("ALTER TABLE tiktok ADD COLUMN backend TEXT")
+    # Not only on the ALTER: the column was added once already and nothing
+    # filled it, so the live db carries it NULL on every row. Keyed on the id
+    # rather than on today's TIKTOK_BACKEND, which says nothing about how a row
+    # written months ago went out. Idempotent, hence unconditional.
+    db.execute("UPDATE tiktok SET backend="
+               "CASE WHEN publish_id LIKE 'tau:%' THEN 'tau' ELSE 'api' END"
+               " WHERE backend IS NULL")
+    if first:
+        _adopt(db)
     return db
 
 
 def pending() -> list:
     """This channel's rendered videos not yet sent to TikTok, oldest first."""
-    from youtube import _mine          # local: avoids a cycle
+    from youtube import _mine, _scratch          # local: avoids a cycle
 
     with _db() as db:
         done = {r[0] for r in db.execute("SELECT file FROM tiktok")}
     return sorted((p for p in OUT_DIR.glob("*.mp4")
-                   if p.name not in done and _mine(p)),
+                   if p.name not in done and _mine(p) and not _scratch(p)),
                   key=lambda p: p.stat().st_mtime)
 
 
@@ -524,7 +752,13 @@ def sent_today() -> int:
 # inside one rolling day. And it is TikTok's rule, so nothing on our side gets
 # to bypass it - not --force, and not the part exemption that lets the middle of
 # a split story past the daily count.
-INBOX_CAP = int(os.getenv("TIKTOK_INBOX_CAP", 5))
+#
+# An api-backend rule, and only that: tau drives the web endpoints and posts
+# straight to the profile, so there is no inbox and nothing pending in one.
+# Left in force there it would refuse a fifth video a day TikTok would have
+# taken, on the strength of a limit that does not apply to how it went out.
+INBOX_CAP = (int(os.getenv("TIKTOK_INBOX_CAP", 5))
+             if TIKTOK_BACKEND == "api" else 10 ** 9)
 
 
 def shares_24h() -> int:
@@ -679,16 +913,20 @@ def upload_next(direct: bool = False, private: bool = True,
     pid = upload(mp4, title, direct=direct, private=private,
                  body=meta.get("body", ""))
     with _db() as db:
-        # Named columns rather than positional: the row has grown a field
-        # before and the next one should not silently land in the wrong place.
-        db.execute("INSERT OR REPLACE INTO tiktok(file, publish_id, ts, channel)"
-                   " VALUES (?,?,?,?)",
-                   (mp4.name, pid, time.time(), CHANNEL))
+        # Named columns rather than positional: the row grew a fifth field and
+        # the next one should not silently land in the wrong place.
+        db.execute("INSERT OR REPLACE INTO tiktok(file, publish_id, ts, channel,"
+                   " backend) VALUES (?,?,?,?,?)",
+                   (mp4.name, pid, time.time(), CHANNEL, TIKTOK_BACKEND))
     _clear_part(meta)
     # Printed BEFORE the caption and never after it: the workflow reads from the
     # CAPTION line to the end of this output and takes the last line as the id,
     # so anything added below would land in the issue body.
-    state = await_send(pid)
+    # Nothing to await on tau: there is no inbox to be handed to and no id the
+    # status endpoint knows, so asking would spend the whole deadline collecting
+    # the same refusal and answer UNKNOWN. The fork printing a creation_id IS
+    # the confirmation - it only prints one after the post went through.
+    state = "POSTED" if TIKTOK_BACKEND == "tau" else await_send(pid)
     print(f"STATE: {state}")
     # Where the caption goes: the issue the title was chosen on. A story is one
     # case there - asked for, answered, then published - so its caption belongs
@@ -702,9 +940,55 @@ def upload_next(direct: bool = False, private: bool = True,
     # the workflow forwards it to be pasted by hand. Withheld on FAILED alone -
     # there is then no draft to publish, and a reminder about one is worse than
     # no reminder. A slow upload still gets its caption; see await_send().
-    if not direct and state != "FAILED":
+    # Only worth printing where it is the only copy that exists: tau already
+    # sent the caption with the video, and printing it there would read as a
+    # job still to do and open an issue asking for it.
+    if not direct and state != "FAILED" and TIKTOK_BACKEND == "api":
         print("\nCAPTION:\n" + caption(title, body=meta.get("body", "")) + "\n")
     return pid
+
+
+def handoff() -> str | None:
+    """Record on CI that a video was made and shipped to the local poster.
+
+    The tau backend cannot send from a runner - the cookie is on a desk - but
+    CI still has to be PACED, and the thing that paces it is the same count and
+    the same gap as everything else. Those are read off the tiktok table, so
+    without a row per video that table stays empty and due() answers "due" on
+    every tick for ever.
+
+    Deliberately not a send and named so: backend='handoff' is what keeps the
+    desk's _adopt() from reading these as videos that already went out. The
+    publish_id column carries the run id instead, because there is no id to
+    have - nothing has been published yet.
+
+    Refuses off CI. On a desk this file IS the queue, and writing "handed off"
+    rows into it would mark the desk's own backlog as dealt with.
+    """
+    if not (run := os.getenv("GITHUB_RUN_ID")):
+        raise RuntimeError("--handoff records what CI shipped to the local "
+                           "poster; it only runs on a runner")
+    queue = pending()
+    if not queue:
+        log.info("nothing pending to hand off")
+        return None
+    mp4 = queue[0]
+    with _db() as db:
+        db.execute("INSERT OR REPLACE INTO tiktok(file, publish_id, ts,"
+                   " channel, backend) VALUES (?,?,?,?,'handoff')",
+                   (mp4.name, f"handoff:{run}", time.time(), CHANNEL))
+    # The part queue is cleared here for the same reason upload_next() clears
+    # it: on a runner the mp4 is gone with the job, and a part left pending is
+    # rendered again next run and holds the slot doing it. The desk posting it
+    # later is not something seen.db can wait for.
+    _clear_part(_meta_of(mp4))
+    log.info("handed off %s to the local poster", mp4.name)
+    return mp4.name
+
+
+def _meta_of(mp4: Path) -> dict:
+    from youtube import _meta_for          # local: avoids a cycle
+    return _meta_for(mp4)
 
 
 def _public() -> bool:
@@ -895,6 +1179,81 @@ if __name__ == "__main__":
     # The window stale() looks through, from both ends at once. Nothing can be
     # newer than a week and older than a year, so this asks TikTok nothing.
     assert stale(24 * 365) == [], "the two ends of the window must not overlap"
+
+    # A self-test render is not a story and must never reach an account. They
+    # all write under a leading underscore and none of them carry meta, which
+    # _mine() reads as the default channel's - so before this, `render.py
+    # --check` put three test clips into the Russian channel's queue.
+    from youtube import _scratch as _is_scratch
+    assert _is_scratch(Path("_selftest.mp4")) and _is_scratch(Path("_pitch.mp4"))
+    assert not _is_scratch(Path("1ny329y.mp4")), "a real post id has no underscore"
+    assert not _is_scratch(Path("1s1evbb_p2.mp4")), "a part is a real video"
+    assert not any(p.name.startswith("_") for p in pending()), \
+        [p.name for p in pending() if p.name.startswith("_")]
+
+    # --- the tau backend ------------------------------------------------
+    # The fork prints one line we care about, and everything else it prints is
+    # noise we must not mistake for it - including its own echo of the caption,
+    # which can itself contain the word.
+    assert _CREATION_ID.search("Uploading video...\ncreation_id=abc123\n").group(1) == "abc123"
+    assert _CREATION_ID.search("creation_id=x\nPublished").group(1) == "x"
+    assert not _CREATION_ID.search("see creation_id=abc in the docs"), \
+        "the line must start the line, or a caption could forge one"
+    assert not _CREATION_ID.search("[-] Publish failed to Tiktok")
+
+    # The state of a channel CI does not publish must not live in the file CI
+    # rewrites. This is the assertion that would have caught the merge that
+    # dropped a real post's row and put the video back in the queue.
+    assert LOCAL_DB_PATH != DB_PATH, "the local file must not BE the tracked one"
+    _real_ci = os.environ.pop("GITHUB_ACTIONS", None)
+    try:
+        # On a desk, a tau channel keeps its own untracked file...
+        assert (_db_path() == LOCAL_DB_PATH) == (TIKTOK_BACKEND == "tau"), _db_path()
+        # ...and on a runner it does not, whatever the backend says. Getting
+        # this backwards is not a lost row, it is a gate that reads an empty
+        # table, answers "due" on every tick and renders a video every half
+        # hour against an allowance of four a day.
+        os.environ["GITHUB_ACTIONS"] = "true"
+        assert _db_path() == DB_PATH, "CI must count its handoffs in seen.db"
+    finally:
+        os.environ.pop("GITHUB_ACTIONS", None)
+        if _real_ci is not None:
+            os.environ["GITHUB_ACTIONS"] = _real_ci
+
+    # A handoff is not a send, and the difference has to survive the trip to
+    # the desk: adopted as sent, everything CI has queued up is marked done on
+    # the first local run and silently never posted.
+    _probe = sqlite3.connect(":memory:")
+    _probe.execute("CREATE TABLE tiktok(file TEXT PRIMARY KEY, publish_id TEXT,"
+                   " ts REAL, channel TEXT, backend TEXT)")
+    _adopt(_probe)
+    assert not _probe.execute("SELECT 1 FROM tiktok WHERE backend='handoff'"
+                              ).fetchone(), "a handoff row must not be adopted"
+    _probe.close()
+    # And it refuses to write one anywhere but a runner.
+    if not os.getenv("GITHUB_RUN_ID"):
+        try:
+            handoff()
+            raise AssertionError("handoff() must refuse off CI")
+        except RuntimeError as e:
+            assert "only runs on a runner" in str(e), e
+
+    # A tau id is not a publish_id and must not be sent to the API as one -
+    # not by status(), and not by the watchdog that walks the whole table.
+    try:
+        status("tau:abc")
+        raise AssertionError("status() must refuse a tau id")
+    except RuntimeError as e:
+        assert "tau backend" in str(e), e
+
+    # And the tau path refuses to run half-configured rather than shelling out
+    # to a checkout that is not there.
+    if not (TIKTOK_TAU_DIR and TIKTOK_TAU_USER):
+        try:
+            _upload_tau("out/nothing.mp4", "t")
+            raise AssertionError("_upload_tau must refuse without a checkout")
+        except RuntimeError as e:
+            assert "tau runbook" in str(e), e
     # To stderr, not stdout. Every command's real output is read by something -
     # the workflow greps the caption out of --next and puts --stale straight
     # into an issue body - and a banner about the tests belongs in neither.
@@ -910,6 +1269,16 @@ if __name__ == "__main__":
             reason = due()
             print(reason or "due")
             sys.exit(1 if reason else 0)
+        elif "--handoff" in sys.argv:
+            print(handoff() or "nothing to hand off")
+        elif "--since-last" in sys.argv:
+            # Hours since anything went out on this channel, for the watchdog in
+            # the local poster. It is the only honest sign that the desk half of
+            # the tau setup has stopped: CI cannot see seen_local_<channel>.db,
+            # so a workflow that is green says nothing about whether the videos
+            # it made ever reached TikTok. That gap is what let the English
+            # channel sit dead for two days with every signal reading normal.
+            print(f"{_since_last_h():.2f}")
         elif "--enabled" in sys.argv:
             # The pause on its own, apart from the count and the gap that --due
             # folds in with it. A forced run overrides those two and must NOT
@@ -922,14 +1291,15 @@ if __name__ == "__main__":
             sys.exit(0 if TIKTOK_ENABLED else 1)
         elif "--status" in sys.argv:
             with _db() as db:
-                rows = db.execute("SELECT file, publish_id FROM tiktok "
+                rows = db.execute("SELECT file, publish_id, backend FROM tiktok "
                                   "WHERE channel=? ORDER BY ts DESC",
                                   (CHANNEL,)).fetchall()
-            print(f"channel {CHANNEL}: {len(rows)} sent, "
+            print(f"channel {CHANNEL} via {TIKTOK_BACKEND} ({_db_path().name}): "
+                  f"{len(rows)} sent, "
                   f"{sent_today()}/{TIKTOK_PER_DAY} today, {len(pending())} queued"
                   + ("" if TIKTOK_ENABLED else "  [PAUSED]"))
-            for f, pid in rows[:5]:
-                print("  sent  ", f, pid)
+            for f, pid, backend in rows[:5]:
+                print("  sent  ", f, pid, f"({backend or 'api'})")
             for p in pending()[:10]:
                 print("  queued", p.name)
             # The split-story queue is this platform's alone, so it is reported
@@ -973,16 +1343,20 @@ if __name__ == "__main__":
             # stays in pending() and the next --next sends it a second time.
             with _db() as db:
                 db.execute("INSERT OR REPLACE INTO tiktok(file, publish_id, ts,"
-                           " channel) VALUES (?,?,?,?)",
-                           (mp4.name, pid, time.time(), CHANNEL))
+                           " channel, backend) VALUES (?,?,?,?,?)",
+                           (mp4.name, pid, time.time(), CHANNEL, TIKTOK_BACKEND))
             # Same reason the row above is written: this path skips the gate,
             # not the bookkeeping. A part sent by hand and left in the queue
             # would be rendered and sent again by the next --next.
             _clear_part(meta)
-            print(pid, status(pid))
+            # A tau post has no status to fetch, and asking is an error rather
+            # than an empty answer - see status().
+            print(pid, "(posted; the API has no status for a tau id)"
+                  if pid.startswith("tau:") else status(pid))
         else:
             print("usage: python publish.py --auth | --whoami | --status | "
                   "--due | --enabled | --next | --stale [hours] | "
+                  "--since-last | --handoff | "
                   "out/<id>.mp4 [--direct] [--public]")
     except RuntimeError as e:
         print(f"\n{e}")

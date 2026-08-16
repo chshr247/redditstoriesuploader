@@ -156,8 +156,19 @@ def _room() -> int:
     is stricter than what the parts will actually be allowed. Deliberately: it
     caps how much of the day one story may lay claim to, which is the question
     being asked here.
+
+    Zero on the tau backend as well, and for a reason that is about WHERE the
+    state lives rather than about the clock. A part is cleared by the machine
+    that sends it, and on tau that is a desk, not CI - but the `parts` table is
+    in seen.db, which CI rewrites and commits twice an hour. So the row saying
+    part 1 is done survives until the next run pushes over it, and the story is
+    then rendered and posted a second time. The tracked/untracked split that
+    fixes this for the `tiktok` table (publish._db_path()) cannot be applied to
+    `parts` without moving the whole queue off CI, and a channel that never
+    splits needs none of it. Whole stories only there; splitting is a TikTok
+    arrangement and losing it costs that channel nothing else.
     """
-    if publish.due():
+    if publish.TIKTOK_BACKEND == "tau" or publish.due():
         return 0
     return max(0, TIKTOK_PER_DAY - publish.sent_today())
 

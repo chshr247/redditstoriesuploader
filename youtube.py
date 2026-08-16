@@ -238,6 +238,24 @@ def _mine(mp4: Path) -> bool:
     return _meta_for(mp4).get("channel", DEFAULT_CHANNEL) == CHANNEL
 
 
+def _scratch(mp4: Path) -> bool:
+    """Is this a test render rather than a story? Leading underscore says so.
+
+    Every self-test in this repo already writes under one - render.py makes
+    _selftest.mp4, _selftest_ad.mp4 and _selftest_banner.mp4, voice.py makes
+    _selftest.mp3 - and they land in the same out/ the publishers read. They
+    also carry no meta, which _mine() reads as "the default channel's", so
+    running `python render.py --check` quietly put three test clips in the
+    Russian channel's publish queue. Measured 2026-08-16: eight files queued,
+    three of them self-tests.
+
+    Nothing had gone out yet only because the queue is oldest-first and real
+    stories were ahead of them. That is luck, not a rule, and the thing it was
+    protecting is a live account.
+    """
+    return mp4.name.startswith("_")
+
+
 def _split(mp4: Path) -> bool:
     """Is this file one part of a story told across several videos?
 
@@ -265,7 +283,8 @@ def pending() -> list:
     with _db() as db:
         done = {r[0] for r in db.execute("SELECT file FROM uploaded")}
     return sorted((p for p in OUT_DIR.glob("*.mp4")
-                   if p.name not in done and _mine(p) and not _split(p)),
+                   if p.name not in done and _mine(p) and not _split(p)
+                   and not _scratch(p)),
                   key=lambda p: p.stat().st_mtime)
 
 

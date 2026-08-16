@@ -116,6 +116,12 @@ jobs:
       TIKTOK_REFRESH_TOKEN_EN: ${{ secrets.TIKTOK_REFRESH_TOKEN_EN }}
       FISH_VOICES_MALE_EN: ${{ vars.FISH_VOICES_MALE_EN }}
       FISH_VOICES_FEMALE_EN: ${{ vars.FISH_VOICES_FEMALE_EN }}
+      # Faster and higher at once - the English channel is there to be funny and
+      # a voice slightly above human is what holds a viewer through it. A repo
+      # variable rather than a constant because it is a taste knob that wants
+      # trying at 1.10 and 1.15 without a push. Unset arrives empty, which
+      # config.py reads as absent, so both channels fall back to 1.0 = off.
+      VOICE_SPEEDUP_EN: ${{ vars.VOICE_SPEEDUP_EN || '1.12' }}
       YT_HASHTAGS_EN: ${{ vars.YT_HASHTAGS_EN }}
       # Pause TikTok for one channel without touching YouTube: set the variable
       # to 0. Unset arrives here as an empty string, which config.py reads as
@@ -424,6 +430,52 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
+      # The tau backend posts from a machine that never sees this runner's
+      # disk, and out/ dies with the job - so without this step the local
+      # poster runs dry while CI keeps making videos it can never reach.
+      #
+      # The meta file is not decoration next to the mp4. _mine() reads
+      # `channel` out of it to decide whose queue a file belongs in, so an mp4
+      # arriving on its own is not a video with a poorer caption - it is a
+      # video the English channel cannot see at all, because a file with no
+      # meta counts as the default channel's.
+      #
+      # Opt in per channel via the TIKTOK_LOCAL_CHANNELS repo variable, same
+      # shape as CHANNELS. Empty by default: a channel whose TikTok is handled
+      # here has nothing to ship and should not spend the quota.
+      - name: Keep the video for the local TikTok poster
+        if: >-
+          steps.gate.outputs.go == 'true' && inputs.dry_run != true &&
+          contains(fromJSON(vars.TIKTOK_LOCAL_CHANNELS || '[]'), matrix.channel)
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-${{ matrix.channel }}-${{ github.run_id }}
+          path: |
+            out/*.mp4
+            out/*.meta.json
+          # One video is ~70 MB and the account's artifact quota is not large.
+          # Three days covers a long weekend with the local machine off; the
+          # ninety-day default would be twenty gigabytes.
+          retention-days: 3
+          # A run can pass the gate and still make nothing - the story pool
+          # comes up dry and main.py exits 0 with a warning.
+          if-no-files-found: ignore
+
+      # ...and the row that PACES the step above. The count and the gap are
+      # read off the tiktok table, and on a locally-posted channel nothing on
+      # this runner ever writes to it - so due() would answer "due" on every
+      # tick and a channel meant to make four videos a day would make one every
+      # half hour, burning a story each time. This writes one row per video
+      # handed over, marked `handoff` so the desk does not read it as a video
+      # that already went out. Never fatal: a missing row costs pacing, an
+      # aborted run costs the video that was just made.
+      - name: Pace the handoff to the local poster
+        if: >-
+          steps.gate.outputs.go == 'true' && inputs.dry_run != true &&
+          contains(fromJSON(vars.TIKTOK_LOCAL_CHANNELS || '[]'), matrix.channel)
+        continue-on-error: true
+        run: python publish.py --handoff
+
       # Same file, second platform. Never fatal: TikTok is a draft in an inbox,
       # YouTube is the published video, and losing the copy must not colour a
       # run that already shipped one.
@@ -438,8 +490,13 @@ jobs:
       # the middle of a story into the inbox tomorrow with no beginning in front
       # of it - and this is the ONLY step that can send a part at all, since
       # YouTube no longer takes them.
+      # Skipped for a channel the desk posts: that one has already been handed
+      # its video above, and an API draft on top of it would put the same story
+      # in the inbox AND on the profile.
       - name: Send it to TikTok drafts
-        if: steps.gate.outputs.go == 'true' && inputs.dry_run != true
+        if: >-
+          steps.gate.outputs.go == 'true' && inputs.dry_run != true &&
+          !contains(fromJSON(vars.TIKTOK_LOCAL_CHANNELS || '[]'), matrix.channel)
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -520,8 +577,13 @@ jobs:
       # told about. The gate decides whether to MAKE a video; it has no business
       # deciding whether to ask about one already sent. Two API calls per stuck
       # row is what this costs on the runs that used to skip it.
+      # Inbox drafts only, so the same skip as the send above: a locally-posted
+      # channel has no inbox to be stuck in, and every row it does have is a
+      # handoff whose id the status endpoint has never heard of.
       - name: Anything stuck in the TikTok inbox?
-        if: inputs.dry_run != true
+        if: >-
+          inputs.dry_run != true &&
+          !contains(fromJSON(vars.TIKTOK_LOCAL_CHANNELS || '[]'), matrix.channel)
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
