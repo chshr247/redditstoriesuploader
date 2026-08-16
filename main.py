@@ -157,18 +157,21 @@ def _room() -> int:
     caps how much of the day one story may lay claim to, which is the question
     being asked here.
 
-    Zero on the tau backend as well, and for a reason that is about WHERE the
-    state lives rather than about the clock. A part is cleared by the machine
-    that sends it, and on tau that is a desk, not CI - but the `parts` table is
-    in seen.db, which CI rewrites and commits twice an hour. So the row saying
-    part 1 is done survives until the next run pushes over it, and the story is
-    then rendered and posted a second time. The tracked/untracked split that
-    fixes this for the `tiktok` table (publish._db_path()) cannot be applied to
-    `parts` without moving the whole queue off CI, and a channel that never
-    splits needs none of it. Whole stories only there; splitting is a TikTok
-    arrangement and losing it costs that channel nothing else.
+    The tau backend used to be refused here outright, on the grounds that only
+    a send clears a part and on tau the sender is a desk whose seen.db never
+    travels - so CI would re-render part 1 for ever. That stopped being true
+    when the handoff step arrived: publish.handoff() calls _clear_part() on the
+    runner, and CI commits seen.db, so a part is closed by the machine that
+    RENDERED it rather than by the one that sends it. The desk clearing it a
+    second time locally is a no-op nobody reads.
+
+    So splitting works on a locally-posted channel, with one condition that
+    lives outside this file: the poster has to run often enough to honour
+    PART_GAP_HOURS. An hour between a cliffhanger and its answer is the point
+    of splitting; a poster on a three-hour timer turns the second half into a
+    stranger's video. See the timer in VPS.md.
     """
-    if publish.TIKTOK_BACKEND == "tau" or publish.due():
+    if publish.due():
         return 0
     return max(0, TIKTOK_PER_DAY - publish.sent_today())
 
