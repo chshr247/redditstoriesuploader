@@ -2,9 +2,11 @@
 
 Three backends, and they differ in where timings come from:
 
-  eleven - ElevenLabs, the primary. Its /with-timestamps endpoint hands back
-           the audio and a start/end for every CHARACTER it was given, so the
-           timings are the engine's own and whisper never runs.
+  eleven - ElevenLabs, the primary on any channel configured with a key and
+           voice ids of its own - the Russian one today; English narrates on
+           fish. Its /with-timestamps endpoint hands back the audio and a
+           start/end for every CHARACTER it was given, so the timings are the
+           engine's own and whisper never runs.
   edge   - edge-tts emits WordBoundary events while synthesizing, so timings
            are authoritative too: the engine reports what it itself spoke.
   fish   - Fish Audio returns audio and nothing else. Timings are recovered
@@ -49,6 +51,17 @@ ELEVEN_URL = "https://api.elevenlabs.io/v1/text-to-speech/{}/with-timestamps"
 # module state on purpose - once the month's quota is gone it is gone for every
 # video in the run, and retrying it per take would cost a request each time.
 _backend = TTS_BACKEND
+
+# ElevenLabs is the Russian channel's narrator and fish everybody else's, and
+# what decides that is simply whether THIS channel has a key and voice ids: a
+# voice is picked by listening to it read one language, so a channel with no
+# ids has no ElevenLabs narrator at all. Settled here rather than per take,
+# because the alternative is _eleven_synth raising on every single line and the
+# run reaching fish through the error path - same audio, a log full of ERRORs.
+# Only `eleven` is downgraded; an explicit edge run stays edge.
+if _backend == "eleven" and not (ELEVEN_API_KEY
+                                 and (ELEVEN_VOICES_MALE or ELEVEN_VOICES_FEMALE)):
+    _backend = "fish"
 _fallback_voice = ""    # the fish narrator picked when eleven died mid-video
 
 # ponytail: pacing knob for edge. Fish has its own, FISH_SPEED.
@@ -631,6 +644,13 @@ if __name__ == "__main__":
     assert filled[1]["start"] == 1.0 and abs(filled[1]["end"] - 3.0) < 0.01
     tail = _fill_gaps([None, None], ["x", "y"], 2.0)
     assert [w["word"] for w in tail] == ["x", "y"] and tail[1]["end"] == 2.0
+
+    # A channel narrates on ElevenLabs only if it has both halves of what that
+    # takes. Half-configured, the run would go to fish anyway - through an
+    # ERROR per take rather than quietly, which is what the gate above is for.
+    assert _backend != "eleven" or (
+        ELEVEN_API_KEY and (ELEVEN_VOICES_MALE or ELEVEN_VOICES_FEMALE)), \
+        "eleven is live with no key or no voices for this channel"
 
     # ElevenLabs times CHARACTERS, and the words we hand back are what the
     # subtitles are cut from - a space that lands inside a word, or one that
