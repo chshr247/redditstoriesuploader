@@ -352,7 +352,7 @@ def _final(r: dict, bodies: list[str]) -> dict:
     Callers get one shape whoever wrote what: [(title, body), ...], the title
     the same on every entry because a split story carries one. A rewrite may
     come back with fewer parts than the model wrote - _body_fault() allows two
-    up to what was written, exactly the band _parse_parts() allows the model -
+    up to what was written, exactly the band script._chunks() allows the model -
     so the rewritten list replaces `written` rather than being zipped into it.
     """
     bodies = bodies or [b for _, b in r["written"]]
