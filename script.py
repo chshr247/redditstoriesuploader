@@ -307,6 +307,56 @@ WEAK_TITLE = {
         r")", re.IGNORECASE),
 }
 
+# Closing questions that ask nothing about the story they close. Same disease as
+# WEAK_TITLE and the same reason for a check: the prompt has said to name what
+# actually happened from the start, and it loses often enough to matter - the
+# comments this post was picked for were arguing about one particular thing, and
+# a question that could sit under any video throws that argument away.
+#
+# It lost partly to the prompt itself, which handed the model "А как бы вы
+# поступили на моём месте?" as the shape to copy while forbidding it two rules
+# above. That example is specific now, and this catches the rest.
+WEAK_CTA = {
+    "ru": re.compile(
+        # nearly every one of these opens on "А", which is part of the shape the
+        # prompt asks for and no part of what makes the line stock
+        r"^(?:а|и|ну|так)?\s*(?:"
+        r"как\s+бы\s+вы\s+поступил"
+        r"|что\s+бы\s+вы\s+сделал"
+        r"|вы\s+бы\s+как\b"
+        r"|кто\s+(?:из\s+нас\s+|тут\s+|здесь\s+)*(?:прав|не\s*прав|виноват)"
+        r"|как\s+думаете,?\s+что\s+(?:было|будет)\s+дальше"
+        r"|что\s+(?:вы\s+)?думаете\s*\??$"
+        r"|как\s+вы\s+считаете\s*\??$"
+        r"|что\s+скажете\s*\??$"
+        r"|на\s+чьей\s+вы\s+стороне\s*\??$"
+        r")", re.IGNORECASE),
+    "en": re.compile(
+        r"^(?:and|so|but)?\s*(?:"
+        r"what\s+would\s+you\s+(?:have\s+)?(?:do|done)\b"
+        r"|would\s+you\s+have\s+done\s+the\s+same\b"
+        r"|who(?:['’]?s|\s+is|\s+was)\s+(?:in\s+the\s+)?(?:right|wrong)\s*\??$"
+        r"|whose\s+side\s+are\s+you\s+on\s*\??$"
+        r"|what\s+do\s+you\s+think\s*\??$"
+        r"|(?:so\s+)?am\s+i\s+the\s+(?:asshole|jerk)\b"
+        r"|thoughts\s*\??$"
+        r")", re.IGNORECASE),
+}
+
+# Words the question is built out of rather than words it is about. Stripped
+# before asking whether the question named anything from the story, or every
+# question would pass on "вы" alone.
+CTA_FRAME = {
+    "ru": {"а", "вы", "бы", "как", "что", "это", "так", "тут", "ещё", "или",
+           "если", "него", "неё", "них", "его", "её", "их", "меня", "моём",
+           "моей", "месте", "думаете", "считаете", "поступили", "сделали",
+           "стали", "смогли", "были", "быть", "такое", "таком", "такой"},
+    "en": {"what", "would", "you", "have", "the", "and", "for", "with", "that",
+           "this", "them", "him", "her", "his", "she", "was", "were", "been",
+           "done", "did", "your", "my", "in", "my", "place", "same", "do",
+           "think", "about", "it", "if", "on", "at", "to", "of", "a", "an"},
+}
+
 # Ten was the number while a title stated one bare fact. It states two now - a
 # finished statement, then the turn that makes it absurd - and the second half
 # does not fit in what is left after the first.
@@ -573,7 +623,42 @@ def _cta_fault(cta: str) -> str:
     return ""
 
 
-def _ending_fault(body: str, final: bool = True, markup: bool = True) -> str:
+def _cta_weak_fault(cta: str, story: str, lang: str = "") -> str:
+    """Empty when the closing question is about THIS story.
+
+    Two ways it can fail to be. It can be one of the stock lines, which WEAK_CTA
+    carries. Or it can be shaped right and still name nothing the narration
+    mentioned - "А вы бы поменяли график?" closing a story that spent two
+    hundred words calling that thing a список. The second is the milder fault
+    and much the harder one to see by eye, which is exactly why it is worth a
+    check instead of one more line in the prompt.
+
+    Matched on four-character prefixes, which is as much stemming as this needs:
+    "график" against "графику" is the case that matters, and a check asking only
+    "did the question name ANYTHING from the story" has to err towards letting
+    things through - a false refusal costs a whole rewrite.
+    """
+    lang = lang or OUTPUT_LANG
+    q = plain(cta).strip()
+    if WEAK_CTA[lang].match(q):
+        return ("the closing question is a stock line that would fit any video "
+                "- ask it about what actually happened in THIS story")
+    words = [w for w in re.findall(r"\w+", q.lower())
+             if len(w) >= 5 and w not in CTA_FRAME[lang]]
+    if not words:
+        return ("the closing question names nothing out of the story - put into "
+                "it the person it is about, or the thing that was done")
+    seen = {w[:4] for w in re.findall(r"\w+", plain(story).lower())}
+    if not any(w[:4] in seen for w in words):
+        return ("the closing question is about "
+                + ", ".join(f'"{w}"' for w in words[:3])
+                + " - and the narration mentions none of them. Ask about "
+                "something the story actually named")
+    return ""
+
+
+def _ending_fault(body: str, final: bool = True, markup: bool = True,
+                  lang: str = "") -> str:
     """Empty when the narration closes properly.
 
     `markup` off checks the words alone, which is all stage one writes: the
@@ -613,9 +698,14 @@ def _ending_fault(body: str, final: bool = True, markup: bool = True) -> str:
     if not t.endswith("?"):
         return ("the narration must finish the story and then close with one "
                 "short question to the viewer, ending in a question mark")
-    _, cta = split_cta(body)
+    story, cta = split_cta(body)
     if not cta:
         return "the closing question must stand as its own final sentence"
+    # What the question SAYS is checked in both stages: those are stage one's
+    # words, and stage two is forbidden from touching them, so a stock question
+    # that reaches stage two is a fault stage one should have been told about.
+    if weak := _cta_weak_fault(cta, story, lang):
+        return weak
     return _cta_fault(cta) if markup else ""
 
 
@@ -1173,9 +1263,17 @@ if __name__ == "__main__":
     assert c == "Would you have stayed?", c
     assert s.endswith("“Are you serious?”"), s
     assert not _ending_fault('He left. [me, cold] “Dinner is on the table.” '
-                             "[doubtful] Would you have [emphasis] said that to him?")
+                             "[doubtful] Would you have [emphasis] left him "
+                             "dinner?", lang="en")
     assert not _ending_fault('...And I froze. [angry] “Get out of my house.”',
                              final=False), "a part may end on a line of dialogue"
+    # English says the stock question with its own words, so it needs its own list
+    assert _cta_weak_fault("Would you have done the same in my place?",
+                           "He left.", "en")
+    assert _cta_weak_fault("So am I the asshole here?", "He left.", "en")
+    assert _cta_weak_fault("What would you have done?", "He left.", "en")
+    assert not _cta_weak_fault("Would you have left him dinner?",
+                               "He left. Dinner was on the table.", "en")
 
     # the closing question is voiced apart, so it has to come off cleanly
     s, c = split_cta("Я собрал вещи и ушёл. А вы бы простили такое?")
@@ -1199,8 +1297,30 @@ if __name__ == "__main__":
     assert _words(s) + _words(c) == _words(full), (s, c)
 
     # the closing question is what proves the text reached its end
-    GOOD_CTA = "[doubtful] А как бы вы [emphasis] поступили на моём месте?"
-    assert not _ending_fault(f"Я собрал вещи и ушёл. {GOOD_CTA}")
+    # Not "А как бы вы поступили на моём месте?", which is what this fixture was
+    # until _cta_weak_fault() started refusing it - and that same line was what
+    # the prompt handed the model as the shape to copy, two rules below the one
+    # forbidding it. The template, the fixture and the output were one sentence.
+    GOOD_CTA = "[doubtful] А вы бы [emphasis] простили брата за такое?"
+    assert not _ending_fault(f"Брат занял денег и пропал. {GOOD_CTA}")
+
+    # a question that would sit under any video at all
+    assert _cta_weak_fault("А как бы вы поступили на моём месте?", "Я ушёл.")
+    assert _cta_weak_fault("Кто из нас прав, как думаете?", "Я ушёл.")
+    assert _cta_weak_fault("А что бы вы сделали?", "Я ушёл.")
+    assert _cta_weak_fault("На чьей вы стороне?", "Я ушёл.")
+    # shaped right, and still naming something the story never had - the
+    # narration called that thing a список from beginning to end
+    assert "график" in _cta_weak_fault(
+        "А вы бы поменяли график?",
+        "Мы составили список обязанностей. Менять список я отказался.")
+    # the same question under the story that does name it
+    assert not _cta_weak_fault(
+        "А вы бы поменяли график?",
+        "Мы повесили график на холодильник. Я показываю на график.")
+    # a case ending is not a different word, or every question would be refused
+    assert not _cta_weak_fault("А вы бы простили брата за такое?",
+                               "Брат занял денег и пропал.")
     assert _ending_fault("Я собрал вещи и ушёл."), "a story with no CTA is unfinished"
     assert _ending_fault("Он открыл дверь и"), "a cut-off narration must be caught"
     assert _ending_fault("Он крикнул. [angry] «Ты серьёзно?»"), "direct speech is not a CTA"
@@ -1239,14 +1359,15 @@ if __name__ == "__main__":
     # top holding for every part, a cliffhanger in the half that is not the
     # last, and not one square bracket anywhere - the markup is the next pass.
     RAW2 = ("NARRATOR: female\n\n"
-            "Тело первой части. И тут я услышала её шаги на лестнице.\n"
+            "Соседка забрала мои ключи. И тут я услышала её шаги на лестнице.\n"
             "---\n"
-            "Тело второй части. А вы бы её пустили в дом?")
+            "Ключи она вернула через неделю. А вы бы простили соседке эти ключи?")
     POST = {"title": "", "text": ""}
     (g4, p4), f4 = _parse_write(RAW2, POST, 2, 30)
     assert g4 == "female" and len(p4) == 2, (g4, p4)
-    assert p4[1].startswith("Тело второй"), p4[1]
-    # the fixture is deliberately far off thirty words; nothing else may be wrong
+    assert p4[1].startswith("Ключи она вернула"), p4[1]
+    # the fixture is deliberately far off thirty words; nothing else may be
+    # wrong, and the closing question names the keys the story is about
     assert all("words" in f for f in f4), f4
     assert all(f.startswith("part ") for f in f4), "faults must name their part"
     # stage one writes words. A title line is the next step's job done here, and
@@ -1255,45 +1376,51 @@ if __name__ == "__main__":
     (_, p10), f10 = _parse_write(
         RAW2.replace("NARRATOR: female\n", "NARRATOR: female\nTITLE: Заголовок\n"),
         POST, 2, 30)
-    assert p10[0].startswith("Тело первой"), p10[0]
+    assert p10[0].startswith("Соседка забрала"), p10[0]
     assert any("TITLE" in f for f in f10), f10
     # a cue written here is worse than useless: stage two reads a marked
     # sentence as one already done and never puts the mark where it belongs
-    (_, _), f11 = _parse_write(RAW2.replace("Тело первой", "[sad] Тело первой"),
+    (_, _), f11 = _parse_write(RAW2.replace("Соседка забрала", "[sad] Соседка забрала"),
                                POST, 2, 30)
     assert any("square brackets" in f for f in f11), f11
     # only the last part may address the viewer, and only it must
     RAW_BAD = RAW2.replace("И тут я услышала её шаги на лестнице.",
-                           "Как думаете, что было дальше?")
+                           "А вы бы простили соседке эти ключи?")
     (_, _), f7 = _parse_write(RAW_BAD, POST, 2, 30)
     assert any(f.startswith("part 1") and "not the last" in f for f in f7), f7
-    RAW_BAD2 = RAW2.replace("А вы бы её пустили в дом?", "И она ушла.")
+    RAW_BAD2 = RAW2.replace("А вы бы простили соседке эти ключи?", "И она ушла.")
     (_, _), f8 = _parse_write(RAW_BAD2, POST, 2, 30)
     assert any(f.startswith("part 2") and "question" in f for f in f8), f8
+    # a stock closing question is stage one's fault, since those are its words
+    RAW_WEAK = RAW2.replace("А вы бы простили соседке эти ключи?",
+                            "А как бы вы поступили на моём месте?")
+    (_, _), f12 = _parse_write(RAW_WEAK, POST, 2, 30)
+    assert any("stock line" in f for f in f12), f12
     # one part where two were asked for is a fault, not a silent single video
     (_, p5), f5 = _parse_write(RAW2.split("---")[0], POST, 2, 30)
     assert len(p5) == 1 and any("parts" in f for f in f5), f5
 
     # STAGE TWO takes those words back and may add nothing but brackets.
-    WRITTEN = ["Тело первой части. И тут я услышала её шаги на лестнице.",
-               "Тело второй части. А вы бы её пустили в дом?"]
-    RAW_P = ("TITLE: Свекровь [emphasis] потребовала ключи, а я сменила замки\n\n"
-             "Тело [emphasis] первой части. И тут я услышала её [emphasis] шаги "
-             "на лестнице.\n"
+    WRITTEN = ["Соседка забрала мои ключи. И тут я услышала её шаги на лестнице.",
+               "Ключи она вернула через неделю. А вы бы простили соседке эти ключи?"]
+    RAW_P = ("TITLE: Соседка [emphasis] забрала мои ключи и вернула их через "
+             "неделю\n\n"
+             "Соседка [emphasis] забрала мои ключи. И тут я услышала её "
+             "[emphasis] шаги на лестнице.\n"
              "---\n"
-             "Тело [emphasis] второй части. [doubtful] А вы бы её [emphasis] "
-             "пустили в дом?")
+             "Ключи она [emphasis] вернула через неделю. [doubtful] А вы бы "
+             "[emphasis] простили соседке эти ключи?")
     (t4, q4), fp = _parse_polish(RAW_P, WRITTEN, 2, POST)
     assert not fp, fp
     # plain(), because a part keeps its markup all the way to voice.speak_parts
     # - the cues are what the engine reads - and only meta.json gets it
     # stripped. Comparing the raw title against unmarked words could never pass.
-    assert plain(t4).startswith("Свекровь потребовала"), t4
-    assert len(q4) == 2 and plain(q4[1]).startswith("Тело второй"), q4
+    assert plain(t4).startswith("Соседка забрала"), t4
+    assert len(q4) == 2 and plain(q4[1]).startswith("Ключи она вернула"), q4
     # The one thing this pass may never do, and the reason the split is safe at
     # all: those words passed checks stage two is not even shown.
     (_, _), fd = _parse_polish(
-        RAW_P.replace("Тело [emphasis] первой", "Тело [emphasis] самой первой"),
+        RAW_P.replace("Соседка [emphasis] забрала", "Соседка [emphasis] тихо забрала"),
         WRITTEN, 2, POST)
     assert any("changed at word" in f for f in fd), fd
     assert not _drift_fault("Он [emphasis] ушёл.", "Он ушёл."), "brackets are free"
@@ -1302,10 +1429,10 @@ if __name__ == "__main__":
     # a later part writing its own TITLE: is the model reverting to the shape
     # this had when one call did both jobs
     RAW_TITLED = RAW_P.replace(
-        "Тело [emphasis] второй части.",
-        "TITLE: Свекровь пришла с полицией\n\nТело [emphasis] второй части.")
+        "Ключи она [emphasis] вернула",
+        "TITLE: Соседка пришла с полицией\n\nКлючи она [emphasis] вернула")
     (_, q9), f9 = _parse_polish(RAW_TITLED, WRITTEN, 2, POST)
-    assert plain(q9[1]).startswith("Тело второй"), q9[1]
+    assert plain(q9[1]).startswith("Ключи она вернула"), q9[1]
     assert any(f.startswith("part 2") and "TITLE" in f for f in f9), f9
     # ...and the shared title is checked ONCE, however many parts there are
     assert sum("the TITLE is" in f for f in f9) <= 1, f9
@@ -1321,8 +1448,9 @@ if __name__ == "__main__":
     assert "keep it under" not in _title_fault(" ".join(["слово"] * MAX_TITLE_WORDS))
     # and the single-video path must not start splitting on a stray dash line
     (_, q6), _ = _parse_polish(
-        "TITLE: Заголовок\n\n---\n\nТело. [doubtful] А вы бы [emphasis] смогли?",
-        ["Тело. А вы бы смогли?"], 1, POST)
+        "TITLE: Заголовок\n\n---\n\nКлючи она вернула. [doubtful] А вы бы "
+        "[emphasis] простили соседке эти ключи?",
+        ["Ключи она вернула. А вы бы простили соседке эти ключи?"], 1, POST)
     assert len(q6) == 1, q6
 
     # the prompt set has to exist for the channel this process is, or the run
