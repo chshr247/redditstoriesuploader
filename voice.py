@@ -34,11 +34,11 @@ from num2words import num2words
 
 import script
 from config import (ELEVEN_API_KEY, ELEVEN_MODEL, ELEVEN_STABILITY,
-                    ELEVEN_STYLE, ELEVEN_VOICES_FEMALE,
-                    ELEVEN_VOICES_MALE, FISH_API_KEY, FISH_BODY_CUE,
-                    FISH_CTA_CUE, FISH_MODEL, FISH_SPEED, FISH_TITLE_CUE,
-                    FISH_VOICES_FEMALE, FISH_VOICES_MALE, OUT_DIR, OUTPUT_LANG,
-                    TTS_BACKEND, TTS_VOICE, WHISPER_SIZE)
+                    ELEVEN_STYLE, ELEVEN_VOICES_FEMALE, ELEVEN_VOICES_MALE,
+                    FISH_API_KEY, FISH_BODY_CUE, FISH_CTA_CUE, FISH_MODEL,
+                    FISH_SPEED, FISH_TITLE_CUE, FISH_VOICES_FEMALE,
+                    FISH_VOICES_MALE, OUT_DIR, OUTPUT_LANG, TTS_BACKEND,
+                    TTS_VOICE, VOICE_DEHISS_DB, VOICE_SPEEDUP, WHISPER_SIZE)
 
 TICKS_PER_SEC = 10_000_000
 FISH_URL = "https://api.fish.audio/v1/tts"
@@ -323,6 +323,50 @@ def _fill_gaps(timed: list, ours: list[str], audio_end: float) -> list[dict]:
 
 # ------------------------------------------------------------------ interface
 
+SR = 44100      # the rate the finished track is put onto before it is faked
+# Where the shelf starts. 6 kHz rather than 8: measured 2026-08-16, a shelf at
+# 8 kHz barely moves the band it is aimed at - -3, -5 and -7 dB all landed
+# within 0.3 dB of each other above 9 kHz - while the same gains from 6 kHz
+# track properly. Still well clear of the 300-3400 the voice lives in.
+DEHISS_HZ = 6000
+
+
+def _speedup(k: float = VOICE_SPEEDUP, dehiss: float = VOICE_DEHISS_DB) -> str:
+    """Filter tail that makes the track faster and higher in one operation.
+
+    asetrate reinterprets the samples at a different rate, so pace and pitch
+    move together - which IS the effect wanted here, and one filter rather than
+    atempo plus a pitch shifter fighting each other.
+
+    It takes an absolute rate, not a factor, so the input is resampled to a
+    known one first: fish returns whatever it returns, and a 24 kHz take handed
+    to asetrate=44100*k comes out nearly twice too fast. The second aresample
+    puts the container back on a normal rate afterwards.
+
+    The shelf on the end is not a separate effect, which is why it lives in this
+    function and not beside it: the shift is the only reason it is needed. Every
+    frequency moves up by k, the voice's own sibilance and breath included, and
+    that is heard as hiss. It is not noise - the pauses in a Fish take measure
+    -91 dB, and afftdn changed nothing - so it is taken back down rather than
+    denoised. See VOICE_DEHISS_DB.
+    """
+    if k == 1.0:
+        return ""
+    chain = f",aresample={SR},asetrate={int(SR * k)},aresample={SR}"
+    if dehiss:
+        chain += f",treble=g={dehiss}:f={DEHISS_HZ}:width_type=h:w=4000"
+    return chain
+
+
+def _scaled(words: list[dict], offset: float = 0.0,
+            k: float = VOICE_SPEEDUP) -> list[dict]:
+    """Timings measured on the unsped takes, moved onto the finished track."""
+    if k == 1.0 and not offset:
+        return words
+    return [{**w, "start": round((w["start"] + offset) / k, 3),
+             "end": round((w["end"] + offset) / k, 3)} for w in words]
+
+
 def duration(path) -> float:
     """Container duration via ffprobe. Longer than the last word: mp3s end in silence."""
     out = subprocess.run(
@@ -548,23 +592,31 @@ def speak_parts(title: str, body: str, name: str, gap: float = 0.0,
     if fish_voice:
         log.info("%s: %s %s voice %s", name, _backend, gender, fish_voice[:8])
 
-    title_end = duration(t_mp3) + gap
+    # Where the story starts, on the takes as they were synthesized. Every
+    # timing above is on that same unsped clock, so the whole set is offset here
+    # and scaled once, after the speed-up is applied to the audio below.
+    offset = duration(t_mp3) + gap
     merged = OUT_DIR / f"{name}.mp3"
     pad = f"[0:a]apad=pad_dur={gap}[t];[t]" if gap else "[0:a]"
     chain = pad + "".join(f"[{i}:a]" for i in range(1, len(parts)))
     subprocess.run(
         ["ffmpeg", "-y", "-loglevel", "error",
          *[a for p in parts for a in ("-i", str(p))],
-         "-filter_complex", f"{chain}concat=n={len(parts)}:v=0:a=1",
+         "-filter_complex",
+         f"{chain}concat=n={len(parts)}:v=0:a=1{_speedup()}",
          str(merged)], check=True)
 
-    words = [{**w, "start": round(w["start"] + title_end, 3),
-              "end": round(w["end"] + title_end, 3)} for w in words]
+    title_end = offset / VOICE_SPEEDUP
+    words = _scaled(words, offset)
+    # the card's own highlight rides the sped-up title audio too, so these move
+    # by the same factor - they just have no offset, the card starts at zero
+    t_words = _scaled(t_words)
     (OUT_DIR / f"{name}.json").write_text(json.dumps(words, ensure_ascii=False), "utf-8")
-    log.info("%s: title %.1fs + story %.1fs%s = %.1fs total", name, title_end,
+    log.info("%s: title %.1fs + story %.1fs%s = %.1fs total%s", name, title_end,
              duration(b_mp3),
              f" + question {duration(parts[-1]):.1f}s" if cta else "",
-             duration(merged))
+             duration(merged),
+             f" (sped up x{VOICE_SPEEDUP})" if VOICE_SPEEDUP != 1.0 else "")
     return merged, words, title_end, t_words
 
 
@@ -595,6 +647,31 @@ if __name__ == "__main__":
                                        ("друзей", 0.6, 1.0)])
     assert [w["word"] for w in spelled] == ["У", "5", "друзей"], spelled
     assert spelled[2]["start"] == 0.6, spelled
+
+    # The speed-up shortens the audio, so the subtitles have to shorten with it
+    # or every word lands later than it is spoken - by seconds, by the end.
+    assert _speedup(1.0) == "" and _scaled([{"start": 1.0, "end": 2.0}], k=1.0)[0]["start"] == 1.0
+    # The shelf exists only to undo the shift, so it must never appear without
+    # one - at k=1.0 there is nothing to correct and cutting the top would just
+    # be dulling the voice for free.
+    assert "treble" not in _speedup(1.0, -7), _speedup(1.0, -7)
+    assert "treble" in _speedup(1.25, -7) and "treble" not in _speedup(1.25, 0)
+    moved = _scaled([{"word": "w", "start": 1.0, "end": 2.0}], offset=3.0, k=2.0)[0]
+    assert (moved["start"], moved["end"]) == (2.0, 2.5), moved
+    # ...and the filter really does shorten it by that factor, whatever rate the
+    # take arrives at - the 24 kHz case is exactly what asetrate gets wrong when
+    # it is not resampled first
+    for rate in (24000, 44100):
+        src = OUT_DIR / f"_speed_{rate}.mp3"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+                        "-i", f"sine=frequency=440:duration=4:sample_rate={rate}",
+                        str(src)], check=True)
+        fast = OUT_DIR / f"_speed_{rate}_fast.mp3"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src),
+                        "-af", _speedup(1.25).lstrip(","), str(fast)], check=True)
+        assert abs(duration(fast) - duration(src) / 1.25) < 0.15, \
+            f"{rate} Hz: {duration(src):.2f}s -> {duration(fast):.2f}s"
+    print("speed-up ok")
 
     # a digit that reaches fish is read in English, so none may survive - and
     # the spelled form has to fit the phrase, or the fix trades an English
