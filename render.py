@@ -37,12 +37,15 @@ CUT_TRIES = 40             # draws allowed to find that gap before the cut is dr
 # taste: each one comes from a placement spec, and the reasoning behind every
 # one of them - why this instant, this share of the frame, this band of it, and
 # which of its rules are knowingly not met - is in DOCS.ru.md, not here.
-AD_AT = 1.0                # when it appears, seconds
+AD_AT = 3.0                # when it appears, seconds
 AD_FADE = 0.5              # fade in, and out again if AD_SEC ends it
 AD_SEC = 0.0               # how long it stays; 0 means to the end of the video
 AD_CHANNELS = ("ru",)      # channels that carry one; the rest never do
 AD_MIN_AREA = 1 / 6        # of the frame, below which _ad_size() warns
-AD_MARGIN = 40             # side gap, so the banner is never flush with an edge
+AD_MARGIN = 120            # side gap - and the only width control there is, so
+                           # this is the number to turn when the banner has to
+                           # come down a size. At 120 a 2:1 banner is 840x420,
+                           # which still clears AD_MIN_AREA, but only just.
 AD_Y = 240                 # below the platform's top interface strip, and word
                            # cards sit dead centre, so this band is free
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp")

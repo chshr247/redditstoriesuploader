@@ -156,6 +156,20 @@ def _room() -> int:
     is stricter than what the parts will actually be allowed. Deliberately: it
     caps how much of the day one story may lay claim to, which is the question
     being asked here.
+
+    The tau backend used to be refused here outright, on the grounds that only
+    a send clears a part and on tau the sender is a desk whose seen.db never
+    travels - so CI would re-render part 1 for ever. That stopped being true
+    when the handoff step arrived: publish.handoff() calls _clear_part() on the
+    runner, and CI commits seen.db, so a part is closed by the machine that
+    RENDERED it rather than by the one that sends it. The desk clearing it a
+    second time locally is a no-op nobody reads.
+
+    So splitting works on a locally-posted channel, with one condition that
+    lives outside this file: the poster has to run often enough to honour
+    PART_GAP_HOURS. An hour between a cliffhanger and its answer is the point
+    of splitting; a poster on a three-hour timer turns the second half into a
+    stranger's video. See the timer in VPS.md.
     """
     if publish.due():
         return 0
@@ -345,7 +359,12 @@ if __name__ == "__main__":
         rendered.clear()
         source.next_part = lambda: None
         written = []
-        source.fetch = lambda *a: [{"id": "y", "sub": "s", "score": 1, "title": "t"}]
+        # "text" included on purpose: part_count() reads it, and whether it is
+        # reached depends on source.multipart_today(), which reads the live
+        # seen.db. A stub without it passes or raises depending on what the
+        # channel published today, which is not something a test may depend on.
+        source.fetch = lambda *a: [{"id": "y", "sub": "s", "score": 1,
+                                    "title": "t", "text": "x" * 500}]
         globals()["write_and_park"] = lambda p, n=1: written.append(p["id"])
         review.waiting = lambda: True
         assert main(1) == 1 and not written, "a pending title must block the pool"
