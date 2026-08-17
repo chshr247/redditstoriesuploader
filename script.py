@@ -3,11 +3,15 @@
 Output is bare prose with no markup: whatever this returns, edge-tts reads
 out loud verbatim. No "**", no emoji, no stage directions.
 
-Title and body come from one call. The source is English and the narration
-usually is not, so the title needs translating too - and a model that writes
-both at once keeps them in one voice, for one request instead of two.
+Two calls, split along one seam: the first writes WORDS, the second writes the
+title and adds everything that goes in [square brackets], and may change no word
+while it does. One call used to do both, and carrying the title rules, the
+markup rules and the prose rules at once is what made it drop single lines out
+of the middle of itself. It also meant a fault in the markup bought a rewrite of
+the prose - see write_script(), which has the measurements.
 
-The instructions themselves live in prompts.py, one set per channel language.
+The instructions themselves live in prompts.py, one set per channel language,
+now two prompts per set - WRITE and POLISH, cut along that same seam.
 What stays here is the machinery that checks the answer, and the parts of that
 which depend on the language - the shapes a title must not have - are keyed by
 language the same way. Every one of those checks exists because a rule in the
@@ -27,7 +31,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pr
 
 
 def _prompts():
-    """(SYSTEM, MULTI), imported on use rather than at import time.
+    """(WRITE, POLISH, MULTI), imported on use rather than at import time.
 
     Both this and the OpenAI SDK belong to write_script() and to nothing else,
     and CI checks the private repo out only for a run that is going to call the
@@ -42,7 +46,7 @@ def _prompts():
             "prompts.py not found - clone the private repo into .private/ "
             "(git clone https://github.com/chshr247/reddit-prompts.git .private)"
         ) from None
-    return prompts.SYSTEM, prompts.MULTI
+    return prompts.WRITE, prompts.POLISH, prompts.MULTI
 
 import safety
 from config import (LLM_BASE_URL, LLM_MODEL, OPENAI_API_KEY, OUTPUT_LANG,
@@ -77,14 +81,20 @@ TOLERANCE = 0.15
 # it would squeeze the payoff, which is the one part that must not be rushed.
 CTA_SEC = 3
 
+# The title is narrated at the head of every part, so it always ate part of the
+# same budget. Stage one no longer writes it, and holding its share back here is
+# what keeps the two stages counting the same seconds: six to twelve words by
+# rule, nine in the middle, and TOLERANCE is worth ten times that either way.
+TITLE_WORDS = 9
+
 LANG_NAME = {"ru": "Russian", "en": "English"}
 
 log = logging.getLogger(__name__)
 
 # One set of instructions per channel language, kept in prompts.py and read
 # through _prompts(): the examples are most of the prompt, and examples in the
-# wrong language teach the wrong thing. MULTI is still appended to SYSTEM, so an
-# ordinary video keeps hitting the provider's prefix cache on SYSTEM alone.
+# wrong language teach the wrong thing. MULTI is appended to WRITE, so an
+# ordinary video keeps hitting the provider's prefix cache on WRITE alone.
 
 # A separator line the model actually produces, and nothing else: the prompt
 # bans markup, so a bare rule can only be the one we asked for.
@@ -563,8 +573,12 @@ def _cta_fault(cta: str) -> str:
     return ""
 
 
-def _ending_fault(body: str, final: bool = True) -> str:
+def _ending_fault(body: str, final: bool = True, markup: bool = True) -> str:
     """Empty when the narration closes properly.
+
+    `markup` off checks the words alone, which is all stage one writes: the
+    question has to be there and has to be its own sentence, but the cue and the
+    mark that dress it are not written until the pass after.
 
     For an ordinary video, and for the LAST part of a split story, the closing
     question is mandatory - so its question mark doubles as the marker that the
@@ -602,7 +616,7 @@ def _ending_fault(body: str, final: bool = True) -> str:
     _, cta = split_cta(body)
     if not cta:
         return "the closing question must stand as its own final sentence"
-    return _cta_fault(cta)
+    return _cta_fault(cta) if markup else ""
 
 
 def _emphasis_fault(body: str) -> str:
@@ -637,17 +651,49 @@ def _emphasis_fault(body: str) -> str:
     return ""
 
 
+def _drift_fault(tagged: str, written: str) -> str:
+    """Empty when the polish pass added brackets and changed nothing else.
+
+    This is the whole safety of splitting the call in two. Stage one's words
+    were written against the source post and checked against rules stage two
+    never sees - length, premise, scenes, the ending, the gendered verbs - so a
+    stage two that rewrites while it marks up silently voids every one of those
+    checks, and it does it in the one call with no way to tell it went wrong.
+    Strip the brackets back off and the text must be the text that went in.
+
+    Compared word by word rather than character by character: plain() already
+    folds the whitespace the cues leave behind, and a complaint that can name
+    the word it stopped at is one the model can act on.
+    """
+    a, b = plain(tagged).split(), plain(written).split()
+    if a == b:
+        return ""
+    for n, (x, y) in enumerate(zip(a, b), 1):
+        if x != y:
+            return (f"the narration was changed at word {n}: you wrote \"{x}\" "
+                    f"where the text you were given says \"{y}\" - put the words "
+                    "back exactly and add only what goes inside square brackets")
+    return (f"the narration came back {len(a)} words against the {len(b)} you "
+            "were given - put back what you dropped and add only what goes "
+            "inside square brackets")
+
+
 def guess_gender(post: dict) -> str:
     """Fallback when the model forgets the tag: Reddit's own (28F) / (25M) markers."""
     m = re.search(r"\b\d{1,2}\s*([MFmf])\b", f"{post.get('title', '')} {post.get('text', '')}")
     return "female" if m and m.group(1).lower() == "f" else "male"
 
 
-def _split(raw: str, fallback_gender: str = "male") -> tuple[str, str, str]:
-    """Pull NARRATOR: and TITLE: off the front. Returns (gender, title, body)."""
+def _split(raw: str, fallback_gender: str = "male",
+           want_gender: bool = True) -> tuple[str, str, str]:
+    """Pull NARRATOR: and TITLE: off the front. Returns (gender, title, body).
+
+    `want_gender` off silences the missing-NARRATOR warning: stage two is never
+    asked for that line, so its absence there is the shape working, not a miss.
+    """
     g = re.search(r"NARRATOR:\s*(male|female)", raw, re.IGNORECASE)
     gender = g.group(1).lower() if g else fallback_gender
-    if not g:
+    if not g and want_gender:
         log.warning("no NARRATOR: tag, falling back to %s", fallback_gender)
 
     m = re.search(r"TITLE:\s*(.+)", raw)
@@ -668,20 +714,8 @@ def _split(raw: str, fallback_gender: str = "male") -> tuple[str, str, str]:
     return gender, _clean(title).rstrip(" .,:;-"), _clean(body)
 
 
-def _parse_parts(raw: str, post: dict, parts: int,
-                 target: int) -> tuple[str, list[tuple[str, str]], list[str]]:
-    """(gender, [(title, body), ...], complaints) for one model answer.
-
-    Every part is checked on its own and the complaints are labelled, so a
-    rewrite request names the part that is wrong instead of the whole answer.
-
-    A split story has ONE title, written once at the top, and every part is
-    returned carrying it. That is what the viewer gets: the title is narrated
-    and lit on the card at the head of each part, so a story that renamed
-    itself halfway looked like three unrelated videos. The "Часть N" line under
-    it is the renderer's, added to the card and never to this text - it is not
-    narrated, and the prompt forbids the model from writing it at all.
-    """
+def _chunks(raw: str, parts: int) -> tuple[list[str], list[str]]:
+    """(one chunk per part, complaints). Capped at `parts`, never past it."""
     chunks = [c for c in PART_SEP.split(raw) if c.strip()] if parts > 1 else [raw]
     faults = []
     # Fewer parts than asked is allowed down to two - the prompt tells the model
@@ -691,118 +725,220 @@ def _parse_parts(raw: str, post: dict, parts: int,
                       f"{parts}, separated by a line of three dashes")
     # counted before this, so writing four parts when asked for three is a
     # complaint rather than a silent truncation
-    chunks = chunks[:parts]
+    return chunks[:parts], faults
 
-    gender, title, out = "", "", []
+
+# A title line, with or without a NARRATOR line above it. Matched off the RAW
+# chunk, because _clean() folds every newline into a space and after it there is
+# no telling where the title stopped.
+STRAY_TITLE = re.compile(r"\s*(?:NARRATOR:[^\n]*\n\s*)?TITLE:[^\n]*")
+
+
+def _parse_write(raw: str, post: dict, parts: int,
+                 target: int) -> tuple[tuple[str, list[str]], list[str]]:
+    """((gender, [body, ...]), complaints) for stage one's plain narration.
+
+    Everything checked here is a property of the WORDS: the length, the ending,
+    the words nobody says out loud. Nothing here looks at markup, because there
+    is none yet - stage two writes all of it, and its own checks cover it.
+    """
+    chunks, faults = _chunks(raw, parts)
+    gender, out = "", []
     for i, chunk in enumerate(chunks, 1):
+        label = f"part {i}: " if parts > 1 else ""
         if i == 1:
-            gender, title, body = _split(chunk, guess_gender(post))
+            g = re.search(r"NARRATOR:\s*(male|female)", chunk, re.IGNORECASE)
+            if g:
+                gender, chunk = g.group(1).lower(), chunk[g.end():]
+            else:
+                log.warning("no NARRATOR: tag, falling back to the post")
+        if m := STRAY_TITLE.match(chunk):
+            faults.append(label + "it writes a TITLE: line - no title is "
+                          "written at this step, only the narration")
+            chunk = chunk[m.end():]
+        body = _clean(chunk)
+
+        # the model can introduce what the source did not have, so re-check
+        if hit := safety.blocked(body):
+            raise Unsuitable(f"generated text tripped the blocklist ({hit})")
+
+        # A cue here is not harmless. Stage two adds its own, and the two sets
+        # collide: an [emphasis] already in place makes the sentence look done,
+        # so the mark that belongs on the right word never arrives.
+        if TAG.search(body):
+            faults.append(label + "it carries cues in square brackets - the "
+                          "narration is written in plain words, and every "
+                          "bracket in it is added by the pass after this one")
+
+        faults += [label + f for f in
+                   (_kin_fault(body),
+                    _ending_fault(body, final=i == len(chunks), markup=False))
+                   if f]
+        n = _words(body)
+        if not _fits(n + TITLE_WORDS, target):
+            faults.append(f"{label}it is {n} words, rewrite to about "
+                          f"{target - TITLE_WORDS} - "
+                          + ("cut it down" if n + TITLE_WORDS > target
+                             else "expand it"))
+        out.append(body)
+    return (gender or guess_gender(post), out), faults
+
+
+def _parse_polish(raw: str, written: list[str], parts: int,
+                  post: dict) -> tuple[tuple[str, list[str]], list[str]]:
+    """((title, [tagged, ...]), complaints) for stage two's marked-up answer.
+
+    A split story has ONE title, written once at the top, and every part is
+    returned carrying it. That is what the viewer gets: the title is narrated
+    and lit on the card at the head of each part, so a story that renamed itself
+    halfway looked like three unrelated videos. The "Часть N" line under it is
+    the renderer's, added to the card and never to this text.
+    """
+    chunks, faults = _chunks(raw, parts)
+    if len(chunks) != len(written):
+        faults.append(f"you returned {len(chunks)} parts where {len(written)} "
+                      "were given - every one of them comes back, in the same "
+                      "order, separated by the same lines of three dashes")
+    title, out = "", []
+    for i, chunk in enumerate(chunks, 1):
+        label = f"part {i}: " if parts > 1 else ""
+        if i == 1:
+            _, title, body = _split(chunk, want_gender=False)
         else:
-            # Only the first chunk carries the tags now. A stray TITLE: on a
-            # later part is the model falling back to the shape this used to
-            # have; strip it, or it is narrated as the part's opening line -
-            # and complain, so the rewrite drops it. Stripped off the RAW
-            # chunk, because _clean() folds every newline into a space and
-            # after it there is no telling where that title stopped.
+            # Only the first chunk carries the title. A stray TITLE: on a later
+            # part is narrated as that part's opening line, so strip it and
+            # complain, and the rewrite drops it.
             body = chunk
-            if m := re.match(r"\s*(?:NARRATOR:[^\n]*\n\s*)?TITLE:[^\n]*", body):
+            if m := STRAY_TITLE.match(body):
                 faults.append(f"part {i}: it writes its own TITLE: line - the "
                               "title is written ONCE, above part 1, and is the "
                               "title of every part")
                 body = body[m.end():]
             body = _clean(body)
 
-        # the model can introduce what the source did not have, so re-check
-        hit = safety.blocked(title, body)
-        if hit:
-            raise Unsuitable(f"generated text tripped the blocklist ({hit})")
-
-        # Length was the only thing checked here for a long time, which is how
-        # a story could stop mid-scene and still pass. A hook that does not
-        # hook and an ending that does not end cost more than a few words do.
-        # Only the last part closes with a question to the viewer; the ones
-        # before it end on the cliffhanger itself.
-        label = f"part {i}: " if parts > 1 else ""
+        if i <= len(written):
+            faults += [label + f for f in [_drift_fault(body, written[i - 1])] if f]
         faults += [label + f for f in
-                   (_kin_fault(body),
-                    _ending_fault(body, final=i == len(chunks)),
+                   (_ending_fault(body, final=i == len(chunks)),
                     _emphasis_fault(body))
                    if f]
-        # The title is narrated at the head of every part, so it counts against
-        # every part's budget even though it is written once.
-        total = _words(title) + _words(body)
-        if not _fits(total, target):
-            faults.append(f"{label}it is {total} words, rewrite to about {target} - "
-                          f"{'cut it down' if total > target else 'expand it'}")
-        out.append((title, body))
+        out.append(body)
 
     # Once, not per part: one title, one complaint, and a rewrite that is not
     # told the same thing three times over.
+    if hit := safety.blocked(title):
+        raise Unsuitable(f"generated title tripped the blocklist ({hit})")
     faults += [f for f in (_title_fault(title), _kin_fault(title)) if f]
-    return gender or guess_gender(post), out, faults
+    return (title, out), faults
+
+
+def _ask(client, system: str, user: str, check, keep: str,
+         skippable: bool = False):
+    """One model call, checked, with one rewrite if the answer has faults.
+
+    `check(raw)` returns (result, complaints). The last answer is returned even
+    when complaints remain: a narration four percent short beats no narration,
+    and that is the call this has always made.
+    """
+    msgs = [{"role": "system", "content": system},
+            {"role": "user", "content": user}]
+    result, faults = None, []
+    for attempt in range(2):
+        resp = client.chat.completions.create(model=LLM_MODEL, messages=msgs)
+        # DeepSeek caches the constant prefix automatically - the system prompt
+        # stays first so it hits every call. These counters are how you confirm
+        # it, and after the split there are two prefixes to watch instead of one.
+        u = resp.usage
+        log.info("tokens: %d in (%d cached), %d out", u.prompt_tokens,
+                 getattr(u, "prompt_cache_hit_tokens", 0), u.completion_tokens)
+
+        raw = resp.choices[0].message.content
+        if skippable and (m := re.match(r"\s*SKIP:\s*(.*)", raw)):
+            raise Unsuitable(m.group(1).strip()[:120] or "no reason given")
+
+        result, faults = check(raw)
+        if not faults:
+            return result
+        log.warning("attempt %d rejected: %s", attempt + 1, "; ".join(faults))
+        msgs += [{"role": "assistant", "content": raw},
+                 {"role": "user", "content":
+                  "Rewrite it. Problems: " + "; ".join(faults) + ". " + keep}]
+
+    log.warning("accepting as is (%s)", "; ".join(faults))
+    return result
 
 
 def write_script(post: dict, parts: int = 1) -> tuple[str, list[tuple[str, str]]]:
     """(gender, [(title, narration), ...]) - one entry per video, each TARGET_SEC.
 
-    parts > 1 splits the post across that many videos in a SINGLE call: the
-    model needs the whole plot in front of it to choose where the cuts fall and
-    to end each part on purpose rather than wherever the budget ran out.
+    Two calls, not one. The first writes words and only words; the second writes
+    the title and adds the delivery markup to those words without touching them.
+    The seam is exactly that: stage one owns everything that is text, stage two
+    owns everything inside square brackets, and _drift_fault() holds the line.
+
+    It was one call for a long time, and the reason to split it was measured
+    twice. A prompt carrying the title rules, the markup rules and the prose
+    rules at once drops single lines out of the middle of itself - see the
+    counts in _emphasis_fault(), which came back 20, 1 and 19 on one story told
+    three times. And a fault in the markup used to cost a rewrite of the whole
+    answer, so a story could arrive correctly marked up and worse written than
+    the draft it replaced. Now a markup fault retries the markup.
+
+    The title is written last, from the finished narration, which kills a whole
+    class of fault on its own: a title cannot promise what the narration does
+    not deliver when the narration is the only thing it was written from.
+
+    parts > 1 splits the post across that many videos in a SINGLE stage-one
+    call: the model needs the whole plot in front of it to choose where the cuts
+    fall and to end each part on purpose rather than wherever the budget ran out.
     """
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is empty - fill in .env")
 
     from openai import OpenAI
 
-    SYSTEM, MULTI = _prompts()
+    WRITE, POLISH, MULTI = _prompts()
     client = OpenAI(api_key=OPENAI_API_KEY, base_url=LLM_BASE_URL or None)
     target = _target_words()
-    lang = OUTPUT_LANG
-    system = SYSTEM[lang].format(lang=LANG_NAME[lang])
+    lang, name = OUTPUT_LANG, LANG_NAME[OUTPUT_LANG]
+
+    system = WRITE[lang].format(lang=name)
     if parts > 1:
         system += MULTI[lang].format(n=parts)
-    msgs = [
-        {"role": "system", "content": system},
-        {"role": "user", "content":
-            f"{'Each part' if parts > 1 else 'The'} title and narration together "
-            f"must total about {target} words, which is "
-            f"{TARGET_SEC + CTA_SEC} seconds of speech - the last {CTA_SEC} of "
-            f"them the closing question"
-            + (", which only the final part has.\n\n" if parts > 1 else ".\n\n")
-            + f"Title: {post['title']}\n\nBody:\n{post['text']}"},
-    ]
-
-    for attempt in range(2):
-        resp = client.chat.completions.create(model=LLM_MODEL, messages=msgs)
-        # DeepSeek caches the constant prefix automatically - SYSTEM stays first
-        # so it hits every call. These counters are how you confirm it.
-        u = resp.usage
-        log.info("tokens: %d in (%d cached), %d out", u.prompt_tokens,
-                 getattr(u, "prompt_cache_hit_tokens", 0), u.completion_tokens)
-
-        raw = resp.choices[0].message.content
-        skip = re.match(r"\s*SKIP:\s*(.*)", raw)
-        if skip:
-            raise Unsuitable(skip.group(1).strip()[:120] or "no reason given")
-
-        gender, written, faults = _parse_parts(raw, post, parts, target)
-        if not faults:
-            return gender, written
-
-        log.warning("attempt %d rejected: %s", attempt + 1, "; ".join(faults))
-        msgs += [
-            {"role": "assistant", "content": raw},
-            {"role": "user", "content":
-                "Rewrite it. Problems: " + "; ".join(faults) +
-                ". Keep the plot, and keep the NARRATOR: and TITLE: lines."},
-        ]
+    ask = (f"{'Each part' if parts > 1 else 'The'} narration must be about "
+           f"{target - TITLE_WORDS} words. With the title read over it that is "
+           f"{TARGET_SEC + CTA_SEC} seconds of speech, the last {CTA_SEC} of "
+           "them the closing question"
+           + (", which only the final part has.\n\n" if parts > 1 else ".\n\n")
+           + f"Title: {post['title']}\n\nBody:\n{post['text']}")
+    gender, written = _ask(
+        client, system, ask,
+        lambda raw: _parse_write(raw, post, parts, target),
+        "Keep the plot and keep the NARRATOR: line.", skippable=True)
 
     if not written:
         raise Unsuitable("the model returned nothing usable")
-    log.warning("accepting as is (%s): %d words across %d part(s)",
-                "; ".join(faults),
-                sum(_words(t) + _words(b) for t, b in written), len(written))
-    return gender, written
+
+    # The parts go over as one text, separated the way they came back. Stage two
+    # writes ONE title for the whole story, so it has to see the whole story.
+    ask = ("Here is the finished narration. Write its title, and add the "
+           "delivery markup to it without changing a single word.\n\n"
+           + "\n---\n".join(written))
+    title, tagged = _ask(
+        client, POLISH[lang].format(lang=name), ask,
+        lambda raw: _parse_polish(raw, written, parts, post),
+        "Keep the narration exactly as it was given to you.")
+
+    # A stage two that came back short would otherwise drop a part on the floor.
+    # Its own words, unmarked, are worth more than a video that is not there.
+    if len(tagged) < len(written):
+        log.warning("polish returned %d of %d parts, the rest go out unmarked",
+                    len(tagged), len(written))
+        tagged += written[len(tagged):]
+
+    log.info("%d words across %d part(s)",
+             sum(_words(title) + _words(b) for b in tagged), len(tagged))
+    return gender, [(title, b) for b in tagged]
 
 
 if __name__ == "__main__":
@@ -1099,41 +1235,83 @@ if __name__ == "__main__":
     assert part_count({"text": "x" * (PART_CHARS + 10)}) == 2
     assert part_count({"text": "x" * 4000}) == MAX_PARTS, "MAX_CHARS must not exceed it"
 
-    # a two-part answer must come apart cleanly: ONE NARRATOR and ONE TITLE at
-    # the top, both of them holding for every part, and a cliffhanger in the
-    # half that is not the last
-    RAW2 = ("NARRATOR: female\n"
-            "TITLE: Свекровь [emphasis] потребовала ключи, а я сменила замки\n\n"
-            "Тело [emphasis] первой части. И тут я услышала её [emphasis] шаги "
-            "на лестнице.\n"
+    # STAGE ONE. A two-part answer must come apart cleanly: ONE NARRATOR at the
+    # top holding for every part, a cliffhanger in the half that is not the
+    # last, and not one square bracket anywhere - the markup is the next pass.
+    RAW2 = ("NARRATOR: female\n\n"
+            "Тело первой части. И тут я услышала её шаги на лестнице.\n"
             "---\n"
-            "Тело [emphasis] второй части. [doubtful] А вы бы её [emphasis] "
-            "пустили в дом?")
-    g4, p4, f4 = _parse_parts(RAW2, {"title": "", "text": ""}, 2, 6)
+            "Тело второй части. А вы бы её пустили в дом?")
+    POST = {"title": "", "text": ""}
+    (g4, p4), f4 = _parse_write(RAW2, POST, 2, 30)
     assert g4 == "female" and len(p4) == 2, (g4, p4)
+    assert p4[1].startswith("Тело второй"), p4[1]
+    # the fixture is deliberately far off thirty words; nothing else may be wrong
+    assert all("words" in f for f in f4), f4
+    assert all(f.startswith("part ") for f in f4), "faults must name their part"
+    # stage one writes words. A title line is the next step's job done here, and
+    # narrated as the part's opening sentence if it survives - strip it, and
+    # complain, so the rewrite drops it.
+    (_, p10), f10 = _parse_write(
+        RAW2.replace("NARRATOR: female\n", "NARRATOR: female\nTITLE: Заголовок\n"),
+        POST, 2, 30)
+    assert p10[0].startswith("Тело первой"), p10[0]
+    assert any("TITLE" in f for f in f10), f10
+    # a cue written here is worse than useless: stage two reads a marked
+    # sentence as one already done and never puts the mark where it belongs
+    (_, _), f11 = _parse_write(RAW2.replace("Тело первой", "[sad] Тело первой"),
+                               POST, 2, 30)
+    assert any("square brackets" in f for f in f11), f11
+    # only the last part may address the viewer, and only it must
+    RAW_BAD = RAW2.replace("И тут я услышала её шаги на лестнице.",
+                           "Как думаете, что было дальше?")
+    (_, _), f7 = _parse_write(RAW_BAD, POST, 2, 30)
+    assert any(f.startswith("part 1") and "not the last" in f for f in f7), f7
+    RAW_BAD2 = RAW2.replace("А вы бы её пустили в дом?", "И она ушла.")
+    (_, _), f8 = _parse_write(RAW_BAD2, POST, 2, 30)
+    assert any(f.startswith("part 2") and "question" in f for f in f8), f8
+    # one part where two were asked for is a fault, not a silent single video
+    (_, p5), f5 = _parse_write(RAW2.split("---")[0], POST, 2, 30)
+    assert len(p5) == 1 and any("parts" in f for f in f5), f5
+
+    # STAGE TWO takes those words back and may add nothing but brackets.
+    WRITTEN = ["Тело первой части. И тут я услышала её шаги на лестнице.",
+               "Тело второй части. А вы бы её пустили в дом?"]
+    RAW_P = ("TITLE: Свекровь [emphasis] потребовала ключи, а я сменила замки\n\n"
+             "Тело [emphasis] первой части. И тут я услышала её [emphasis] шаги "
+             "на лестнице.\n"
+             "---\n"
+             "Тело [emphasis] второй части. [doubtful] А вы бы её [emphasis] "
+             "пустили в дом?")
+    (t4, q4), fp = _parse_polish(RAW_P, WRITTEN, 2, POST)
+    assert not fp, fp
     # plain(), because a part keeps its markup all the way to voice.speak_parts
     # - the cues are what the engine reads - and only meta.json gets it
     # stripped. Comparing the raw title against unmarked words could never pass.
-    assert plain(p4[0][0]).startswith("Свекровь потребовала"), p4[0]
-    # the whole point of the shape: both parts carry the SAME title, so the card
-    # and the voice open every video of the story on one line
-    assert p4[0][0] == p4[1][0], p4
-    assert plain(p4[1][1]).startswith("Тело второй"), p4[1]
-    # the fixture is deliberately far off six words; nothing else may be wrong
-    assert all("words" in f for f in f4), f4
-    assert all(f.startswith("part ") for f in f4), "faults must name their part"
-    # a later part writing its own TITLE: is the model reverting to the old
-    # shape. The line must be stripped rather than narrated as the part's first
-    # sentence, and it must be complained about so the rewrite drops it.
-    RAW_TITLED = RAW2.replace(
+    assert plain(t4).startswith("Свекровь потребовала"), t4
+    assert len(q4) == 2 and plain(q4[1]).startswith("Тело второй"), q4
+    # The one thing this pass may never do, and the reason the split is safe at
+    # all: those words passed checks stage two is not even shown.
+    (_, _), fd = _parse_polish(
+        RAW_P.replace("Тело [emphasis] первой", "Тело [emphasis] самой первой"),
+        WRITTEN, 2, POST)
+    assert any("changed at word" in f for f in fd), fd
+    assert not _drift_fault("Он [emphasis] ушёл.", "Он ушёл."), "brackets are free"
+    assert "word 2" in _drift_fault("Он тихо ушёл.", "Он ушёл.")
+    assert "3 words against the 2" in _drift_fault("Он ушёл. Совсем.", "Он ушёл.")
+    # a later part writing its own TITLE: is the model reverting to the shape
+    # this had when one call did both jobs
+    RAW_TITLED = RAW_P.replace(
         "Тело [emphasis] второй части.",
         "TITLE: Свекровь пришла с полицией\n\nТело [emphasis] второй части.")
-    _, p9, f9 = _parse_parts(RAW_TITLED, {"title": "", "text": ""}, 2, 6)
-    assert p9[1][0] == p4[0][0], "the shared title must survive a stray one"
-    assert plain(p9[1][1]).startswith("Тело второй"), p9[1]
+    (_, q9), f9 = _parse_polish(RAW_TITLED, WRITTEN, 2, POST)
+    assert plain(q9[1]).startswith("Тело второй"), q9[1]
     assert any(f.startswith("part 2") and "TITLE" in f for f in f9), f9
     # ...and the shared title is checked ONCE, however many parts there are
     assert sum("the TITLE is" in f for f in f9) <= 1, f9
+    # every part that went in comes back, or a video quietly loses its second half
+    (_, _), fm = _parse_polish(RAW_P.split("---")[0], WRITTEN, 2, POST)
+    assert any("were given" in f for f in fm), fm
     # One ceiling, and a split story's shared title answers to the same one -
     # it used to have its own, wider, until raising this number made the two
     # equal. Asserted on the length complaint alone: this fixture trips the
@@ -1141,22 +1319,11 @@ if __name__ == "__main__":
     over = " ".join(["слово"] * (MAX_TITLE_WORDS + 1))
     assert f"keep it under {MAX_TITLE_WORDS}" in _title_fault(over)
     assert "keep it under" not in _title_fault(" ".join(["слово"] * MAX_TITLE_WORDS))
-    # only the last part may address the viewer, and only it must
-    RAW_BAD = RAW2.replace("И тут я услышала её [emphasis] шаги на лестнице.",
-                           "[curious] Как [emphasis] думаете, что было дальше?")
-    _, _, f7 = _parse_parts(RAW_BAD, {"title": "", "text": ""}, 2, 6)
-    assert any(f.startswith("part 1") and "not the last" in f for f in f7), f7
-    RAW_BAD2 = RAW2.replace("[doubtful] А вы бы её [emphasis] пустили в дом?",
-                             "И она [emphasis] ушла.")
-    _, _, f8 = _parse_parts(RAW_BAD2, {"title": "", "text": ""}, 2, 6)
-    assert any(f.startswith("part 2") and "question" in f for f in f8), f8
-    # one part where two were asked for is a fault, not a silent single video
-    _, p5, f5 = _parse_parts(RAW2.split("---")[0], {"title": "", "text": ""}, 2, 6)
-    assert len(p5) == 1 and any("parts" in f for f in f5), f5
     # and the single-video path must not start splitting on a stray dash line
-    _, p6, _ = _parse_parts("TITLE: Заголовок\n\n---\n\nТело. А вы бы смогли?",
-                            {"title": "", "text": ""}, 1, 6)
-    assert len(p6) == 1, p6
+    (_, q6), _ = _parse_polish(
+        "TITLE: Заголовок\n\n---\n\nТело. [doubtful] А вы бы [emphasis] смогли?",
+        ["Тело. А вы бы смогли?"], 1, POST)
+    assert len(q6) == 1, q6
 
     # the prompt set has to exist for the channel this process is, or the run
     # dies deep inside write_script() with a KeyError instead of here
