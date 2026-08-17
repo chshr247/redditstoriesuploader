@@ -76,6 +76,18 @@ class Unsuitable(Exception):
 # or the factor gets applied twice and the scripts come out a fifth too long.
 WPM = {"ru": 150, "en": 177}
 TOLERANCE = 0.15
+# How far PAST the target a narration may run before it is sent back, and it is
+# deliberately not TOLERANCE. The two directions are not the same failure: short
+# means the story ran out of material, which is a rewrite, while long means it
+# had more than the target holds - and what gets cut first to fit is never an
+# event, it is the particular detail inside one, which is the part worth
+# keeping. So the ceiling is looser than the floor and only the ceiling moved.
+#
+# 18% of a 78-second budget is about 92 seconds, which is the number this is
+# really set to - 230 words of Russian, 271 of English, one video either way.
+# The target itself does not move: the model still aims at TARGET_SEC and this
+# only stops a story with something to say from being refused for saying it.
+OVER = 0.18
 # The closing question is spoken too, so it needs its own slice of the budget.
 # Added on top of TARGET_SEC rather than carved out of it: taken from the story
 # it would squeeze the payoff, which is the one part that must not be rushed.
@@ -268,7 +280,7 @@ def _target_words() -> int:
 
 
 def _fits(total: int, target: int) -> bool:
-    return target * (1 - TOLERANCE) <= total <= target * (1 + TOLERANCE)
+    return target * (1 - TOLERANCE) <= total <= target * (1 + OVER)
 
 
 # Titles that describe a situation instead of showing a moment. The model has
@@ -1099,6 +1111,13 @@ if __name__ == "__main__":
     assert plain(t_acc) == "Замок", plain(t_acc)
     tw = _target_words()
     assert _fits(tw, tw) and not _fits(tw * 2, tw) and not _fits(3, tw)
+    # The band is asymmetric on purpose: a story with more to say than the
+    # target holds is let through, a story that ran out of material is not.
+    assert OVER > TOLERANCE, "only the ceiling was meant to move"
+    assert _fits(round(tw * (1 + TOLERANCE)) + 1, tw), "the old ceiling is inside"
+    assert _fits(round(tw * (1 + OVER)), tw), "and the new one is the ceiling"
+    assert not _fits(round(tw * (1 + OVER)) + 2, tw), "but it is still a ceiling"
+    assert not _fits(round(tw * (1 - TOLERANCE)) - 2, tw), "the floor did not move"
     assert tw > round(TARGET_SEC / 60 * _heard_wpm()), "the CTA needs its own words"
     # The budget is a duration in disguise, so it has to be counted at the rate
     # the finished file plays at. Off by the speed-up factor it aims short by
