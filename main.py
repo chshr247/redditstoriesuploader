@@ -42,6 +42,12 @@ def _render(title: str, body: str, gender: str, key: str, sub: str,
     would write over each other in out/ and count as one row in `uploaded`.
     """
     name = chan_file(key)
+    # Pinned HERE and not inside speak_parts: an unpinned story lets that
+    # function draw its own narrator, and the re-voice below is a second call -
+    # so a story that lands under the floor comes back read by someone else, at
+    # that voice's own pace instead of the -15% asked for. Measured 2026-08-18:
+    # 173 wpm re-voiced to 124, a 29% drop from a 15% request.
+    fish_voice = fish_voice or voice.pick_voice(gender)
     mp3, words, title_end, title_words = voice.speak_parts(
         title, body, name, gender=gender, fish_voice=fish_voice)
 
@@ -333,6 +339,17 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     if "--selftest" in sys.argv:
+        # One story, one narrator: the re-voice under the floor is a SECOND
+        # call, and unpinned it comes back in somebody else's voice.
+        heard, dur = [], iter([30.0, 70.0])
+        voice.pick_voice = lambda g="male": "picked"
+        voice.speak_parts = lambda *a, **k: (
+            heard.append(k["fish_voice"]) or (Path("m.mp3"), [], 0.0, []))
+        voice.duration = lambda p: next(dur)
+        render.render = lambda *a, **k: OUT_DIR / "_selftest_voice.mp4"
+        _render("t", "b", "male", "_selftest_voice", "s")
+        assert heard == ["picked", "picked"], heard
+
         # The part is rendered in the run that can send it, and in no other:
         # nothing else clears it, and a run spent on a part publishes nothing
         # to YouTube. Stubs, because the real thing costs an LLM call and a TTS
