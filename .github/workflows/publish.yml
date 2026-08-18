@@ -4,7 +4,7 @@ name: publish
 # between runs except the state file, so out/ is thrown away with the runner.
 on:
   schedule:
-    # Twice an hour from 10:07 to 23:37 MSK. Fixed slots plus a retry hour
+    # Twice an hour from 11:07 to 02:37 MSK. Fixed slots plus a retry hour
     # looked cheaper and were not: the gap check is exactly the spacing between
     # two of the slots, so any drift - a late cron, a manual run, a retry firing
     # instead of its primary - pushed the next slot under the threshold and lost
@@ -19,9 +19,10 @@ on:
     # 56 minutes late. Off-peak minutes and two ticks an hour buy 28 attempts
     # for the same nothing, which is what makes a dropped slot survivable.
     #
-    # The tail runs to 23:37 rather than 22:00 so a day that started late still
-    # has somewhere to put its last upload. Still not around the clock: the
-    # daily allowance resets at midnight UTC, which is 03:00 MSK, and a 24-hour
+    # The tail runs to 02:37 MSK rather than stopping at midnight so a day that
+    # started late still has somewhere to put its last upload; 23:37 UTC is the
+    # last slot that still lands before the midnight-UTC quota reset. Still not
+    # around the clock: the allowance resets at midnight UTC, 03:00 MSK, and a 24-hour
     # grid would spend the day's quota on uploads nobody is awake for.
     #
     # This grid is the fallback, not the primary trigger. An external pinger
@@ -32,7 +33,7 @@ on:
     # concurrency group keeps the two off seen.db. The cron stays because the
     # pinger's token is a fine-grained PAT, those cap at a year, and an expired
     # one fails by doing nothing at all.
-    - cron: "7,37 7-20 * * *"
+    - cron: "7,37 8-23 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
