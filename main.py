@@ -291,8 +291,15 @@ def main(count: int = 1, force: bool = False) -> int:
         # twelve posts above that floor, so the slot was promising daily what
         # the subs produce monthly. Loudness is a term in contested() now, and
         # the loud story competes for the top of one list like everything else.
+        # The day's reserved slot comes first: one hand-picked story a day (see
+        # config.DAILY_FILE), and when it has had its slot - or the list is spent
+        # - next_daily() returns None and the pool fills this slot as before.
         # most posts get rejected as unsuitable, so pull a pool rather than exactly count
-        posts = source.fetch(count * 4)
+        if daily := source.next_daily():
+            log.info("daily reserve: %s", daily["id"])
+            posts = [daily]
+        else:
+            posts = source.fetch(count * 4)
         if not posts and not done:
             log.error("no fresh stories - lower MIN_SCORE or add subreddits")
             return 1
@@ -358,6 +365,9 @@ if __name__ == "__main__":
         TIKTOK_ENABLED = True
         source.next_part = lambda: {"post_id": "x", "n": 2, "total": 2}
         source.fetch = lambda *a: []
+        # the reserve is its own source and would read daily_<chan>.md and the
+        # live archive; stub it off so these cases exercise the pool path alone
+        source.next_daily = lambda: None
         make_part = lambda p: rendered.append(p) or Path("stub.mp4")  # noqa: E731
         publish.due = lambda: "only 0.4h since the last draft"
         # nothing is out for review in any of the part cases below, and asking

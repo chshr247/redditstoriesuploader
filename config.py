@@ -222,6 +222,16 @@ MIN_COMMENTS = int(os.getenv("MIN_COMMENTS", 100))
 # what an exhausted channel falls back to.
 PLAN_FILE = ROOT / chan_env("PLAN_FILE", f"plan_{CHANNEL}.md")
 
+# A softer plan, and the opposite trade to PLAN_FILE: instead of REPLACING the
+# pool, it reserves ONE of the day's slots. A list of hand-picked post ids that
+# main.py works down at one story a day - if that story splits, its parts take
+# the day's next slots as usual - while the other slots still come from the pool
+# ranked by contested(). When the list is spent every slot is the pool's again,
+# so it is a way to seed a new sub into the rotation without handing it the whole
+# feed. Per channel by name, same reasoning as PLAN_FILE; absent means no
+# reservation and the pool fills every slot as before.
+DAILY_FILE = ROOT / chan_env("DAILY_FILE", f"daily_{CHANNEL}.md")
+
 # The word in front of a part number, in the channel's own language. Two places
 # need it now and they are not the same surface: render.py writes it on the
 # title card, publish.py writes it into the caption. One dict, so a third

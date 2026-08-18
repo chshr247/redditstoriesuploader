@@ -35,8 +35,8 @@ import urllib.parse
 import urllib.request
 
 import safety
-from config import (DB_PATH, DEFAULT_CHANNEL, LOUD_AT, MIN_COMMENTS, MIN_SCORE,
-                    OUTPUT_LANG, PLAN_FILE, REDDITAPIS_KEY, SUBREDDITS)
+from config import (DAILY_FILE, DB_PATH, DEFAULT_CHANNEL, LOUD_AT, MIN_COMMENTS,
+                    MIN_SCORE, OUTPUT_LANG, PLAN_FILE, REDDITAPIS_KEY, SUBREDDITS)
 
 REDDITAPIS = "https://api.redditapis.com"
 API = "https://api.pullpush.io/reddit/search/submission/"
@@ -661,6 +661,96 @@ def next_planned() -> dict | None:
     return None
 
 
+# ------------------------------------------------------------- the daily reserve
+#
+# One slot a day from a hand-picked list, the rest of the day left to the pool -
+# see config.DAILY_FILE for why. The list is read the same forgiving way the plan
+# reads ids, so the file can be a readable checklist and only the `id` in
+# backticks is load-bearing.
+DAILY_ID = re.compile(r"\[`(\w+)`\]")
+
+
+def daily_ids() -> list[str]:
+    """The reserve list in order, deduped, or [] when this channel has none."""
+    if not DAILY_FILE.exists():
+        return []
+    # dict.fromkeys keeps first-seen order and drops a repeated id
+    return list(dict.fromkeys(DAILY_ID.findall(
+        DAILY_FILE.read_text(encoding="utf-8"))))
+
+
+def _seen_today() -> set[str]:
+    """This channel's post ids marked used today, UTC - the day's boundary the
+    rest of the scheduler already uses (see multipart_today)."""
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    with _db() as db:
+        rows = db.execute("SELECT id, ts FROM seen WHERE lang=?",
+                          (OUTPUT_LANG,)).fetchall()
+    return {i for i, ts in rows if ts and
+            datetime.datetime.fromtimestamp(
+                ts, datetime.timezone.utc).date() == today}
+
+
+def daily_left() -> int:
+    """How many reserve stories this channel has not published yet."""
+    ids = daily_ids()
+    if not ids:
+        return 0
+    with _db() as db:
+        seen = {r[0] for r in db.execute("SELECT id FROM seen WHERE lang=?",
+                                         (OUTPUT_LANG,))}
+    return sum(1 for i in ids if i not in seen)
+
+
+def next_daily() -> dict | None:
+    """The reserve story to publish this run, or None to leave the slot to the
+    pool. Ready for the same auto-split path a pool pick takes - no `parts`, so
+    main.py sizes it from the length like any other story.
+
+    None means one of three quiet things: the list is empty or spent, the day's
+    reserve slot is already taken, or the archive is down this run. The first two
+    are permanent-for-now and the pool fills the slot; the third retries next run.
+    """
+    ids = daily_ids()
+    if not ids:
+        return None
+    # The one-a-day gate. Anything from the list already used today - published,
+    # or split and now mid-flight - means the reserve has had its slot.
+    # ponytail: a reserve pick the model SKIPs is mark_used'd like any dud and so
+    # counts as today's slot, forfeiting it for the day. Rare on hand-picked
+    # contested stories; if it bites, track published apart from burned.
+    today = _seen_today()
+    if any(i in today for i in ids):
+        return None
+    with _db() as db:
+        seen = {r[0] for r in db.execute("SELECT id FROM seen WHERE lang=?",
+                                         (OUTPUT_LANG,))}
+    for i in ids:
+        if i in seen:
+            continue
+        try:
+            p = _by_id(i)
+        except DOWN as err:
+            log.error("daily: no archive available for %s (%s) - the slot waits",
+                      i, err)
+            return None
+        if p is None or not _tellable(p):
+            log.error("daily: %s is gone or can no longer be told, dropping it", i)
+            mark_used(i, p.get("score", 0) if p else 0,
+                      p.get("subreddit", "?") if p else "?")
+            continue
+        title, text = _clean(p["title"]), _clean(p["selftext"])
+        if hit := safety.blocked(title, text):
+            log.error("daily: %s trips the blocklist (%s), dropping it", i, hit)
+            mark_used(i, p["score"], p["subreddit"])
+            continue
+        return {"id": p["id"], "sub": p["subreddit"], "score": p["score"],
+                "title": title, "text": text,
+                "rank": contested(title, p.get("num_comments", 0), p["score"],
+                                  p.get("upvote_ratio"))}
+    return None
+
+
 # ---------------------------------------------------------------- split stories
 
 def queue_parts(post: dict, parts: list[tuple[str, str]], gender: str,
@@ -948,6 +1038,55 @@ if __name__ == "__main__":
     if plan():
         print(f"plan: {len(plan())} stories, {sum(e['parts'] for e in plan())} "
               f"videos, {plan_left()} still to publish")
+
+    # The daily reserve. It hands out one story a day and then steps aside for
+    # the pool, so the two failures that matter are giving out a second one the
+    # same day and never stepping aside at all - both are gated on `seen`, so
+    # both are checked here against a planted db.
+    _real_daily_file, _real_by_id = DAILY_FILE, _by_id
+    _dtmp = Path(tempfile.gettempdir()) / "_selftest_daily.md"
+    _dtmp.write_text(
+        "| 1 | [`_dl_a`](https://redd.it/_dl_a) | one |\n"
+        "| 2 | [`_dl_a`](https://redd.it/_dl_a) | a repeat, must fold |\n"
+        "| 3 | [`_dl_gone`](https://redd.it/_dl_gone) | archive has no such post |\n"
+        "| 4 | [`_dl_b`](https://redd.it/_dl_b) | two |\n", encoding="utf-8")
+    globals()["DAILY_FILE"] = _dtmp
+    globals()["_by_id"] = lambda i: (None if i == "_dl_gone" else
+        {"id": i, "subreddit": "_selftest_sub", "score": MIN_SCORE + 5,
+         "num_comments": 500, "upvote_ratio": 0.8, "over_18": False,
+         "title": "A story", "selftext": "x" * 500})
+    assert daily_ids() == ["_dl_a", "_dl_gone", "_dl_b"], daily_ids()
+    with _db() as db:                         # start clean
+        db.execute("DELETE FROM seen WHERE id LIKE '_dl_%'")
+    assert daily_left() == 3, daily_left()
+    # first run of the day: the list's head, in order
+    assert next_daily()["id"] == "_dl_a", "the reserve leads with the top row"
+    # the model accepted it, so it is marked used today
+    mark_used("_dl_a", MIN_SCORE + 5, "_selftest_sub")
+    assert next_daily() is None, "only one reserve story a day"
+    # a new day: nothing from the list marked today, so the next one is offered,
+    # and the id whose post is gone is burned on the way past rather than stalling
+    with _db() as db:
+        db.execute("UPDATE seen SET ts=0 WHERE id='_dl_a'")   # used, but not today
+    assert next_daily()["id"] == "_dl_b", "gone row skipped, next real one served"
+    with _db() as db:
+        (burned,) = db.execute(
+            "SELECT COUNT(*) FROM seen WHERE id='_dl_gone' AND lang=?",
+            (OUTPUT_LANG,)).fetchone()
+    assert burned == 1, "a reserve post that is gone must be burned, not retried"
+    # list spent: every id used (on another day), so the slot is the pool's again
+    for i in ("_dl_a", "_dl_b", "_dl_gone"):
+        mark_used(i, 0, "_selftest_sub")
+    with _db() as db:
+        db.execute("UPDATE seen SET ts=0 WHERE id LIKE '_dl_%'")
+    assert daily_left() == 0 and next_daily() is None, "a spent list steps aside"
+    with _db() as db:
+        db.execute("DELETE FROM seen WHERE id LIKE '_dl_%'")
+    globals()["DAILY_FILE"] = _dtmp.with_name("_no_such_daily.md")
+    assert daily_ids() == [] and daily_left() == 0 and next_daily() is None
+    _dtmp.unlink()
+    globals()["DAILY_FILE"], globals()["_by_id"] = _real_daily_file, _real_by_id
+    print("daily reserve ok")
 
     # A story spent on one channel must stay available on the other - that is
     # the whole point of keying `seen` by (id, lang), and the failure mode is
