@@ -515,6 +515,22 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
+          # The run that got here because YOUTUBE was due has a finished video
+          # on a disk that dies with it, and out/ is not kept for an api
+          # channel - so a refusal over the gap is not "later", it is never.
+          # Measured 2026-08-19: 16j5hv2 was rendered for ru, went to YouTube,
+          # and was refused here at 0.4h of a 3h gap; by the time the gap had
+          # elapsed the file was gone, and the story reached TikTok only by
+          # being re-rendered by hand.
+          #
+          # Only the gap is dropped, and only in that case. The daily count,
+          # the 24h inbox ceiling and the pause are untouched - this hands over
+          # a video that already exists rather than buying an extra one.
+          #
+          # ponytail: two drafts can now land inside the gap, and a draft is
+          # published by hand anyway. If they start arriving too close in the
+          # feed, put a smaller gap here rather than none.
+          TIKTOK_MIN_GAP_HOURS: ${{ steps.gate.outputs.tt == 'false' && '0' || vars.TIKTOK_MIN_GAP_HOURS || '3' }}
         run: |
           set -o pipefail
           if [ "${{ inputs.force }}" = "true" ] || [ "${{ inputs.force_tiktok }}" = "true" ]; then
