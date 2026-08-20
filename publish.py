@@ -791,6 +791,27 @@ def _since_last_h() -> float:
     return (time.time() - last) / 3600 if last else 999
 
 
+def _warn_cap() -> None:
+    """Say so when the rolling window is full, and send anyway.
+
+    TikTok's own rule is "at most 5 pending shares within any 24-hour period",
+    and this used to refuse past it. It no longer does - asked for on
+    2026-08-21, after the ceiling ate cnnuk5: the file that is refused here is
+    already rendered and dies with the runner, so refusing costs a video for
+    certain, while sending costs one only if TikTok drops it.
+
+    What TikTok does past the ceiling is not an error: init still answers with
+    a publish_id and the status still reads SEND_TO_USER_INBOX, but the
+    notification carrying the draft never arrives (measured 2026-08-07). So
+    this line in the log is the ONLY sign that a draft may have gone nowhere -
+    if a video is missing from the inbox, look for it here first.
+    """
+    if (n := shares_24h()) >= INBOX_CAP:
+        log.warning("TikTok's 24h inbox ceiling reached (%d/%d) - sending "
+                    "anyway; a draft past it can vanish without an error", n,
+                    INBOX_CAP)
+
+
 def due() -> str:
     """Empty string if another draft may go out now, else why it may not.
 
@@ -803,13 +824,8 @@ def due() -> str:
     """
     if not TIKTOK_ENABLED:
         return f"TikTok is paused for this channel ({chan_key('TIKTOK_ENABLED')}=0)"
-    # Ahead of the part exemption below, because this ceiling is not ours to
-    # make exceptions to. Past it the upload does not fail - init still answers
-    # with a publish_id and the status still reads SEND_TO_USER_INBOX - the
-    # notification carrying the draft simply never arrives, which is a video
-    # lost with every signal saying it was delivered.
-    if (n := shares_24h()) >= INBOX_CAP:
-        return f"TikTok's 24h inbox ceiling reached ({n}/{INBOX_CAP})"
+    # A warning and not a refusal, by decision - see _warn_cap().
+    _warn_cap()
     # The awaited middle of a story answers to its own clock and to no count.
     # It has to be asked HERE and not only in _blocked(), because this is the
     # gate CI consults before anything is rendered: a run refused here renders
@@ -851,11 +867,7 @@ def _blocked(meta: dict, force: bool = False) -> str:
     # exactly the case a quota of zero would have missed.
     if not TIKTOK_ENABLED:
         return f"TikTok is paused for this channel ({chan_key('TIKTOK_ENABLED')}=0)"
-    # Ahead of --force for the same reason as the pause: a limit TikTok enforces
-    # is not one we can decide to spend anyway. Forcing past it does not deliver
-    # the video sooner, it delivers it never.
-    if (n := shares_24h()) >= INBOX_CAP:
-        return f"TikTok's 24h inbox ceiling reached ({n}/{INBOX_CAP})"
+    _warn_cap()
     if force:
         return ""
     # Keyed on what this FILE turned out to be, never on what due() sees
@@ -1134,9 +1146,11 @@ if __name__ == "__main__":
         assert "for a part" in _blocked({"part": 2, "total": 2}), "parts are spaced"
         assert _blocked({"part": 2, "total": 2}, force=True) == "", "--force wins"
 
-        # ...but TikTok's own ceiling wins over --force and over the part
-        # exemption both, which is the whole difference between it and every
-        # other limit above. A cap of zero is the cheapest way to stand at it.
+        # ...and TikTok's own ceiling now blocks nothing at all: it warns
+        # and the video goes anyway, which is what the ceiling costing
+        # cnnuk5 on 2026-08-20 bought. Asserted rather than dropped because
+        # the point is that a full window still reaches the send - a cap of
+        # zero is the cheapest way to stand at one.
         try:
             INBOX_CAP = 0
             TIKTOK_MIN_GAP_HOURS = PART_GAP_HOURS = 0
@@ -1145,9 +1159,9 @@ if __name__ == "__main__":
                                      ({}, True, "--force"),
                                      ({"part": 2, "total": 2}, False, "a part"),
                                      ({"part": 2, "total": 2}, True, "a forced part")]:
-                assert "inbox ceiling" in _blocked(meta, force=force), \
-                    f"{who} must not get past TikTok's 24h ceiling"
-            assert "inbox ceiling" in due(), "the CI gate must see it too"
+                assert _blocked(meta, force=force) == "", \
+                    f"{who} must not be stopped by the ceiling any more"
+            assert due() == "", "nor may the CI gate stop for it"
         finally:
             INBOX_CAP = 10_000
     finally:
