@@ -341,42 +341,46 @@ jobs:
           done
           find assets/bg -name '*.mp4' | head -20
 
-      - name: Cache the ad banner
-        if: steps.gate.outputs.go == 'true'
-        id: ad
-        uses: actions/cache@v4
-        with:
-          path: assets/ad
-          key: ad-${{ vars.AD_VERSION || 'v1' }}
+      # The banner is off: no file is fetched, assets/ad stays empty and
+      # render._pick_ad() returns None. Nothing else changed - AD_URL is
+      # still set and AD_VERSION was bumped past the cache that holds the
+      # old banner, so putting it back is uncommenting these two steps.
+      # - name: Cache the ad banner
+      #   if: steps.gate.outputs.go == 'true'
+      #   id: ad
+      #   uses: actions/cache@v4
+      #   with:
+      #     path: assets/ad
+      #     key: ad-${{ vars.AD_VERSION || 'v1' }}
 
-      - name: Fetch the ad banner
-        if: steps.gate.outputs.go == 'true' && steps.ad.outputs.cache-hit != 'true'
-        env:
-          AD_URL: ${{ secrets.AD_URL }}
-        # Unset is not an error here, unlike BG_URL: an empty assets/ad is how
-        # render._pick_ad() is told there is no banner, and a run without one
-        # is a perfectly good run. A missing background, by contrast, is a
-        # video that cannot be made at all.
-        run: |
-          if [ -z "$AD_URL" ]; then
-            echo "AD_URL is not set - rendering without a banner"
-            exit 0
-          fi
-          mkdir -p assets/ad
-          i=0
-          for url in $AD_URL; do
-            i=$((i + 1))
-            # the query string is not part of the name: a share link ends in
-            # ?dl=1, and _ad_input() reads the extension to decide how to loop
-            path=${url%%\?*}
-            case "$path" in
-              *.zip) curl -fsSL "$url" -o /tmp/ad.zip
-                     unzip -oq /tmp/ad.zip -d "assets/ad/$i" ;;
-              # a banner is usually one file, so a bare URL is allowed too
-              *) curl -fsSL "$url" -o "assets/ad/$i.${path##*.}" ;;
-            esac
-          done
-          find assets/ad -type f | head -20
+      # - name: Fetch the ad banner
+      #   if: steps.gate.outputs.go == 'true' && steps.ad.outputs.cache-hit != 'true'
+      #   env:
+      #     AD_URL: ${{ secrets.AD_URL }}
+      #   # Unset is not an error here, unlike BG_URL: an empty assets/ad is how
+      #   # render._pick_ad() is told there is no banner, and a run without one
+      #   # is a perfectly good run. A missing background, by contrast, is a
+      #   # video that cannot be made at all.
+      #   run: |
+      #     if [ -z "$AD_URL" ]; then
+      #       echo "AD_URL is not set - rendering without a banner"
+      #       exit 0
+      #     fi
+      #     mkdir -p assets/ad
+      #     i=0
+      #     for url in $AD_URL; do
+      #       i=$((i + 1))
+      #       # the query string is not part of the name: a share link ends in
+      #       # ?dl=1, and _ad_input() reads the extension to decide how to loop
+      #       path=${url%%\?*}
+      #       case "$path" in
+      #         *.zip) curl -fsSL "$url" -o /tmp/ad.zip
+      #                unzip -oq /tmp/ad.zip -d "assets/ad/$i" ;;
+      #         # a banner is usually one file, so a bare URL is allowed too
+      #         *) curl -fsSL "$url" -o "assets/ad/$i.${path##*.}" ;;
+      #       esac
+      #     done
+      #     find assets/ad -type f | head -20
 
       - name: Install dependencies
         if: steps.gate.outputs.go == 'true'
