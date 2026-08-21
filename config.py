@@ -266,7 +266,16 @@ DAILY_FILE = ROOT / chan_env("DAILY_FILE", f"daily_{CHANNEL}.md")
 # title card, publish.py writes it into the caption. One dict, so a third
 # language cannot arrive in one of them and not the other.
 PART_WORD = {"ru": "Часть", "en": "Part"}
-TARGET_SEC = int(os.getenv("TARGET_SEC", 75))
+# Per channel, because a second of video is not the same amount of story in
+# both. The budget is words and they come out of TARGET_SEC at _heard_wpm():
+# en is voiced at VOICE_SPEEDUP 1.25 and gets 288 of them, ru is not sped up
+# at all and gets 195 - the same post told with a third less of the connective
+# tissue that says who is who, which is what "reads like a translation" turned
+# out to mean. ru buys those words back with runtime rather than with speed:
+# the voice stays where it is and the video runs longer. Unsuffixed, so a bare
+# TARGET_SEC in the env moves the default channel only and en holds 75 until
+# TARGET_SEC_EN says otherwise.
+TARGET_SEC = int(chan_env("TARGET_SEC", "75"))
 # The ceiling for the horror slot, and only a ceiling: script.target_sec()
 # scales the target by the length of the source and stops here. A scary story
 # lives on the detail that a squeeze into 75 seconds throws away first, and it

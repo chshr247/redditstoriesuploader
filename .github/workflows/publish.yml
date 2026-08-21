@@ -143,6 +143,14 @@ jobs:
       # the code default, which is what this value is.
       VOICE_DEHISS_DB_EN: ${{ vars.VOICE_DEHISS_DB_EN || '-7' }}
       YT_HASHTAGS_EN: ${{ vars.YT_HASHTAGS_EN }}
+      # Runtime, and through it the word budget - see TARGET_SEC in config.py.
+      # Unsuffixed, so this moves the Russian channel only: en is sped up 1.25x
+      # and already fits ~288 words into 75 seconds, ru is not sped up at all
+      # and fits 195, and the missing third is the connective tissue that says
+      # who is who. 87 buys it back at 225 words without touching the voice. A
+      # repo variable for the same reason as VOICE_SPEEDUP_EN above: it is a
+      # retention call and wants trying at 80 and 90 without a push.
+      TARGET_SEC: ${{ vars.TARGET_SEC || '87' }}
       # Pause TikTok for one channel without touching YouTube: set the variable
       # to 0. Unset arrives here as an empty string, which config.py reads as
       # "not set" and therefore as enabled.
