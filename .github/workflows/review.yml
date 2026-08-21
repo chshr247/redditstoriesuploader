@@ -139,7 +139,11 @@ jobs:
           git commit -m "state: title review (${{ steps.who.outputs.lang }}) [skip ci]"
           for i in 1 2 3; do
             git push && exit 0
-            git pull --rebase --no-rebase-merges origin main || {
+            # NOT --no-rebase-merges: that is a `git rebase` option and
+            # `git pull` refuses it outright, so this whole retry died on
+            # "unknown option" the first time it was ever needed and took
+            # two answered titles with it (run 32471787434, 2026-08-21).
+            git pull --rebase origin main || {
               echo "::error::seen.db conflicts with origin/main - the verdict above is NOT recorded"
               exit 1
             }
