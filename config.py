@@ -287,6 +287,21 @@ TIKTOK_ENABLED = chan_env("TIKTOK_ENABLED", "1").strip().lower() not in (
 # stories a day the pipeline is allowed to spend. Runs where only this is due
 # produce a TikTok-only video; YouTube keeps its own, slower allowance.
 TIKTOK_PER_DAY = int(os.getenv("TIKTOK_PER_DAY", 4))
+# How many written stories may sit on issues unanswered at once, i.e. how big
+# the morning batch is. One at a time was a question every three hours all day,
+# each arriving minutes before its video was due, so an unanswered one held the
+# whole pipeline. A batch is read in one sitting instead, and a story turned
+# down is replaced immediately rather than at the next slot.
+#
+# The publishing allowance and not a number of its own: a story parked past it
+# is a story that cannot go out today whatever the answer is, so writing it
+# only pays the LLM early for a question that keeps until tomorrow.
+REVIEW_BATCH = int(os.getenv("REVIEW_BATCH", TIKTOK_PER_DAY))
+# Hours from UTC for the times quoted back on an issue. Everything internal
+# runs on UTC and stays there; this is display only, and it exists because
+# "публикация сегодня в 14:07" is read on a phone by someone who is not going
+# to convert it. Default MSK, where the channel is.
+REVIEW_TZ_H = float(os.getenv("REVIEW_TZ_H", 3))
 # A draft has no publish time of its own, which is why this was a count and
 # nothing else for a while. That was wrong: the notification is what a human
 # acts on, and two drafts forty minutes apart become two videos forty minutes
