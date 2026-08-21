@@ -50,7 +50,7 @@ def _prompts():
 
 import safety
 from config import (LLM_BASE_URL, LLM_MODEL, OPENAI_API_KEY, OUTPUT_LANG,
-                    SUBREDDITS_HORROR, TARGET_SEC, VOICE_SPEEDUP)
+                    HORROR_SEC, SUBREDDITS_HORROR, TARGET_SEC, VOICE_SPEEDUP)
 
 
 class Unsuitable(Exception):
@@ -119,6 +119,13 @@ PART_SEP = re.compile(r"^\s*-{3,}\s*$", re.M)
 PART_CHARS = 1800
 MAX_PARTS = 3
 
+# How many characters of English source make one word of it. Only the horror
+# slot needs the number, and it is derived rather than picked: ~5.7 characters
+# to an English word, a faithful retelling comes back at roughly the same word
+# count in Russian, and the viewer hears _heard_wpm() of them a minute. So a
+# 4000-character post is about five minutes told in full.
+SOURCE_CHARS_PER_WORD = 5.7
+
 
 def part_count(post: dict) -> int:
     """How many videos this post is worth, by length of the source alone.
@@ -126,6 +133,13 @@ def part_count(post: dict) -> int:
     A guess, made before spending an LLM call: the model still gets to answer
     with fewer parts if the material is thinner than the character count says.
     """
+    # The horror slot is one video whatever the source weighs. Splitting is a
+    # device for a 75-second feed - a cliffhanger works because the answer is
+    # an hour away and the viewer is still scrolling. A scary story cut in half
+    # is a scary story whose ending is in a different video, and target_sec()
+    # already gives it the runtime the split was buying.
+    if post.get("sub") in SUBREDDITS_HORROR:
+        return 1
     return min(len(post["text"]) // PART_CHARS + 1, MAX_PARTS)
 
 
@@ -265,7 +279,27 @@ def _words(s: str) -> int:
     return len(plain(s).split())
 
 
-def _target_words() -> int:
+def target_sec(post: dict) -> int:
+    """Seconds of narration this story is worth.
+
+    The feed is a flat TARGET_SEC and stays that way: a family row told in
+    three minutes is a family row nobody watched to the end of.
+
+    The horror slot is scaled by the length of its source instead, up to
+    HORROR_SEC. Both ends of that matter. A scary story squeezed into 75
+    seconds loses the detail it lives on - the second set of footprints goes
+    first, because it is not plot. And a flat five minutes handed to a
+    600-word post is an invitation to pad, which the prompt bans anyway, so
+    the short ones stay short and only the long ones run.
+    """
+    if post.get("sub") not in SUBREDDITS_HORROR:
+        return TARGET_SEC
+    full = round(len(post.get("text") or "") / SOURCE_CHARS_PER_WORD
+                 / _heard_wpm() * 60)
+    return max(TARGET_SEC, min(HORROR_SEC, full))
+
+
+def _target_words(sec: int = 0) -> int:
     """Budget for title plus narration together - both are spoken.
 
     CTA_SEC rides on top of TARGET_SEC so the closing question is paid for out
@@ -276,7 +310,7 @@ def _target_words() -> int:
     changes nothing; on one with a speed-up it is the difference between
     hitting TARGET_SEC and falling short of it by the whole factor.
     """
-    return round((TARGET_SEC + CTA_SEC) / 60 * _heard_wpm())
+    return round(((sec or TARGET_SEC) + CTA_SEC) / 60 * _heard_wpm())
 
 
 def _fits(total: int, target: int) -> bool:
@@ -1001,7 +1035,8 @@ def write_script(post: dict, parts: int = 1) -> tuple[str, list[tuple[str, str]]
 
     WRITE, POLISH, MULTI, GENRE = _prompts()
     client = OpenAI(api_key=OPENAI_API_KEY, base_url=LLM_BASE_URL or None)
-    target = _target_words()
+    sec = target_sec(post)
+    target = _target_words(sec)
     lang, name = OUTPUT_LANG, LANG_NAME[OUTPUT_LANG]
     # Which slot this story came from is written nowhere but its sub, and both
     # prompts need to know: the horror slot leads on a different thing, ends on
@@ -1017,7 +1052,7 @@ def write_script(post: dict, parts: int = 1) -> tuple[str, list[tuple[str, str]]
         system += MULTI[lang].format(n=parts)
     ask = (f"{'Each part' if parts > 1 else 'The'} narration must be about "
            f"{target - TITLE_WORDS} words. With the title read over it that is "
-           f"{TARGET_SEC + CTA_SEC} seconds of speech, the last {CTA_SEC} of "
+           f"{sec + CTA_SEC} seconds of speech, the last {CTA_SEC} of "
            "them the closing question"
            + (", which only the final part has.\n\n" if parts > 1 else ".\n\n")
            + f"Title: {post['title']}\n\nBody:\n{post['text']}")
@@ -1117,6 +1152,24 @@ if __name__ == "__main__":
     # _split keeps an accent; every screen path runs plain() over it anyway
     _, t_acc, _ = _split(f"NARRATOR: male\nTITLE: За{ACCENT}мок\n\nТело.")
     assert plain(t_acc) == "Замок", plain(t_acc)
+    # The horror slot is scaled by the length of its source and stopped at the
+    # ceiling, and it is never split - target_sec() is what buys the runtime
+    # the split used to.
+    _real_horror = SUBREDDITS_HORROR
+    globals()["SUBREDDITS_HORROR"] = ["_selftest_horror"]
+    _thin = {"sub": "_selftest_horror", "text": "x" * 600}
+    _mid = {"sub": "_selftest_horror", "text": "x" * 4000}
+    _fat = {"sub": "_selftest_horror", "text": "x" * 20000}
+    _feed = {"sub": "AmItheAsshole", "text": "x" * 4000}
+    assert target_sec(_thin) == TARGET_SEC, "a thin source is not padded out"
+    assert target_sec(_fat) == HORROR_SEC, "and a long one stops at the ceiling"
+    assert TARGET_SEC < target_sec(_mid) < HORROR_SEC, target_sec(_mid)
+    assert target_sec(_feed) == TARGET_SEC, "the feed does not move"
+    assert part_count(_fat) == 1, "the horror slot is one video, whatever it weighs"
+    assert part_count(_feed) > 1, "...and the feed still splits what is long"
+    assert _target_words(HORROR_SEC) > 3 * _target_words()
+    globals()["SUBREDDITS_HORROR"] = _real_horror
+
     tw = _target_words()
     assert _fits(tw, tw) and not _fits(tw * 2, tw) and not _fits(3, tw)
     # The band is asymmetric on purpose: a story with more to say than the

@@ -48,6 +48,14 @@ BATCH = 100                        # pullpush per-request cap
 TOP_WINDOWS = ("week", "month", "year", "all")   # what the live proxy sorts by
 THIN = 20                          # below this a window is not worth the call
 MIN_CHARS, MAX_CHARS = 400, 4000   # ~40 sec .. ~4 min of narration
+# The horror slot tells one story per video at up to config.HORROR_SEC, so its
+# source is allowed to be longer than a feed post. 4000 characters is about
+# five minutes told in full, which means the ceiling is only ever reachable
+# above that - with the feed's cap the slot would top out at four and a half
+# minutes and only one story in eight would even get there. Past this a post
+# has to be compressed more than two to one, and compression is what takes the
+# detail the genre lives on.
+HORROR_CHARS = 9000
 ARCTIC_DAYS = 2                    # width of the window arctic shift reads
 ARCTIC_BACK = 4 * 365              # ...taken from anywhere in the last 4 years
 
@@ -224,7 +232,12 @@ def _arctic(sub: str) -> list[dict]:
 CONTEXT_BOUND = re.compile(r"^\s*[\[(]?\s*(update|meta|part\s*\d|final\s+update)\b", re.I)
 
 
-def _usable(p: dict) -> bool:
+def _cap(sub: str) -> int:
+    """The length ceiling for a post from `sub`. See HORROR_CHARS."""
+    return HORROR_CHARS if sub in SUBREDDITS_HORROR else MAX_CHARS
+
+
+def _usable(p: dict, sub: str = "") -> bool:
     text = p.get("selftext") or ""
     return (
         not p.get("over_18")
@@ -232,7 +245,7 @@ def _usable(p: dict) -> bool:
         and not CONTEXT_BOUND.match(p.get("title") or "")
         and p.get("num_comments", 0) >= MIN_COMMENTS
         and text not in ("[removed]", "[deleted]")
-        and MIN_CHARS <= len(text) <= MAX_CHARS
+        and MIN_CHARS <= len(text) <= _cap(sub or p.get("subreddit", ""))
     )
 
 
@@ -353,7 +366,7 @@ def _store(db, sub: str, posts: list[dict]) -> int:
     """
     rows = []
     for p in posts:
-        if p.get("score", 0) < MIN_SCORE or not _usable(p):
+        if p.get("score", 0) < MIN_SCORE or not _usable(p, sub):
             continue
         title, text = _clean(p["title"]), _clean(p["selftext"])
         # cheapest possible gate: reject here and the story never costs an LLM call
@@ -620,7 +633,7 @@ def _tellable(p: dict) -> bool:
     text = p.get("selftext") or ""
     return (not p.get("over_18")
             and text not in ("[removed]", "[deleted]")
-            and MIN_CHARS <= len(text) <= MAX_CHARS)
+            and MIN_CHARS <= len(text) <= _cap(p.get("subreddit", "")))
 
 
 def next_planned() -> dict | None:
@@ -1069,6 +1082,21 @@ if __name__ == "__main__":
     assert not _tellable({**_base, "selftext": "[removed]"})
     assert not _tellable({**_base, "over_18": True})
     assert not _tellable({**_base, "selftext": "x" * (MAX_CHARS + 1)})
+
+    # The horror slot may be longer at the source, because it is told as one
+    # video of up to HORROR_SEC instead of being cut into 75-second parts. The
+    # feed's own ceiling must not move with it, which is the half that breaks.
+    _real_horror = SUBREDDITS_HORROR
+    globals()["SUBREDDITS_HORROR"] = ["_selftest_horror"]
+    _long = {**_base, "selftext": "x" * (MAX_CHARS + 1000)}
+    assert not _tellable(_long), "an ordinary post past MAX_CHARS is too long"
+    assert _tellable({**_long, "subreddit": "_selftest_horror"})
+    assert not _tellable({**_long, "subreddit": "_selftest_horror",
+                          "selftext": "x" * (HORROR_CHARS + 1)})
+    # and the same seam on the discovery filter, where the sub is passed in
+    assert not _usable(_long) and not _usable(_long, "AmItheAsshole")
+    assert _usable(_long, "_selftest_horror")
+    globals()["SUBREDDITS_HORROR"] = _real_horror
 
     # no file at all is not an error - it is a channel without a plan
     globals()["PLAN_FILE"] = _tmp.with_name("_no_such_plan.md")

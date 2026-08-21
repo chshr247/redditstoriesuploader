@@ -43,6 +43,11 @@ SCOPE = "https://www.googleapis.com/auth/youtube.upload"
 REDIRECT = "http://localhost:8080"
 
 TITLE_MAX = 100        # YouTube rejects longer titles
+# Past this YouTube stops treating a vertical upload as a Short, whatever the
+# text says. The horror slot runs to config.HORROR_SEC and lands here as an
+# ordinary video - which is the honest label: #Shorts on a six-minute file
+# routes it nowhere and only tells the viewer it is something it is not.
+SHORTS_MAX = 180
 DESC_MAX = 5000
 CATEGORY_PEOPLE_BLOGS = "22"
 
@@ -79,16 +84,17 @@ def access_token() -> str:
     return r["access_token"]
 
 
-def title_for(text: str) -> str:
+def title_for(text: str, short: bool = True) -> str:
     """#Shorts is what routes the upload into the Shorts shelf."""
-    tag = " #Shorts"
+    tag = " #Shorts" if short else ""
     text = text.strip()
     if len(text) + len(tag) > TITLE_MAX:
         text = text[:TITLE_MAX - len(tag) - 3].rstrip() + "..."
     return text + tag
 
 
-def description_for(title: str, body: str = "", hashtags=None) -> str:
+def description_for(title: str, body: str = "", hashtags=None,
+                    short: bool = True) -> str:
     """Teaser built from the story itself, plus tags matched to it.
 
     The first line is the title and nothing else. A rotating opener used to sit
@@ -103,11 +109,23 @@ def description_for(title: str, body: str = "", hashtags=None) -> str:
     """
     pool = (tags_.pick(title, body) if hashtags is None
             else random.sample(list(hashtags), min(5, len(hashtags))))
-    tags = " ".join(pool[:5] + ["#Shorts"])
+    tags = " ".join(pool[:5] + (["#Shorts"] if short else []))
 
     teaser = " ".join(re.split(r"(?<=[.!?])\s+", body.strip())[:2]).strip()
     parts = [title.strip()] + ([teaser] if teaser else [])
     return (("\n\n".join(parts)) + "\n\n" + tags)[:DESC_MAX]
+
+
+def _is_short(mp4: Path) -> bool:
+    """Whether this file is still inside the Shorts ceiling.
+
+    Read off the meta rather than measured here: main.py already timed the
+    narration, and ffprobing every upload to learn what is written down would
+    be a subprocess for nothing. A file with no `sec` predates the horror slot,
+    and every video from then was 75 seconds - so absent reads as short, which
+    is what it was.
+    """
+    return _meta_for(Path(mp4)).get("sec", 0) <= SHORTS_MAX
 
 
 def upload(mp4, title: str, private: bool = True, body: str = "") -> str:
@@ -120,10 +138,11 @@ def upload(mp4, title: str, private: bool = True, body: str = "") -> str:
     size = mp4.stat().st_size
     token = access_token()
 
+    short = _is_short(mp4)
     meta = {
         "snippet": {
-            "title": title_for(title),
-            "description": description_for(title, body),
+            "title": title_for(title, short),
+            "description": description_for(title, body, short=short),
             "categoryId": CATEGORY_PEOPLE_BLOGS,
         },
         "status": {
@@ -304,10 +323,11 @@ def show_text(mp4: Path | None = None) -> None:
         print("=" * 70)
         print(p.name)
         print("=" * 70)
+        short = _is_short(p)
         print("\nTITLE:")
-        print(title_for(title))
+        print(title_for(title, short))
         print("\nDESCRIPTION:")
-        print(description_for(title, meta.get("body", "")))
+        print(description_for(title, meta.get("body", ""), short=short))
         print()
 
 
@@ -438,6 +458,10 @@ if __name__ == "__main__":
     # kept behind a flag so normal runs print only what the operator needs
     if "--selftest" in sys.argv:
         assert title_for("Короткий заголовок").endswith(" #Shorts")
+        # ...and a video past the ceiling carries neither tag: it is not a
+        # Short, and saying so anyway routes it nowhere and misleads the viewer.
+        assert "#Shorts" not in title_for("Короткий заголовок", short=False)
+        assert "#Shorts" not in description_for("З", "Первое. Второе.", short=False)
         assert len(title_for("я" * 200)) <= TITLE_MAX
         assert title_for("я" * 200).endswith(" #Shorts"), "the tag must survive trimming"
 
