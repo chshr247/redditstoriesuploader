@@ -859,6 +859,21 @@ def next_part() -> dict | None:
     return dict(zip(_PART_COLS, row)) if row else None
 
 
+def parts_left() -> int:
+    """Parts of this channel's split stories still to be published.
+
+    The same filter next_part() selects on, counted rather than fetched. A
+    story that has started publishing is no longer in `review` - its row went
+    the moment part 1 rendered - so this is the only place the rest of it is
+    still visible, and main._batch_room() has to see it or the day after a
+    split begins looks emptier than it is.
+    """
+    with _db() as db:
+        (n,) = db.execute("SELECT COUNT(*) FROM parts WHERE done=0 AND lang=?",
+                          (OUTPUT_LANG,)).fetchone()
+    return n
+
+
 def finish_part(post_id: str, n: int) -> None:
     """Call after the part is PUBLISHED, not after it renders.
 
