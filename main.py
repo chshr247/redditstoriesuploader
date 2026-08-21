@@ -259,8 +259,10 @@ def top_up(part: dict | None, budget: int) -> tuple[int, int, int]:
     The whole point of the batch: a day's questions arrive together and are
     answered in one sitting, instead of one landing minutes before each video
     was due and holding the pipeline until someone replied. Nothing downstream
-    changes - one video a run, the gap between sends intact. REVIEW_BATCH is
-    how many QUESTIONS may be open, never how many videos go out.
+    changes - one video a run, the gap between sends intact. REVIEW_BATCH
+    bounds the batch in VIDEOS, so a split story is one question and two or
+    three of them: four questions with a three-parter among them would be six
+    sends against an allowance of four.
 
     A story turned down deletes its row on the spot, so the slot it held is
     free here and the replacement is written immediately - by the review
@@ -273,7 +275,7 @@ def top_up(part: dict | None, budget: int) -> tuple[int, int, int]:
     fills the batch outright, which converges inside an hour at two ticks.
     """
     wrote = skipped = failed = 0
-    while wrote < budget and review.parked() < REVIEW_BATCH:
+    while wrote < budget and _batch_room():
         # One split story in flight at a time, and a parked batch counts:
         # source.multipart_today() reads the `parts` table, which is not
         # written until the RENDER, so on its own it would let every story in
@@ -286,6 +288,24 @@ def top_up(part: dict | None, budget: int) -> tuple[int, int, int]:
             break
         wrote += 1
     return wrote, skipped, failed
+
+
+def _batch_room() -> int:
+    """Videos the batch may still be asked for today.
+
+    REVIEW_BATCH is the DAY's questions, so what has already gone out today
+    comes off it. Without that, a channel that has sent two of its four and
+    then emptied its batch would be asked for four more - two of which cannot
+    go out until tomorrow, and by tomorrow morning the batch is written fresh
+    anyway. It also makes the count self-clearing: the last send of the day
+    takes the ceiling to zero, nothing is written overnight, and the first run
+    after the midnight reset asks for the whole day at once.
+
+    ponytail: sent_today() is TikTok's count. On a channel with TikTok off it
+    is always zero and YouTube's slower allowance governs, so the batch there
+    is one or two questions too generous - set REVIEW_BATCH for that channel.
+    """
+    return max(0, REVIEW_BATCH - publish.sent_today() - review.queued())
 
 
 def _room() -> int:
@@ -308,6 +328,11 @@ def _room() -> int:
     caps how much of the day one story may lay claim to, which is the question
     being asked here.
 
+    What the batch has already claimed comes off it. Stories are parked a day
+    at a time now, and every one of them is a send this day still owes - so
+    sizing a split against the raw allowance would let a three-parter be
+    written on top of three questions already asked, six videos against four.
+
     The tau backend used to be refused here outright, on the grounds that only
     a send clears a part and on tau the sender is a desk whose seen.db never
     travels - so CI would re-render part 1 for ever. That stopped being true
@@ -324,7 +349,8 @@ def _room() -> int:
     """
     if publish.due():
         return 0
-    return max(0, TIKTOK_PER_DAY - publish.sent_today())
+    return min(max(0, TIKTOK_PER_DAY - publish.sent_today() - review.queued()),
+               _batch_room())
 
 
 def main(count: int = 1, force: bool = False) -> int:
@@ -395,8 +421,10 @@ def main(count: int = 1, force: bool = False) -> int:
         wrote, skipped, more = top_up(part, budget=1 if done else REVIEW_BATCH)
         failed += more
         if wrote:
-            log.info("%d new stor%s with the user, %d open in all", wrote,
-                     "y" if wrote == 1 else "ies", review.parked())
+            log.info("%d new stor%s with the user: %d issue(s), %d video(s), "
+                     "%d slot(s) left today", wrote,
+                     "y" if wrote == 1 else "ies", review.parked(),
+                     review.queued(), _batch_room())
 
     for f in done:
         print(f)
@@ -445,6 +473,7 @@ if __name__ == "__main__":
         # whose whole point is which branch runs
         review.ready, review.ok = lambda: None, lambda: ""
         review.parked, review.split_parked = lambda: 0, lambda: False
+        review.queued = lambda: 0
         assert main(1) == 1 and not rendered, "a part must wait for TikTok's clock"
         assert main(1, force=True) == 0 and rendered, "--force renders it anyway"
         rendered.clear()
@@ -464,21 +493,58 @@ if __name__ == "__main__":
         source.fetch = lambda *a: [{"id": "y", "sub": "s", "score": 1,
                                     "title": "t", "text": "x" * 500}]
         globals()["write_and_park"] = lambda p, n=1: written.append(p["id"])
-        review.parked = lambda: REVIEW_BATCH
+        publish.sent_today = lambda: 0
+        review.queued = lambda: REVIEW_BATCH
         assert main(1) == 1 and not written, "a full batch must block the pool"
+        # ...and so does a day already spent, with the batch empty
+        review.queued = lambda: 0
+        publish.sent_today = lambda: REVIEW_BATCH
+        assert main(1) == 1 and not written, "a spent day must block it too"
         # ...and a batch with room fills to REVIEW_BATCH in one run, which is
         # the whole feature: a day's questions asked together, not one an hour.
-        open_now = [0]
-        review.parked = lambda: open_now[0]
-        globals()["write_and_park"] = lambda p, n=1: (written.append(p["id"]),
-                                                      open_now.__setitem__(0, open_now[0] + 1))
+        vids = [0]
+        review.queued = lambda: vids[0]
+        # the ceiling is the DAY's, so the count of what already went out is
+        # part of it - pinned here rather than read off the live seen.db
+        publish.sent_today = lambda: 0
+        globals()["write_and_park"] = lambda p, n=1: (
+            written.append(p["id"]), vids.__setitem__(0, vids[0] + n))
         assert main(1) == 1 and len(written) == REVIEW_BATCH, written
+        # ...and a three-parter fills it with FEWER questions, because it is
+        # three sends: the loop stops on videos, not on issues.
+        written.clear()
+        vids[0] = 0
+        globals()["write_and_park"] = lambda p, n=1: (
+            written.append(p["id"]), vids.__setitem__(0, vids[0] + 3))
+        assert main(1) == 1 and len(written) * 3 >= REVIEW_BATCH, written
+        assert len(written) < REVIEW_BATCH, "a split must cost more than one"
+
+        # The other half of the ceiling, and the one that keeps the total from
+        # overshooting it: the loop above may start a story while ONE slot is
+        # free, so what stops that story from being a three-parter is _room()
+        # coming down as the batch fills. Six sends against an allowance of
+        # four is exactly what that arithmetic is there to refuse.
+        _real_sent, _real_queued = publish.sent_today, review.queued
+        try:
+            publish.due, publish.sent_today = (lambda: ""), (lambda: 0)
+            review.queued = lambda: 0
+            assert _room() == min(TIKTOK_PER_DAY, REVIEW_BATCH), _room()
+            review.queued = lambda: REVIEW_BATCH - 1
+            assert _room() == 1, "one slot left means no split fits"
+            review.queued = lambda: REVIEW_BATCH
+            assert _room() == 0, "a full batch leaves nothing to split into"
+            # and what already went out today counts against it the same way
+            review.queued, publish.sent_today = (lambda: 0), (lambda: REVIEW_BATCH)
+            assert _room() == 0, "a spent day leaves nothing to split into"
+        finally:
+            review.queued = lambda: vids[0]
+            publish.sent_today = lambda: 0
         # ...and the answer, when it comes, renders without touching the pool
         written.clear()
         review.ready = lambda: {"post_id": "y", "sub": "s", "score": 1,
                                 "gender": "male", "title": "T", "written": [["m", "b"]]}
         globals()["make_reviewed"] = lambda r: rendered.append(r) or Path("stub.mp4")
-        open_now[0], review.parked = REVIEW_BATCH, lambda: open_now[0]
+        vids[0] = REVIEW_BATCH
         assert main(1) == 0 and len(rendered) == 1 and not written, (rendered, written)
         print("part gating and title review ok")
         sys.exit(0)

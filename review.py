@@ -305,6 +305,23 @@ def parked() -> int:
     return n
 
 
+def queued() -> int:
+    """Videos the parked batch will produce, which is not how many issues it is.
+
+    A split story is one question and two or three sends. The batch is capped
+    in videos (config.REVIEW_BATCH) because the ceiling it exists to respect -
+    the day's allowance - counts sends, and a question whose video has no slot
+    left today is a question asked for nothing.
+
+    Read off `written`, so it is what the model actually returned rather than
+    the part count that was asked for.
+    """
+    with _db() as db:
+        rows = db.execute("SELECT written FROM review WHERE lang=?",
+                          (OUTPUT_LANG,)).fetchall()
+    return sum(len(json.loads(w)) for (w,) in rows)
+
+
 def split_parked() -> bool:
     """True when one of the parked stories is already a multi-parter.
 
@@ -438,10 +455,12 @@ def _say_when(issue: int, ts: float) -> None:
         import publish
 
         with _db() as db:
-            (ahead,) = db.execute(
-                "SELECT COUNT(*) FROM review WHERE lang=? AND title!='' AND ts<?",
-                (OUTPUT_LANG, ts)).fetchone()
-        ahead += len(publish.pending())
+            rows = db.execute(
+                "SELECT written FROM review WHERE lang=? AND title!='' AND ts<?",
+                (OUTPUT_LANG, ts)).fetchall()
+        # Videos ahead, not stories ahead: a settled three-parter in front of
+        # this one is three sends before it, not one.
+        ahead = sum(len(json.loads(w)) for (w,) in rows) + len(publish.pending())
         when = publish.eta(ahead)
         note = ("Принято." if not when else
                 f"Принято, публикация {_local(when)}"
@@ -531,8 +550,8 @@ if __name__ == "__main__":
     # dependencies and the private prompt set, and a comment that was a title
     # rather than a `-` should not pay for either.
     if "--room" in sys.argv:
-        n = parked()
-        print(f"{n}/{REVIEW_BATCH} open")
+        n = queued()
+        print(f"{n}/{REVIEW_BATCH} video(s) parked over {parked()} issue(s)")
         sys.exit(0 if n < REVIEW_BATCH else 1)
 
     # The gate does not guard this and must not: it decides whether a video can
@@ -544,6 +563,7 @@ if __name__ == "__main__":
             print(f"{len(titles)} of {parked()} settled: " + " | ".join(titles))
         else:
             print(f"still waiting on {parked()} title(s)")
+        print(f"{queued()}/{REVIEW_BATCH} video(s) in the batch")
         sys.exit(0)
 
     OWNER = "chshr247"
@@ -692,13 +712,16 @@ if __name__ == "__main__":
     _db = lambda: _mem                                  # noqa: E731
     try:
         assert parked() == 3, parked()
+        # three issues, but FIVE videos - the three-parter is the whole point
+        # of counting the batch in sends rather than in questions
+        assert queued() == 5, queued()
         assert split_parked(), "a parked three-parter is a split in flight"
         # oldest first, because that is the order they render and the order the
         # times quoted on the issues were counted in
         assert [r["post_id"] for r in _rows()] == ["a", "b", "c"]
         assert _rows()[2]["written"] == THREE, "written comes back parsed"
         _mem.execute("DELETE FROM review WHERE post_id='c'")
-        assert not split_parked() and parked() == 2
+        assert not split_parked() and parked() == 2 and queued() == 2
     finally:
         _db = _real_db
 
