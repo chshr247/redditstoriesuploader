@@ -980,7 +980,14 @@ def _ask(client, system: str, user: str, check, keep: str,
     msgs = [{"role": "system", "content": system},
             {"role": "user", "content": user}]
     result, faults = None, []
-    for attempt in range(2):
+    # Three, not two, since LLM_REASONING turned a rewrite from thirty thousand
+    # tokens into four hundred. Measured on one story written four ways: the
+    # markup stage is the one that needs the extra go - without thinking it
+    # under-marks, coming back with [emphasis] on 8 of 20 sentences where the
+    # rule is every sentence, and the second attempt is not always enough. An
+    # attempt now costs less than a hundredth of what buying the thinking back
+    # would, so this is where that money goes.
+    for attempt in range(3):
         resp = client.chat.completions.create(
             model=LLM_MODEL, messages=msgs, max_tokens=LLM_MAX_TOKENS,
             reasoning_effort=LLM_REASONING)
