@@ -44,9 +44,8 @@ REDIRECT = "http://localhost:8080"
 
 TITLE_MAX = 100        # YouTube rejects longer titles
 # Past this YouTube stops treating a vertical upload as a Short, whatever the
-# text says. The horror slot runs to config.HORROR_SEC and lands here as an
-# ordinary video - which is the honest label: #Shorts on a six-minute file
-# routes it nowhere and only tells the viewer it is something it is not.
+# text says - so past this the file is not offered to YouTube at all, exactly
+# as a part of a split story is not. See _too_long().
 SHORTS_MAX = 180
 DESC_MAX = 5000
 CATEGORY_PEOPLE_BLOGS = "22"
@@ -84,17 +83,16 @@ def access_token() -> str:
     return r["access_token"]
 
 
-def title_for(text: str, short: bool = True) -> str:
+def title_for(text: str) -> str:
     """#Shorts is what routes the upload into the Shorts shelf."""
-    tag = " #Shorts" if short else ""
+    tag = " #Shorts"
     text = text.strip()
     if len(text) + len(tag) > TITLE_MAX:
         text = text[:TITLE_MAX - len(tag) - 3].rstrip() + "..."
     return text + tag
 
 
-def description_for(title: str, body: str = "", hashtags=None,
-                    short: bool = True) -> str:
+def description_for(title: str, body: str = "", hashtags=None) -> str:
     """Teaser built from the story itself, plus tags matched to it.
 
     The first line is the title and nothing else. A rotating opener used to sit
@@ -109,23 +107,11 @@ def description_for(title: str, body: str = "", hashtags=None,
     """
     pool = (tags_.pick(title, body) if hashtags is None
             else random.sample(list(hashtags), min(5, len(hashtags))))
-    tags = " ".join(pool[:5] + (["#Shorts"] if short else []))
+    tags = " ".join(pool[:5] + ["#Shorts"])
 
     teaser = " ".join(re.split(r"(?<=[.!?])\s+", body.strip())[:2]).strip()
     parts = [title.strip()] + ([teaser] if teaser else [])
     return (("\n\n".join(parts)) + "\n\n" + tags)[:DESC_MAX]
-
-
-def _is_short(mp4: Path) -> bool:
-    """Whether this file is still inside the Shorts ceiling.
-
-    Read off the meta rather than measured here: main.py already timed the
-    narration, and ffprobing every upload to learn what is written down would
-    be a subprocess for nothing. A file with no `sec` predates the horror slot,
-    and every video from then was 75 seconds - so absent reads as short, which
-    is what it was.
-    """
-    return _meta_for(Path(mp4)).get("sec", 0) <= SHORTS_MAX
 
 
 def upload(mp4, title: str, private: bool = True, body: str = "") -> str:
@@ -138,11 +124,10 @@ def upload(mp4, title: str, private: bool = True, body: str = "") -> str:
     size = mp4.stat().st_size
     token = access_token()
 
-    short = _is_short(mp4)
     meta = {
         "snippet": {
-            "title": title_for(title, short),
-            "description": description_for(title, body, short=short),
+            "title": title_for(title),
+            "description": description_for(title, body),
             "categoryId": CATEGORY_PEOPLE_BLOGS,
         },
         "status": {
@@ -289,12 +274,32 @@ def _split(mp4: Path) -> bool:
     return _meta_for(mp4).get("total", 0) > 1
 
 
+def _too_long(mp4: Path) -> bool:
+    """Is this video past what YouTube will treat as a Short?
+
+    Refused on the same grounds a part is, and by the same kind of predicate:
+    this queue is a Shorts queue. Past three minutes the upload stops being a
+    Short whatever the text says, and what arrives instead is an ordinary
+    video on a channel whose every other upload is vertical and sixty seconds
+    - published against an allowance of three a day that the feed needs.
+    The horror slot runs to config.HORROR_SEC and goes to TikTok alone.
+
+    Read off the meta rather than measured here: main.py already timed the
+    narration, and ffprobing every candidate to learn what is written down
+    would be a subprocess per file per run. A file with no `sec` predates the
+    horror slot, and every video from then was 75 seconds - so absent reads as
+    short, which is what it was.
+    """
+    return _meta_for(mp4).get("sec", 0) > SHORTS_MAX
+
+
 def pending() -> list:
     """This channel's rendered videos that have not been uploaded, oldest first.
 
-    Parts of a split story are not among them - see _split(). Nothing else
-    filters them out later, so a part rendered by a TikTok run simply sits in
-    out/ as far as YouTube is concerned, and never blocks the queue behind it.
+    Parts of a split story are not among them - see _split() - and neither is
+    anything past the Shorts ceiling, see _too_long(). Nothing else filters
+    them out later, so a file either of those refuses simply sits in out/ as
+    far as YouTube is concerned, and never blocks the queue behind it.
     Whole stories all queue here now: the score bar this used to apply on top
     (YT_VIRAL_ONLY) assumed TikTok was taking everything it refused, which was
     never true for a channel with TikTok switched off.
@@ -303,7 +308,7 @@ def pending() -> list:
         done = {r[0] for r in db.execute("SELECT file FROM uploaded")}
     return sorted((p for p in OUT_DIR.glob("*.mp4")
                    if p.name not in done and _mine(p) and not _split(p)
-                   and not _scratch(p)),
+                   and not _too_long(p) and not _scratch(p)),
                   key=lambda p: p.stat().st_mtime)
 
 
@@ -323,11 +328,10 @@ def show_text(mp4: Path | None = None) -> None:
         print("=" * 70)
         print(p.name)
         print("=" * 70)
-        short = _is_short(p)
         print("\nTITLE:")
-        print(title_for(title, short))
+        print(title_for(title))
         print("\nDESCRIPTION:")
-        print(description_for(title, meta.get("body", ""), short=short))
+        print(description_for(title, meta.get("body", "")))
         print()
 
 
@@ -458,10 +462,6 @@ if __name__ == "__main__":
     # kept behind a flag so normal runs print only what the operator needs
     if "--selftest" in sys.argv:
         assert title_for("Короткий заголовок").endswith(" #Shorts")
-        # ...and a video past the ceiling carries neither tag: it is not a
-        # Short, and saying so anyway routes it nowhere and misleads the viewer.
-        assert "#Shorts" not in title_for("Короткий заголовок", short=False)
-        assert "#Shorts" not in description_for("З", "Первое. Второе.", short=False)
         assert len(title_for("я" * 200)) <= TITLE_MAX
         assert title_for("я" * 200).endswith(" #Shorts"), "the tag must survive trimming"
 
@@ -483,6 +483,21 @@ if __name__ == "__main__":
             _bare = Path(_tmp) / "bare.mp4"
             _bare.write_bytes(b"")
             assert not _split(_bare)
+
+            # The horror slot is refused on the same terms: past the Shorts
+            # ceiling it is not a Short, and this queue is a Shorts queue.
+            # A file with no `sec` is one of the old 75-second ones.
+            _long = Path(_tmp) / "long.mp4"
+            _long.write_bytes(b"")
+            _long.with_suffix(".meta.json").write_text(
+                json.dumps({"channel": CHANNEL, "sec": SHORTS_MAX + 1}), "utf-8")
+            assert _too_long(_long), "a five-minute story is TikTok's alone"
+            assert not _too_long(_whole) and not _too_long(_bare)
+            _edge = Path(_tmp) / "edge.mp4"
+            _edge.write_bytes(b"")
+            _edge.with_suffix(".meta.json").write_text(
+                json.dumps({"channel": CHANNEL, "sec": SHORTS_MAX}), "utf-8")
+            assert not _too_long(_edge), "the ceiling itself is still a Short"
 
         assert len(description_for("t", "x" * 9000)) <= DESC_MAX
         assert "#Shorts" in description_for("Заголовок", "Первое. Второе. Третье.")

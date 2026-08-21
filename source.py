@@ -37,7 +37,7 @@ import urllib.request
 import safety
 from config import (DAILY_FILE, DB_PATH, DEFAULT_CHANNEL, LOUD_AT, MIN_COMMENTS,
                     MIN_SCORE, OUTPUT_LANG, PLAN_FILE, REDDITAPIS_KEY, SUBREDDITS,
-                    SUBREDDITS_HORROR)
+                    SUBREDDITS_HORROR, TIKTOK_ENABLED)
 
 REDDITAPIS = "https://api.redditapis.com"
 API = "https://api.pullpush.io/reddit/search/submission/"
@@ -792,6 +792,14 @@ def next_horror() -> dict | None:
     """
     if not SUBREDDITS_HORROR:
         return None
+    # These run past what YouTube will take as a Short, so youtube._too_long()
+    # keeps them out of that queue entirely and TikTok is the only outlet they
+    # have. With TikTok paused there is none: the slot would spend a story and
+    # an LLM call a day on five-minute files nothing can publish, and they would
+    # sit in out/ for as long as the pause lasted.
+    if not TIKTOK_ENABLED:
+        log.info("horror slot stands down: it publishes to TikTok alone, and TikTok is paused for %s", OUTPUT_LANG)
+        return None
     today = datetime.datetime.now(datetime.timezone.utc).date()
     marks = ",".join("?" * len(SUBREDDITS_HORROR))
     with _db() as db:
@@ -1192,6 +1200,11 @@ if __name__ == "__main__":
     # and a channel with no horror subs configured never sees the slot at all
     globals()["SUBREDDITS_HORROR"] = []
     assert next_horror() is None, "no horror subs means no horror slot"
+    # ...and neither does a channel whose only outlet for them is switched off
+    globals()["SUBREDDITS_HORROR"] = ["_selftest_horror"]
+    globals()["TIKTOK_ENABLED"] = False
+    assert next_horror() is None, "no TikTok, no horror slot"
+    globals()["TIKTOK_ENABLED"] = True
     with _db() as db:
         db.execute("DELETE FROM seen WHERE id LIKE '_hr_%'")
         db.execute("DELETE FROM pool WHERE id LIKE '_hr_%'")
