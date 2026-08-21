@@ -9,6 +9,14 @@ stories. The whole split is written in a single LLM call and parked in seen.db;
 one part is rendered per run, in the run that publishes it, because on a CI
 runner out/ does not survive to the next one.
 
+    python main.py --park   write the day's stories, render nothing
+
+Nothing is rendered until a human has answered for it: a story is written and
+parked on a GitHub issue (review.py), and a whole day's worth are parked at
+once so the questions arrive together. Answering does not publish anything on
+its own - the gap between sends and the daily allowance are unchanged, and one
+video still goes out per run.
+
 Which story is next is normally source.py's decision. A channel with a plan
 file (config.PLAN_FILE, e.g. plan_ru.md) takes that decision away from it: the
 stories go out in the order written there, one at a time, and the pool is not
@@ -25,8 +33,8 @@ import review
 import script
 import source
 import voice
-from config import (CHANNEL, LOUD_AT, MIN_SEC, OUT_DIR, TIKTOK_ENABLED,
-                    TIKTOK_PER_DAY, chan_file, chan_key)
+from config import (CHANNEL, LOUD_AT, MIN_SEC, OUT_DIR, REVIEW_BATCH,
+                    TIKTOK_ENABLED, TIKTOK_PER_DAY, chan_file, chan_key)
 
 log = logging.getLogger("main")
 
@@ -147,6 +155,139 @@ def make_part(p: dict) -> Path:
                          "total": p["total"], "issue": p["issue"]})
 
 
+def _park_one(part: dict | None, may_split: bool) -> tuple[bool, int, int]:
+    """Write ONE story and hand its title to the user. (parked, skipped, failed).
+
+    Where the story comes from is unchanged and still in order: the plan file
+    while a plan is running, then the day's hand-picked reserve, then the
+    horror slot, then the pool. What changed is the caller - this used to be
+    inline in main() and ran once a run; top_up() calls it until the day's
+    batch of questions is full.
+    """
+    # A plan is an ORDER, so while one is running it is the only source: the
+    # pool below cannot be consulted even as a fallback, because a story taken
+    # from it publishes ahead of the next planned one and the order is gone.
+    # A run with nothing to do is the cheaper failure - the plan is finite and
+    # the pool is waiting at the end of it.
+    if left := source.plan_left():
+        log.info("plan: %d stories still to publish", left)
+        if part:
+            # Its remaining parts come first by definition, and this run has
+            # already decided not to render one (publish.due() said no). A new
+            # story here would land between two halves of the one on air.
+            log.info("%s is mid-flight - nothing new until its parts are out",
+                     part["post_id"])
+            return False, 0, 0
+        if not (p := source.next_planned()):
+            log.error("plan: %d stories left but none could be read this run",
+                      left)
+            return False, 0, 0
+        n = p["parts"]
+        # multipart_today() is deliberately NOT consulted here. It exists to
+        # stop the pool from splitting story after story; the plan already
+        # spaces its multi-parters one to a day, and re-asking would only
+        # stall the order whenever a run drifts across midnight.
+        if n > 1 and (room := _room()) < n:
+            log.warning("plan: %s is %d parts and only %d send(s) are left "
+                        "today - starting it tomorrow rather than letting "
+                        "it straddle the night", p["id"], n, room)
+            return False, 0, 0
+        log.info("plan: r/%s [%d] %d part(s): %s", p["sub"], p["score"], n,
+                 p["title"][:60])
+        try:
+            write_and_park(p, n)
+            return True, 0, 0
+        except script.Unsuitable as e:
+            # burned, exactly as in the pool below: the plan moves on to the
+            # next story rather than offering this one again for ever
+            source.mark_used(p["id"], p["score"], p["sub"])
+            log.info("skipped: %s", e)
+            return False, 1, 0
+        except Exception:
+            log.exception("failed on %s", p["id"])
+            return False, 0, 1
+
+    # One band, one call. The loud story used to be read first out of a
+    # band of its own, on a slot of one a day; a year of three subs held
+    # twelve posts above that floor, so the slot was promising daily what
+    # the subs produce monthly. Loudness is a term in contested() now, and
+    # the loud story competes for the top of one list like everything else.
+    # The day's reserved slot comes first: one hand-picked story a day (see
+    # config.DAILY_FILE), and when it has had its slot - or the list is spent
+    # - next_daily() returns None and the pool fills this slot as before.
+    # most posts get rejected as unsuitable, so pull a pool rather than one
+    if daily := source.next_daily():
+        log.info("daily reserve: %s", daily["id"])
+        posts = [daily]
+    # ...and after it the horror slot, which is the same bargain again: one
+    # story a day off a pool of its own, and the rest of the day untouched.
+    # Second rather than first because the reserve is hand-picked and finite,
+    # while this one draws from subs that keep producing.
+    elif horror := source.next_horror():
+        log.info("horror slot: r/%s %s", horror["sub"], horror["id"])
+        posts = [horror]
+    else:
+        posts = source.fetch(4)
+    if not posts:
+        log.error("no fresh stories - lower MIN_SCORE or add subreddits")
+        return False, 0, 0
+
+    skipped = failed = 0
+    for p in posts:
+        n = max(1, min(script.part_count(p), _room())) if may_split else 1
+        log.info("r/%s [%d%s] contested %.2f, %d parts: %s", p["sub"],
+                 p["score"], " LOUD" if p["score"] >= LOUD_AT else "",
+                 p.get("rank", 0), n, p["title"][:60])
+        try:
+            write_and_park(p, n)
+            return True, skipped, failed
+        except script.Unsuitable as e:
+            # burn it so the same dud is not reconsidered next run
+            source.mark_used(p["id"], p["score"], p["sub"])
+            log.info("skipped: %s", e)
+            skipped += 1
+        except Exception:
+            # one bad story must not kill the batch; it stays unmarked for a retry
+            log.exception("failed on %s, moving on", p["id"])
+            failed += 1
+    return False, skipped, failed
+
+
+def top_up(part: dict | None, budget: int) -> tuple[int, int, int]:
+    """Fill the day's batch of parked stories. (written, skipped, failed).
+
+    The whole point of the batch: a day's questions arrive together and are
+    answered in one sitting, instead of one landing minutes before each video
+    was due and holding the pipeline until someone replied. Nothing downstream
+    changes - one video a run, the gap between sends intact. REVIEW_BATCH is
+    how many QUESTIONS may be open, never how many videos go out.
+
+    A story turned down deletes its row on the spot, so the slot it held is
+    free here and the replacement is written immediately - by the review
+    workflow within the minute of the `-`, or by the next tick at the latest.
+
+    `budget` caps what ONE run may write, because writing is the slow half. A
+    full batch is four LLM calls and the horror slot alone measured fifteen
+    minutes for two; a run that also rendered a video does not have that left
+    of its hour. So a run that rendered tops up by one and the empty morning
+    fills the batch outright, which converges inside an hour at two ticks.
+    """
+    wrote = skipped = failed = 0
+    while wrote < budget and review.parked() < REVIEW_BATCH:
+        # One split story in flight at a time, and a parked batch counts:
+        # source.multipart_today() reads the `parts` table, which is not
+        # written until the RENDER, so on its own it would let every story in
+        # a morning batch be sized for splitting.
+        may_split = (not part and not source.multipart_today()
+                     and not review.split_parked())
+        ok, s, f = _park_one(part, may_split)
+        skipped, failed = skipped + s, failed + f
+        if not ok:
+            break
+        wrote += 1
+    return wrote, skipped, failed
+
+
 def _room() -> int:
     """TikTok sends still available to this run.
 
@@ -229,11 +370,11 @@ def main(count: int = 1, force: bool = False) -> int:
             source.fail_part(part["post_id"], part["n"])
             failed += 1
 
-    # A story whose title is with the user owns the next slot, on the same
-    # grounds a queued part does: it is written, it is paid for, and it is one
-    # answer away from being a video. Nothing new is written while one waits -
-    # a second unanswered story is a second one nobody asked for, and at two
-    # runs an hour that is how a day's tokens go into a queue of questions.
+    # A story whose title is settled owns the next slot, on the same grounds a
+    # queued part does: it is written, it is paid for, and there is nothing
+    # left to decide about it. Several may be settled at once now - a batch is
+    # answered in one sitting - and ready() hands back the one that has been
+    # waiting longest, which is the order the user was quoted times for.
     if len(done) < count and (r := review.ready()):
         log.info("%s: title settled, rendering", r["post_id"])
         try:
@@ -242,104 +383,20 @@ def main(count: int = 1, force: bool = False) -> int:
             log.exception("failed on %s after its title came back", r["post_id"])
             failed += 1
 
-    if review.waiting():
-        log.info("a title is still with the user - nothing new written this run")
     # Asked BEFORE the LLM call and never after: a story written with no issue
     # to ask on is a story nobody can answer, and the next run would pay for it
     # again. Better to skip the slot than to buy the same script every tick.
-    elif len(done) < count and (why := review.ok()):
+    if why := review.ok():
         log.error("cannot reach GitHub to ask for a title (%s) - writing nothing", why)
-    # A plan is an ORDER, so while one is running it is the only source: the
-    # pool below cannot be consulted even as a fallback, because a story taken
-    # from it publishes ahead of the next planned one and the order is gone.
-    # A run with nothing to do is the cheaper failure - the plan is finite and
-    # the pool is waiting at the end of it.
-    elif len(done) < count and (left := source.plan_left()):
-        log.info("plan: %d stories still to publish", left)
-        if part:
-            # Its remaining parts come first by definition, and this run has
-            # already decided not to render one (publish.due() said no). A new
-            # story here would land between two halves of the one on air.
-            log.info("%s is mid-flight - nothing new until its parts are out",
-                     part["post_id"])
-        elif not (p := source.next_planned()):
-            log.error("plan: %d stories left but none could be read this run",
-                      left)
-        else:
-            n = p["parts"]
-            # multipart_today() is deliberately NOT consulted here. It exists to
-            # stop the pool from splitting story after story; the plan already
-            # spaces its multi-parters one to a day, and re-asking would only
-            # stall the order whenever a run drifts across midnight.
-            if n > 1 and (room := _room()) < n:
-                log.warning("plan: %s is %d parts and only %d send(s) are left "
-                            "today - starting it tomorrow rather than letting "
-                            "it straddle the night", p["id"], n, room)
-            else:
-                log.info("plan: r/%s [%d] %d part(s): %s", p["sub"], p["score"],
-                         n, p["title"][:60])
-                try:
-                    write_and_park(p, n)
-                except script.Unsuitable as e:
-                    # burned, exactly as in the pool below: the plan moves on to
-                    # the next story rather than offering this one again for ever
-                    source.mark_used(p["id"], p["score"], p["sub"])
-                    log.info("skipped: %s", e)
-                    skipped += 1
-                except Exception:
-                    log.exception("failed on %s", p["id"])
-                    failed += 1
-    elif len(done) < count:
-        # One band, one call. The loud story used to be read first out of a
-        # band of its own, on a slot of one a day; a year of three subs held
-        # twelve posts above that floor, so the slot was promising daily what
-        # the subs produce monthly. Loudness is a term in contested() now, and
-        # the loud story competes for the top of one list like everything else.
-        # The day's reserved slot comes first: one hand-picked story a day (see
-        # config.DAILY_FILE), and when it has had its slot - or the list is spent
-        # - next_daily() returns None and the pool fills this slot as before.
-        # most posts get rejected as unsuitable, so pull a pool rather than exactly count
-        if daily := source.next_daily():
-            log.info("daily reserve: %s", daily["id"])
-            posts = [daily]
-        # ...and after it the horror slot, which is the same bargain again: one
-        # story a day off a pool of its own, and the rest of the day untouched.
-        # Second rather than first because the reserve is hand-picked and finite,
-        # while this one draws from subs that keep producing.
-        elif horror := source.next_horror():
-            log.info("horror slot: r/%s %s", horror["sub"], horror["id"])
-            posts = [horror]
-        else:
-            posts = source.fetch(count * 4)
-        if not posts and not done:
-            log.error("no fresh stories - lower MIN_SCORE or add subreddits")
-            return 1
-
-        for p in posts:
-            # One story is written per run, not `count` of them: it is parked
-            # for a title rather than rendered, so nothing here can add to
-            # `done` and the loop would otherwise write the whole pool out to
-            # issues in one go. It only walks on when a story turns out unusable.
-            # Asked fresh each time rather than tracked in a flag: a split that
-            # queues its parts and then dies on the render has still used up the
-            # day's one story, and a SKIP before any of that has not.
-            may_split = not part and not source.multipart_today()
-            n = max(1, min(script.part_count(p), _room())) if may_split else 1
-            log.info("r/%s [%d%s] contested %.2f, %d parts: %s", p["sub"],
-                     p["score"], " LOUD" if p["score"] >= LOUD_AT else "",
-                     p.get("rank", 0), n, p["title"][:60])
-            try:
-                write_and_park(p, n)
-                break
-            except script.Unsuitable as e:
-                # burn it so the same dud is not reconsidered next run
-                source.mark_used(p["id"], p["score"], p["sub"])
-                log.info("skipped: %s", e)
-                skipped += 1
-            except Exception:
-                # one bad story must not kill the batch; it stays unmarked for a retry
-                log.exception("failed on %s, moving on", p["id"])
-                failed += 1
+    else:
+        # Topping up happens whether or not this run rendered, and that is the
+        # change: rendering SPENDS a parked story, so a run that made a video
+        # is exactly the run with a slot to refill.
+        wrote, skipped, more = top_up(part, budget=1 if done else REVIEW_BATCH)
+        failed += more
+        if wrote:
+            log.info("%d new stor%s with the user, %d open in all", wrote,
+                     "y" if wrote == 1 else "ies", review.parked())
 
     for f in done:
         print(f)
@@ -348,7 +405,7 @@ def main(count: int = 1, force: bool = False) -> int:
     # video and must say so with a non-zero exit: the workflow reads that as
     # "nothing to upload" and stops before youtube.py, which is exactly right.
     # It is not the pool running dry, so it does not get that warning.
-    if len(done) < count and not review.waiting():
+    if len(done) < count and not review.parked():
         log.warning("wanted %d, got %d - pool ran out", count, len(done))
     return 0 if done else 1
 
@@ -386,16 +443,17 @@ if __name__ == "__main__":
         # nothing is out for review in any of the part cases below, and asking
         # GitHub about it would put a subprocess and a network call in a test
         # whose whole point is which branch runs
-        review.ready, review.waiting, review.ok = lambda: None, lambda: False, lambda: ""
+        review.ready, review.ok = lambda: None, lambda: ""
+        review.parked, review.split_parked = lambda: 0, lambda: False
         assert main(1) == 1 and not rendered, "a part must wait for TikTok's clock"
         assert main(1, force=True) == 0 and rendered, "--force renders it anyway"
         rendered.clear()
         publish.due = lambda: ""
         assert main(1) == 0 and len(rendered) == 1, "and so does an open gap"
 
-        # A title with the user stops the run from writing a second story: at
-        # two runs an hour that is the difference between one question and a
-        # day's worth of them, all paid for and none of them answered.
+        # A FULL batch stops the run from writing another story. The ceiling
+        # is the point: at two runs an hour without one, a day's tokens go
+        # into a queue of questions nobody has got to yet.
         rendered.clear()
         source.next_part = lambda: None
         written = []
@@ -406,17 +464,35 @@ if __name__ == "__main__":
         source.fetch = lambda *a: [{"id": "y", "sub": "s", "score": 1,
                                     "title": "t", "text": "x" * 500}]
         globals()["write_and_park"] = lambda p, n=1: written.append(p["id"])
-        review.waiting = lambda: True
-        assert main(1) == 1 and not written, "a pending title must block the pool"
-        review.waiting = lambda: False
-        assert main(1) == 1 and written == ["y"], "and let it through once answered"
+        review.parked = lambda: REVIEW_BATCH
+        assert main(1) == 1 and not written, "a full batch must block the pool"
+        # ...and a batch with room fills to REVIEW_BATCH in one run, which is
+        # the whole feature: a day's questions asked together, not one an hour.
+        open_now = [0]
+        review.parked = lambda: open_now[0]
+        globals()["write_and_park"] = lambda p, n=1: (written.append(p["id"]),
+                                                      open_now.__setitem__(0, open_now[0] + 1))
+        assert main(1) == 1 and len(written) == REVIEW_BATCH, written
         # ...and the answer, when it comes, renders without touching the pool
         written.clear()
         review.ready = lambda: {"post_id": "y", "sub": "s", "score": 1,
                                 "gender": "male", "title": "T", "written": [["m", "b"]]}
         globals()["make_reviewed"] = lambda r: rendered.append(r) or Path("stub.mp4")
+        open_now[0], review.parked = REVIEW_BATCH, lambda: open_now[0]
         assert main(1) == 0 and len(rendered) == 1 and not written, (rendered, written)
         print("part gating and title review ok")
+        sys.exit(0)
+
+    # Park stories and render nothing. The review workflow runs this the
+    # moment a `-` arrives, so the replacement story is written within the
+    # minute instead of at the next tick - which is what "the next one comes
+    # straight away" has to mean to be worth anything.
+    if "--park" in sys.argv:
+        if why := review.ok():
+            log.error("cannot reach GitHub to ask for a title (%s)", why)
+            sys.exit(1)
+        wrote, _, _ = top_up(source.next_part(), budget=REVIEW_BATCH)
+        log.info("%d written, %d open with the user", wrote, review.parked())
         sys.exit(0)
 
     args = [a for a in sys.argv[1:] if not a.startswith("-")]

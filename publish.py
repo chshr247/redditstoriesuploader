@@ -35,6 +35,7 @@ else, the text is typed in the app at publish time. So on the api backend
 exists. The tau backend sends the caption with the video and prints nothing,
 because there the print would read as a job still to do.
 """
+import datetime
 import hashlib
 import json
 import logging
@@ -791,6 +792,74 @@ def _since_last_h() -> float:
     return (time.time() - last) / 3600 if last else 999
 
 
+# The cron in publish.yml, in UTC: two ticks an hour through the working part
+# of the day. Nothing publishes between them, so an estimate that ignores the
+# grid promises 02:15 for a video that cannot go out before 08:07.
+_TICKS = [(h, m) for h in range(8, 24) for m in (7, 37)]
+
+
+def _next_tick(t: float) -> float:
+    """The first cron minute at or after `t`."""
+    d = datetime.datetime.fromtimestamp(t, datetime.timezone.utc)
+    for day in (0, 1):
+        for h, m in _TICKS:
+            c = (d.replace(hour=h, minute=m, second=0, microsecond=0)
+                 + datetime.timedelta(days=day))
+            if c.timestamp() >= t:
+                return c.timestamp()
+    raise AssertionError("the grid always comes round")   # pragma: no cover
+
+
+def eta(ahead: int = 0) -> float:
+    """Unix time the (ahead+1)-th video still to go out can be published.
+
+    The EARLIEST possible moment, and said as one: it answers the gap between
+    sends, the daily count, the midnight-UTC reset and the hours the workflow
+    actually runs, and it cannot know that a render will fail or that the story
+    two places ahead of this one is still unwritten.
+
+    TikTok's clock, because on a channel that has it that is the clock the
+    pipeline runs on: a run happens when EITHER platform is due and TikTok is
+    the more permissive of the two. With TikTok off, YouTube's is all there is.
+
+    0 when there is no allowance at all to schedule against - the caller says
+    nothing about time rather than inventing one.
+
+    ponytail: a split story takes two or three of these slots and is counted
+    here as one, so an estimate behind a two-parter runs early by a gap. Read
+    the part count off the review row if that starts to mislead.
+    """
+    now = time.time()
+    if TIKTOK_ENABLED:
+        gap, per_day, used = TIKTOK_MIN_GAP_HOURS, TIKTOK_PER_DAY, sent_today()
+        last = now - _since_last_h() * 3600
+    else:
+        import youtube
+        st = youtube.status()
+        gap, per_day, used = youtube.YT_MIN_GAP_HOURS, st["allowed"], st["today"]
+        last = now - st["since_last_h"] * 3600
+    if per_day <= 0:
+        return 0.0
+
+    from youtube import _utc_date
+
+    t, day = max(now, last + gap * 3600), _utc_date(now)
+    while True:
+        if _utc_date(t) != day:                  # midnight UTC resets the count
+            day, used = _utc_date(t), 0
+        if used >= per_day:                      # nothing more goes out today
+            t = (datetime.datetime.fromtimestamp(t, datetime.timezone.utc)
+                 .replace(hour=0, minute=0, second=0, microsecond=0)
+                 + datetime.timedelta(days=1)).timestamp()
+            continue
+        t = _next_tick(t)
+        if _utc_date(t) != day:                  # the tick fell into tomorrow
+            continue
+        if not ahead:
+            return t
+        ahead, used, t = ahead - 1, used + 1, t + gap * 3600
+
+
 def _warn_cap() -> None:
     """Say so when the rolling window is full, and send anyway.
 
@@ -1169,6 +1238,47 @@ if __name__ == "__main__":
         PART_GAP_HOURS = _real_part_gap
         TIKTOK_ENABLED = _real_enabled
         INBOX_CAP = _real_cap
+    # eta(): what the user is told on the issue when a title is accepted. All
+    # of it is clock arithmetic, so it is stubbed down to the clock - the real
+    # counts would make the answer depend on what this channel published today.
+    from youtube import _utc_date
+
+    _real_sent, _real_since = sent_today, _since_last_h
+    _real_per_day, _real_gap = TIKTOK_PER_DAY, TIKTOK_MIN_GAP_HOURS
+    _real_enabled = TIKTOK_ENABLED
+    try:
+        TIKTOK_ENABLED = True
+        TIKTOK_PER_DAY, TIKTOK_MIN_GAP_HOURS = 4, 3
+        sent_today = lambda: 0                              # noqa: E731
+        _since_last_h = lambda: 999                         # noqa: E731
+
+        def _at(t):
+            d = datetime.datetime.fromtimestamp(t, datetime.timezone.utc)
+            return (d.hour, d.minute)
+
+        # Nothing sent and the gap long expired: the next video goes out at the
+        # next cron minute, never "now" - nothing publishes between the ticks.
+        assert _at(eta()) in [(h, m) for h in range(8, 24) for m in (7, 37)], \
+            _at(eta())
+        # ...and each one after it is a gap further on, which is the whole
+        # reason the queue position is quoted with the time.
+        assert eta(1) - eta(0) >= TIKTOK_MIN_GAP_HOURS * 3600
+        assert eta(2) > eta(1) > eta(0) >= time.time()
+        # The day's allowance is a wall, not a slowdown: the fifth video of a
+        # four-a-day channel is tomorrow's, whatever the gap says.
+        assert _utc_date(eta(4)) > _utc_date(eta(3)), "the count must roll the day"
+        # And a day already spent moves even the first one to tomorrow.
+        sent_today = lambda: 4                              # noqa: E731
+        assert _utc_date(eta()) > _utc_date(time.time()), "a spent day is spent"
+        # Nothing to schedule against - the caller says nothing rather than
+        # inventing a time.
+        sent_today, TIKTOK_PER_DAY = (lambda: 0), 0
+        assert eta() == 0.0
+    finally:
+        sent_today, _since_last_h = _real_sent, _real_since
+        TIKTOK_PER_DAY, TIKTOK_MIN_GAP_HOURS = _real_per_day, _real_gap
+        TIKTOK_ENABLED = _real_enabled
+
     # What await_send() does with each kind of answer, faked out - these run
     # before every CLI command and must not touch the network.
     _real_status, _real_poll = status, SEND_POLL_S

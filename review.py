@@ -2,8 +2,18 @@
 
 script.py writes the story AND the title in one call, and everything below -
 the voice, the card, the split, the caption - reads that one string. This parks
-the written story on a GitHub issue and stops the run. A later run reads the
-answer off the issue and carries on from exactly where make_video() used to.
+the written story on a GitHub issue. A later run reads the answer off the issue
+and carries on from exactly where make_video() used to.
+
+A DAY'S stories are parked at once, config.REVIEW_BATCH of them, and that is
+the whole shape of this file. One at a time meant a question every three hours,
+each arriving minutes before its own video was due, and an unanswered one held
+the pipeline: nothing else could be written until it was answered. A batch is
+read in one sitting instead. A story turned down frees its slot on the spot and
+the replacement is written within the minute (review.yml), and a story accepted
+is answered with the time it actually publishes - which is a real answer only
+because the queue position is in it, three of four accepted together being
+hours apart. See main.top_up() for the writing half.
 
 Why an issue rather than a file or a chat bot. The workflow already holds a
 token that can open one, so there is no second secret. An issue comment stays
@@ -18,6 +28,7 @@ it owns the repo: anyone can comment, and an accepted comment is narrated and
 published under this channel's name. _choose() checks the login and trusts
 nothing else about the text beyond what _title_fault() already checks.
 """
+import datetime
 import json
 import logging
 import re
@@ -26,7 +37,7 @@ import time
 
 import script
 import source
-from config import OUTPUT_LANG
+from config import OUTPUT_LANG, REVIEW_BATCH, REVIEW_TZ_H
 
 log = logging.getLogger(__name__)
 
@@ -113,7 +124,8 @@ def _body(post: dict, written: list) -> str:
         f"{parts}\n\n---\n"
         f"**Первая строка комментария:**\n"
         f"`+` — пойдёт название модели.\n"
-        f"`-` — история снимается совсем, рендера не будет.\n"
+        f"`-` — история снимается совсем, рендера не будет — "
+        f"вместо неё сразу придёт следующая.\n"
         f"Что угодно ещё — станет названием. Поставь `[emphasis]` перед словом, "
         f"на котором строка поворачивает: не первое и не последнее, "
         f"до {script.MAX_TITLE_WORDS} слов, одно предложение.\n\n"
@@ -280,15 +292,68 @@ def _comments(issue: int) -> list[dict]:
                           "--jq", "[.[]|{id,body,user:{login:.user.login}}]") or "[]")
 
 
-def waiting() -> bool:
-    """True while a story of this channel is out for a title."""
+def parked() -> int:
+    """How many of this channel's stories are sitting on issues right now.
+
+    What decides whether another story is written: main.py tops this up to
+    config.REVIEW_BATCH so the day's questions arrive together and are answered
+    in one sitting, instead of one landing minutes before each video was due.
+    """
     with _db() as db:
-        return bool(db.execute("SELECT 1 FROM review WHERE lang=?",
-                               (OUTPUT_LANG,)).fetchone())
+        (n,) = db.execute("SELECT COUNT(*) FROM review WHERE lang=?",
+                          (OUTPUT_LANG,)).fetchone()
+    return n
+
+
+def split_parked() -> bool:
+    """True when one of the parked stories is already a multi-parter.
+
+    source.multipart_today() cannot answer this: it reads the `parts` table,
+    which is written at the RENDER, and a batch is parked hours before any of
+    it renders. Without this the whole batch would be sized for splitting on
+    the same day and the one-split-a-day rule would mean nothing.
+    """
+    with _db() as db:
+        rows = db.execute("SELECT written FROM review WHERE lang=?",
+                          (OUTPUT_LANG,)).fetchall()
+    return any(len(json.loads(w)) > 1 for (w,) in rows)
+
+
+def _rows() -> list[dict]:
+    """Every story of this channel out for a title, oldest first."""
+    out = []
+    with _db() as db:
+        rows = db.execute(f"SELECT {','.join(_COLS)} FROM review WHERE lang=? "
+                          "ORDER BY ts", (OUTPUT_LANG,)).fetchall()
+    for row in rows:
+        r = dict(zip(_COLS, row))
+        r["written"] = json.loads(r["written"])
+        out.append(r)
+    return out
 
 
 def _poll(timeout: bool) -> dict | None:
-    """Read the issue and act on it. Returns the story when it is ready to go.
+    """Judge every parked issue, return the first story ready to be rendered.
+
+    Every row on every tick, not just the oldest: the day's stories are parked
+    together and read in whatever order the user opens them, so an answer on
+    the fourth issue has to be picked up while the first is still untouched.
+    One gh call per parked story - four on a full batch, twice an hour.
+
+    Rows come oldest-first, so the story handed back is the one that has waited
+    longest among those actually settled. That is the order main.py renders in
+    and the order publish.eta() counts, which is what makes the time quoted
+    back to the user the time it really goes out.
+    """
+    first = None
+    for r in _rows():
+        if (got := _judge(r, timeout)) and first is None:
+            first = got
+    return first
+
+
+def _judge(r: dict, timeout: bool) -> dict | None:
+    """One parked story: read its issue, act on the answer, hand it back if ready.
 
     `timeout` is the only difference between the two callers. check() runs on
     every tick, ahead of the gate, and answers the user: it accepts a title, it
@@ -297,13 +362,6 @@ def _poll(timeout: bool) -> dict | None:
     passed with no answer - a fallback that fires hours before anything could
     render on it would start the clock in the wrong place.
     """
-    with _db() as db:
-        row = db.execute(f"SELECT {','.join(_COLS)} FROM review WHERE lang=? "
-                         "ORDER BY ts LIMIT 1", (OUTPUT_LANG,)).fetchone()
-    if not row:
-        return None
-    r = dict(zip(_COLS, row))
-    r["written"] = json.loads(r["written"])
     model_title = r["written"][0][0]
     if r["title"]:
         # Chosen already; a previous run just failed to render it.
@@ -317,6 +375,7 @@ def _poll(timeout: bool) -> dict | None:
         log.info("%s: dropped by the user, not rendering", r["post_id"])
         close(r["post_id"], "Снято, рендера не будет.")
         return None
+    settled = bool(cid and title)
     if cid:
         r["title"] = title
         with _db() as db:
@@ -341,9 +400,55 @@ def _poll(timeout: bool) -> dict | None:
         with _db() as db:
             db.execute("UPDATE review SET title=? WHERE post_id=? AND lang=?",
                        (title, r["post_id"], OUTPUT_LANG))
+        settled = True
 
     r["title"] = title
+    # Said once, in the run that settled it. "Accepted" on its own reads as
+    # "published", and with a day's stories accepted in one sitting three of
+    # them are hours away - so the answer to `+` is a time, not an
+    # acknowledgement.
+    if settled:
+        _say_when(r["issue"], r["ts"])
     return _final(r, bodies)
+
+
+def _local(ts: float) -> str:
+    """A unix time in the clock the answer is read on, which is a phone."""
+    tz = datetime.timezone(datetime.timedelta(hours=REVIEW_TZ_H))
+    d = datetime.datetime.fromtimestamp(ts, tz)
+    days = (d.date() - datetime.datetime.now(tz).date()).days
+    day = {0: "сегодня", 1: "завтра"}.get(days, f"{d:%d.%m}")
+    return f"{day} в {d:%H:%M}"
+
+
+def _say_when(issue: int, ts: float) -> None:
+    """Comment the time this story actually publishes, queue position included.
+
+    The position is the point. Four stories accepted in one sitting go out over
+    the whole day, spaced by the gap between sends, and the only thing that
+    tells them apart is how many settled stories were parked BEFORE this one -
+    which is exactly the order _poll() hands them to main.py in. Anything
+    already rendered and sitting in out/ counts too; on CI that is nothing,
+    because the runner takes out/ with it.
+
+    Never fatal, and never retried: the video goes out whether or not GitHub
+    took the comment, and a second attempt next tick would post it twice.
+    """
+    try:
+        import publish
+
+        with _db() as db:
+            (ahead,) = db.execute(
+                "SELECT COUNT(*) FROM review WHERE lang=? AND title!='' AND ts<?",
+                (OUTPUT_LANG, ts)).fetchone()
+        ahead += len(publish.pending())
+        when = publish.eta(ahead)
+        note = ("Принято." if not when else
+                f"Принято, публикация {_local(when)}"
+                + (f" — в очереди впереди ещё {ahead}." if ahead else "."))
+        _gh("issue", "comment", str(issue), "--body", note)
+    except Exception:
+        log.exception("could not say when #%d publishes", issue)
 
 
 def _final(r: dict, bodies: list[str]) -> dict:
@@ -365,7 +470,7 @@ def ready() -> dict | None:
     return _poll(timeout=True)
 
 
-def check() -> str:
+def check() -> list[str]:
     """Answer the user without rendering anything. Safe outside the gate.
 
     The render has to happen in a run that can publish - out/ dies with the
@@ -373,9 +478,12 @@ def check() -> str:
     title does not: this runs on every tick, so a misplaced [emphasis] comes
     back in half an hour instead of three, and by the time a slot opens the
     answer is already on the row.
+
+    Returns every settled title, not the next one: a batch is answered in one
+    sitting, and the caller's line about what happened should say so.
     """
-    r = _poll(timeout=False)
-    return r["title"] if r else ""
+    _poll(timeout=False)
+    return [r["title"] for r in _rows() if r["title"]]
 
 
 def rendered(post_id: str) -> None:
@@ -418,22 +526,31 @@ if __name__ == "__main__":
         print(row[0] if row else "")
         sys.exit(0)
 
+    # Is there room in the batch for another story? Exit code only, and read by
+    # review.yml before it installs anything: writing a replacement needs the
+    # dependencies and the private prompt set, and a comment that was a title
+    # rather than a `-` should not pay for either.
+    if "--room" in sys.argv:
+        n = parked()
+        print(f"{n}/{REVIEW_BATCH} open")
+        sys.exit(0 if n < REVIEW_BATCH else 1)
+
     # The gate does not guard this and must not: it decides whether a video can
     # be made, and reading a comment is not making one.
     if "--check" in sys.argv:
-        if not waiting():
+        if not parked():
             print("nothing is out for review")
-        elif t := check():
-            print(f"title settled: {t}")
+        elif titles := check():
+            print(f"{len(titles)} of {parked()} settled: " + " | ".join(titles))
         else:
-            print("still waiting on a title")
+            print(f"still waiting on {parked()} title(s)")
         sys.exit(0)
 
     OWNER = "chshr247"
     MODEL = "Я [emphasis] закрыла камеру сестре мужа ладонью, хотя она обещала"
-    MODEL_CTA = "[curious] А вы бы [emphasis] поверили ей на слово?"
-    ONE = [[MODEL, "Модель написала историю. " * 60 + MODEL_CTA]]
-    FILLER = "Модель написала эту часть сама. " * 37
+    MODEL_CTA = "[curious] А вы бы [emphasis] открыли эту коробку?"
+    ONE = [[MODEL, "Модель нашла коробку. " * 60 + MODEL_CTA]]
+    FILLER = "Модель нашла эту коробку сама. " * 37
     THREE = [[MODEL, FILLER + "И тут всё оборвалось."],
              [MODEL, FILLER + "И тут оборвалось снова."],
              [MODEL, FILLER + MODEL_CTA]]
@@ -474,12 +591,12 @@ if __name__ == "__main__":
     # A narration of one's own, under the blank line. Long enough to pass the
     # budget and closed with a question, which is what the format is built on.
     story = ("Я работал в ночную смену и однажды нашёл в подсобке коробку. " * 16
-             + "[doubtful] А вы бы [emphasis] открыли её на моём месте?")
+             + "[doubtful] А вы бы [emphasis] открыли эту коробку?")
     got, bodies, fault, cid = _choose([c(8, OWNER, f"{mine}\n\n{story}")],
                                       OWNER, ONE, 0)
     assert (got, fault) == (mine, ""), (got, fault)
     assert len(bodies) == 1, bodies
-    assert bodies[0].startswith("Я работал") and bodies[0].endswith("месте?")
+    assert bodies[0].startswith("Я работал") and bodies[0].endswith("коробку?")
     # ...and it works under a bare `+` too: the model's title, my text
     got, bodies, fault, _ = _choose([c(9, OWNER, f"+\n\n{story}")], OWNER, ONE, 0)
     assert (got, fault) == (MODEL, "") and bodies, (got, fault, bodies)
@@ -494,7 +611,7 @@ if __name__ == "__main__":
     assert bodies[0].endswith(MODEL_CTA), bodies[0][-80:]
     # ...but a question that IS there and is marked up wrong stays the author's
     # to fix. Silently replacing it would throw away what they meant to ask.
-    _, _, fault, _ = _choose([c(12, OWNER, f"{mine}\n\n{plain_story}Ну как вам?")],
+    _, _, fault, _ = _choose([c(12, OWNER, f"{mine}\n\n{plain_story}Ну а вы бы вернули эту коробку?")],
                              OWNER, ONE, 0)
     assert "mood cue" in fault, fault
     # on a split it is the LAST part that borrows it, and only that one
@@ -503,25 +620,25 @@ if __name__ == "__main__":
     assert fault == "" and len(bodies) == 2, (fault, len(bodies))
     assert bodies[1].endswith(MODEL_CTA) and not bodies[0].endswith(MODEL_CTA)
     # ...nor is one that would make a video of the wrong length
-    short = "Коротко и всё. [doubtful] А вы бы [emphasis] сделали так же?"
+    short = "Коротко про коробку. [doubtful] А вы бы [emphasis] вернули эту коробку?"
     _, _, fault, _ = _choose([c(12, OWNER, f"{mine}\n\n{short}")], OWNER, ONE, 0)
     assert "слов" in fault, fault
     # One question and nothing else swaps only the closing question: the model's
     # narration survives, with its old question cut off the end of the last part.
-    NEWQ = "[curious] А вы бы [emphasis] пошли к директору из-за оценки?"
+    NEWQ = "[curious] А вы бы [emphasis] вернули эту коробку?"
     got, bodies, fault, _ = _choose([c(19, OWNER, f"{mine}\n\n{NEWQ}")],
                                     OWNER, ONE, 0)
     assert (got, fault) == (mine, ""), (got, fault)
     assert len(bodies) == 1 and bodies[0].endswith(NEWQ), bodies[0][-90:]
     assert MODEL_CTA not in bodies[0], "the old question was left in place"
-    assert bodies[0].startswith("Модель написала историю."), bodies[0][:40]
+    assert bodies[0].startswith("Модель нашла коробку."), bodies[0][:40]
     # ...and on a split it lands at the end of the LAST part and nowhere else
     got, bodies, fault, _ = _choose([c(20, OWNER, f"+\n\n{NEWQ}")], OWNER, THREE, 0)
     assert fault == "" and len(bodies) == 3, (fault, len(bodies))
     assert bodies[-1].endswith(NEWQ) and not bodies[0].endswith(NEWQ), bodies
     assert bodies[0] == THREE[0][1], bodies[0][:50]
     # a question with no mood cue is refused like any other
-    _, _, fault, _ = _choose([c(21, OWNER, f"{mine}\n\nА вы бы пошли к директору?")],
+    _, _, fault, _ = _choose([c(21, OWNER, f"{mine}\n\nА вы бы вернули эту коробку?")],
                              OWNER, ONE, 0)
     assert "mood cue" in fault, fault
 
@@ -532,7 +649,7 @@ if __name__ == "__main__":
     got, bodies, fault, _ = _choose([c(13, OWNER, f"{mine}\n\n{three}")],
                                     OWNER, THREE, 0)
     assert (got, fault) == (mine, ""), (got, fault)
-    assert len(bodies) == 3 and bodies[-1].endswith("месте?"), len(bodies)
+    assert len(bodies) == 3 and bodies[-1].endswith("коробку?"), len(bodies)
     assert "---" not in bodies[0] and bodies[0].startswith("Я работал")
     # merging three into two is allowed - the same band the model may answer in
     assert _choose([c(14, OWNER, f"+\n\n{mid}\n---\n{story}")],
@@ -551,5 +668,44 @@ if __name__ == "__main__":
     assert "одно видео" in fault, fault
     # the title alone still works on a split, as it always did
     assert _choose([c(18, OWNER, mine)], OWNER, THREE, 0)[:2] == (mine, [])
+
+    # The batch bookkeeping, on a scratch table rather than this channel's rows.
+    # split_parked() is the one with teeth: source.multipart_today() reads the
+    # `parts` table, which is empty until a render, so without this every story
+    # in a morning batch would be sized for splitting on the same day.
+    _real_db, _rows_of = _db, [
+        ("a", 1, 100.0, "", json.dumps(ONE)),          # unanswered, one part
+        ("b", 2, 200.0, "T", json.dumps(ONE)),         # settled, publishes first
+        ("c", 3, 300.0, "", json.dumps(THREE)),        # unanswered, a split
+    ]
+    import sqlite3
+
+    _mem = sqlite3.connect(":memory:")
+    _mem.execute("CREATE TABLE review(post_id TEXT, lang TEXT, issue INT, "
+                 "ts REAL, gender TEXT, sub TEXT, score INT, written TEXT, "
+                 "answered INT DEFAULT 0, title TEXT DEFAULT '', "
+                 "body TEXT DEFAULT '')")
+    _mem.executemany("INSERT INTO review(post_id, lang, issue, ts, gender, sub, "
+                     "score, written, title) VALUES (?,?,?,?,'m','s',1,?,?)",
+                     [(pid, OUTPUT_LANG, iss, ts, w, t)
+                      for pid, iss, ts, t, w in _rows_of])
+    _db = lambda: _mem                                  # noqa: E731
+    try:
+        assert parked() == 3, parked()
+        assert split_parked(), "a parked three-parter is a split in flight"
+        # oldest first, because that is the order they render and the order the
+        # times quoted on the issues were counted in
+        assert [r["post_id"] for r in _rows()] == ["a", "b", "c"]
+        assert _rows()[2]["written"] == THREE, "written comes back parsed"
+        _mem.execute("DELETE FROM review WHERE post_id='c'")
+        assert not split_parked() and parked() == 2
+    finally:
+        _db = _real_db
+
+    # The time quoted back on the issue, in the reader's own clock.
+    _now = time.time()
+    assert _local(_now).startswith("сегодня в ")
+    assert _local(_now + 86400).startswith("завтра в ")
+    assert _local(_now + 5 * 86400)[:2].isdigit(), _local(_now + 5 * 86400)
 
     print("review ok")

@@ -5,6 +5,11 @@ name: review
 # publish.yml already judges titles on every tick, twice an hour, and that
 # stays - it is what catches an answer written while nothing was running. This
 # is the fast path: comment, and the verdict comes back in under a minute.
+#
+# It also refills the batch. A `-` deletes the story's row on the spot, and the
+# freed slot is what the next question goes into - so a rejection answered here
+# is a replacement story on a new issue within the minute, which is the whole
+# point of turning one down rather than editing it.
 on:
   issue_comment:
     types: [created]
@@ -27,7 +32,7 @@ jobs:
       github.event.comment.user.login == github.repository_owner &&
       !github.event.issue.pull_request
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     permissions:
       contents: write        # the verdict is written into seen.db and pushed
       issues: write          # ...and said out loud on the issue
@@ -64,8 +69,61 @@ jobs:
           OUTPUT_LANG: ${{ steps.who.outputs.lang }}
         run: python review.py --check
 
+      # Only when the answer actually freed a slot. A `+` or a rewritten title
+      # leaves the batch full, and everything below - the dependencies, the
+      # private prompt set, an LLM call - would be paid for to write nothing.
+      # Exit code, not output: there is one bit to carry.
+      - name: Is there room for another story?
+        id: room
+        if: steps.who.outputs.lang != ''
+        env:
+          OUTPUT_LANG: ${{ steps.who.outputs.lang }}
+        run: |
+          if python review.py --room; then
+            echo "room=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "room=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies
+        if: steps.room.outputs.room == 'true'
+        run: pip install -q -r requirements.txt
+
+      # Same private repo and same read-only deploy key as publish.yml, and
+      # behind the same kind of gate: a comment that freed no slot pays for no
+      # clone. See the long note on that step for why the prompts live there.
+      - name: Fetch the prompt set
+        if: steps.room.outputs.room == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: chshr247/reddit-prompts
+          ssh-key: ${{ secrets.PROMPTS_DEPLOY_KEY }}
+          path: .private
+
+      # Writes stories and parks them on issues. Renders nothing and publishes
+      # nothing - --park is exactly the half of main.py that does not need a
+      # slot, so this cannot spend the day's allowance or touch the gap.
+      - name: Write the replacement
+        if: steps.room.outputs.room == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUTPUT_LANG: ${{ steps.who.outputs.lang }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          REDDITAPIS_KEY: ${{ secrets.REDDITAPIS_KEY }}
+          SUBREDDITS: ${{ vars.SUBREDDITS }}
+          SUBREDDITS_EN: ${{ vars.SUBREDDITS_EN }}
+          SUBREDDITS_HORROR: ${{ vars.SUBREDDITS_HORROR }}
+          LOUD_AT: ${{ vars.LOUD_AT || '25000' }}
+          TIKTOK_PER_DAY: ${{ vars.TIKTOK_PER_DAY || '4' }}
+          TIKTOK_MIN_GAP_HOURS: ${{ vars.TIKTOK_MIN_GAP_HOURS || '3' }}
+          REVIEW_BATCH: ${{ vars.REVIEW_BATCH }}
+        run: python main.py --park
+
       # The same reason publish.yml keeps it: the run records which comment it
-      # has already judged. Thrown away with the runner, the next run judges it
+      # has already judged, and which story it has just written down. Thrown away with the runner, the next run judges it
       # again and repeats the same complaint. Rebase and retry rather than merge
       # - seen.db is binary and a conflict here is a state file to reconcile by
       # hand, never something to resolve automatically.
