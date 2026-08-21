@@ -1192,8 +1192,12 @@ if __name__ == "__main__":
     # target holds is let through, a story that ran out of material is not.
     assert OVER > TOLERANCE, "only the ceiling was meant to move"
     assert _fits(round(tw * (1 + TOLERANCE)) + 1, tw), "the old ceiling is inside"
-    assert _fits(round(tw * (1 + OVER)), tw), "and the new one is the ceiling"
-    assert not _fits(round(tw * (1 + OVER)) + 2, tw), "but it is still a ceiling"
+    # floor, not round: the ceiling is tw * (1 + OVER) exactly, and rounding
+    # a .5 upwards lands one word PAST it - which is a self-test that fails
+    # for some targets and not others rather than a budget that is wrong.
+    ceiling = int(tw * (1 + OVER))
+    assert _fits(ceiling, tw), "and the new one is the ceiling"
+    assert not _fits(ceiling + 2, tw), "but it is still a ceiling"
     assert not _fits(round(tw * (1 - TOLERANCE)) - 2, tw), "the floor did not move"
     assert tw > round(TARGET_SEC / 60 * _heard_wpm()), "the CTA needs its own words"
     # The budget is a duration in disguise, so it has to be counted at the rate
