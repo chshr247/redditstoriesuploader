@@ -825,9 +825,14 @@ def eta(ahead: int = 0) -> float:
     0 when there is no allowance at all to schedule against - the caller says
     nothing about time rather than inventing one.
 
-    ponytail: a split story takes two or three of these slots and is counted
-    here as one, so an estimate behind a two-parter runs early by a gap. Read
-    the part count off the review row if that starts to mislead.
+    `ahead` is a count of VIDEOS, so callers behind a split story pass its part
+    count and not one.
+
+    ponytail: those parts are then spaced at the ordinary gap, where the real
+    thing spaces them at PART_GAP_HOURS and lets them past the daily count -
+    so an estimate standing behind a split story runs LATE, by up to two gaps.
+    Late is the safe direction for a promise. Take a list of part counts here
+    instead of an int if a batch with a three-parter in it starts misleading.
     """
     now = time.time()
     if TIKTOK_ENABLED:
