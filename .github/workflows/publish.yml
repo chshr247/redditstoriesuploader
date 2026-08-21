@@ -62,7 +62,15 @@ jobs:
   publish:
     name: publish (${{ matrix.channel }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Raised from 30 for the horror slot. A 75-second video is a couple of
+    # minutes of work; a five-minute one is four times the tokens, four times the
+    # speech to synthesize, four times the audio for whisper to time and four
+    # times the frames to encode on a two-core runner. Measured locally on the
+    # LLM half alone: 15 minutes for the two calls. Blowing the ceiling is not a
+    # lost run, it is a lost STORY - the render is retried by every later run and
+    # killed by every one of them. Minutes are free on a public repo, so the
+    # ceiling costs nothing until something actually hangs.
+    timeout-minutes: 60
     permissions:
       contents: write        # needed to push seen.db back
       issues: write          # the TikTok draft reminder, see the last step

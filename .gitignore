@@ -28,3 +28,6 @@ seen_local_*.db
 # beside it. It is somebody else's repo with its own git, and the cookie jar
 # under it is a live session - neither belongs in a public repository.
 tau/
+# Claude Code's scratch worktrees - a git repo inside this one, which
+# `git add -A` picks up as a gitlink.
+.claude/
