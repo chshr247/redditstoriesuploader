@@ -104,6 +104,8 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
       LLM_MODEL: ${{ vars.LLM_MODEL }}
+      LLM_REASONING: ${{ vars.LLM_REASONING }}
+      LLM_MAX_TOKENS: ${{ vars.LLM_MAX_TOKENS }}
       FISH_API_KEY: ${{ secrets.FISH_API_KEY }}
       FISH_MODEL: ${{ vars.FISH_MODEL }}
       FISH_VOICES_MALE: ${{ vars.FISH_VOICES_MALE }}

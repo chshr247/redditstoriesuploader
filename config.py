@@ -91,6 +91,19 @@ LLM_MODEL = os.getenv("LLM_MODEL", "gpt-5-mini")
 # DeepSeek and friends speak the OpenAI protocol; empty means api.openai.com
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
 
+# Thinking is ON by default on deepseek-v4 and is billed as output. Measured in
+# publish run 32461703786: 24 calls, ~500k completion tokens, two of them at the
+# model's own 65535 ceiling - under narrations of about 500 tokens each. That is
+# ~95% of what a story costs, spent on reasoning nobody reads. "none" turns it
+# off; "low"/"medium" buy it back if the rewrite rate in the logs climbs.
+# `or` and not a getenv default: an unset repo variable reaches the workflow
+# env as an empty string, not as an absent one.
+LLM_REASONING = os.getenv("LLM_REASONING") or "none"
+# And a ceiling of our own, so a runaway costs a failed story instead of a
+# quarter of a day's budget. The longest thing asked for is a HORROR_SEC
+# narration, about 2k tokens; polish re-emits it once more with markup.
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS") or 4000)
+
 TTS_BACKEND = os.getenv("TTS_BACKEND", "fish")     # fish | edge
 TTS_VOICE = os.getenv("TTS_VOICE", "en-US-BrianMultilingualNeural")   # edge only
 

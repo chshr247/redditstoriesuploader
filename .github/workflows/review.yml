@@ -112,6 +112,8 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
+          LLM_REASONING: ${{ vars.LLM_REASONING }}
+          LLM_MAX_TOKENS: ${{ vars.LLM_MAX_TOKENS }}
           REDDITAPIS_KEY: ${{ secrets.REDDITAPIS_KEY }}
           SUBREDDITS: ${{ vars.SUBREDDITS }}
           SUBREDDITS_EN: ${{ vars.SUBREDDITS_EN }}

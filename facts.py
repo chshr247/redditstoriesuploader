@@ -25,7 +25,8 @@ import time
 import urllib.request
 
 import safety
-from config import (DB_PATH, LLM_BASE_URL, LLM_MODEL, OPENAI_API_KEY,
+from config import (DB_PATH, LLM_BASE_URL, LLM_MAX_TOKENS, LLM_MODEL,
+                    LLM_REASONING, OPENAI_API_KEY,
                     OUTPUT_LANG)
 
 # In order, and the order is a preference, not a rotation: the first one is
@@ -237,7 +238,9 @@ def _translate(texts: list[str], lang: str) -> list[str]:
     from openai import OpenAI      # only the translating channel pays the import
 
     client = OpenAI(api_key=OPENAI_API_KEY, base_url=LLM_BASE_URL or None)
-    resp = client.chat.completions.create(model=LLM_MODEL, messages=[
+    resp = client.chat.completions.create(
+        model=LLM_MODEL, max_tokens=LLM_MAX_TOKENS,
+        reasoning_effort=LLM_REASONING, messages=[
         {"role": "system", "content": SYSTEM[lang]},
         {"role": "user", "content":
             "\n".join(f"{i}. {t}" for i, t in enumerate(texts, 1))}])

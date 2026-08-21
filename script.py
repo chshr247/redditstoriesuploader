@@ -49,7 +49,8 @@ def _prompts():
     return prompts.WRITE, prompts.POLISH, prompts.MULTI, prompts.GENRE
 
 import safety
-from config import (LLM_BASE_URL, LLM_MODEL, OPENAI_API_KEY, OUTPUT_LANG,
+from config import (LLM_BASE_URL, LLM_MAX_TOKENS, LLM_MODEL, LLM_REASONING,
+                    OPENAI_API_KEY, OUTPUT_LANG,
                     HORROR_SEC, SUBREDDITS_HORROR, TARGET_SEC, VOICE_SPEEDUP)
 
 
@@ -980,13 +981,19 @@ def _ask(client, system: str, user: str, check, keep: str,
             {"role": "user", "content": user}]
     result, faults = None, []
     for attempt in range(2):
-        resp = client.chat.completions.create(model=LLM_MODEL, messages=msgs)
+        resp = client.chat.completions.create(
+            model=LLM_MODEL, messages=msgs, max_tokens=LLM_MAX_TOKENS,
+            reasoning_effort=LLM_REASONING)
         # DeepSeek caches the constant prefix automatically - the system prompt
         # stays first so it hits every call. These counters are how you confirm
         # it, and after the split there are two prefixes to watch instead of one.
         u = resp.usage
-        log.info("tokens: %d in (%d cached), %d out", u.prompt_tokens,
-                 getattr(u, "prompt_cache_hit_tokens", 0), u.completion_tokens)
+        # `out` is the whole bill, and thinking is counted in it - print the two
+        # apart so a reasoning setting that is quietly back on is visible here.
+        d = getattr(u, "completion_tokens_details", None)
+        log.info("tokens: %d in (%d cached), %d out (%d thinking)",
+                 u.prompt_tokens, getattr(u, "prompt_cache_hit_tokens", 0),
+                 u.completion_tokens, getattr(d, "reasoning_tokens", 0) or 0)
 
         raw = resp.choices[0].message.content
         if skippable and (m := re.match(r"\s*SKIP:\s*(.*)", raw)):
