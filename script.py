@@ -871,8 +871,8 @@ def _chunks(raw: str, parts: int) -> tuple[list[str], list[str]]:
 STRAY_TITLE = re.compile(r"\s*(?:NARRATOR:[^\n]*\n\s*)?TITLE:[^\n]*")
 
 
-def _parse_write(raw: str, post: dict, parts: int,
-                 target: int) -> tuple[tuple[str, list[str]], list[str]]:
+def _parse_write(raw: str, post: dict, parts: int, target: int,
+                 lang: str = "") -> tuple[tuple[str, list[str]], list[str]]:
     """((gender, [body, ...]), complaints) for stage one's plain narration.
 
     Everything checked here is a property of the WORDS: the length, the ending,
@@ -908,8 +908,9 @@ def _parse_write(raw: str, post: dict, parts: int,
                           "bracket in it is added by the pass after this one")
 
         faults += [label + f for f in
-                   (_kin_fault(body),
-                    _ending_fault(body, final=i == len(chunks), markup=False))
+                   (_kin_fault(body, lang),
+                    _ending_fault(body, final=i == len(chunks), markup=False,
+                                  lang=lang))
                    if f]
         n = _words(body)
         if not _fits(n + TITLE_WORDS, target):
@@ -921,8 +922,8 @@ def _parse_write(raw: str, post: dict, parts: int,
     return (gender or guess_gender(post), out), faults
 
 
-def _parse_polish(raw: str, written: list[str], parts: int,
-                  post: dict) -> tuple[tuple[str, list[str]], list[str]]:
+def _parse_polish(raw: str, written: list[str], parts: int, post: dict,
+                  lang: str = "") -> tuple[tuple[str, list[str]], list[str]]:
     """((title, [tagged, ...]), complaints) for stage two's marked-up answer.
 
     A split story has ONE title, written once at the top, and every part is
@@ -956,7 +957,7 @@ def _parse_polish(raw: str, written: list[str], parts: int,
         if i <= len(written):
             faults += [label + f for f in [_drift_fault(body, written[i - 1])] if f]
         faults += [label + f for f in
-                   (_ending_fault(body, final=i == len(chunks)),
+                   (_ending_fault(body, final=i == len(chunks), lang=lang),
                     _emphasis_fault(body))
                    if f]
         out.append(body)
@@ -965,7 +966,8 @@ def _parse_polish(raw: str, written: list[str], parts: int,
     # told the same thing three times over.
     if hit := safety.blocked(title):
         raise Unsuitable(f"generated title tripped the blocklist ({hit})")
-    faults += [f for f in (_title_fault(title), _kin_fault(title)) if f]
+    faults += [f for f in (_title_fault(title, lang),
+                          _kin_fault(title, lang)) if f]
     return (title, out), faults
 
 
@@ -1457,7 +1459,7 @@ if __name__ == "__main__":
             "---\n"
             "Ключи она вернула через неделю. А вы бы простили соседке эти ключи?")
     POST = {"title": "", "text": ""}
-    (g4, p4), f4 = _parse_write(RAW2, POST, 2, 30)
+    (g4, p4), f4 = _parse_write(RAW2, POST, 2, 30, "ru")
     assert g4 == "female" and len(p4) == 2, (g4, p4)
     assert p4[1].startswith("Ключи она вернула"), p4[1]
     # the fixture is deliberately far off thirty words; nothing else may be
@@ -1469,29 +1471,29 @@ if __name__ == "__main__":
     # complain, so the rewrite drops it.
     (_, p10), f10 = _parse_write(
         RAW2.replace("NARRATOR: female\n", "NARRATOR: female\nTITLE: Заголовок\n"),
-        POST, 2, 30)
+        POST, 2, 30, "ru")
     assert p10[0].startswith("Соседка забрала"), p10[0]
     assert any("TITLE" in f for f in f10), f10
     # a cue written here is worse than useless: stage two reads a marked
     # sentence as one already done and never puts the mark where it belongs
     (_, _), f11 = _parse_write(RAW2.replace("Соседка забрала", "[sad] Соседка забрала"),
-                               POST, 2, 30)
+                               POST, 2, 30, "ru")
     assert any("square brackets" in f for f in f11), f11
     # only the last part may address the viewer, and only it must
     RAW_BAD = RAW2.replace("И тут я услышала её шаги на лестнице.",
                            "А вы бы простили соседке эти ключи?")
-    (_, _), f7 = _parse_write(RAW_BAD, POST, 2, 30)
+    (_, _), f7 = _parse_write(RAW_BAD, POST, 2, 30, "ru")
     assert any(f.startswith("part 1") and "not the last" in f for f in f7), f7
     RAW_BAD2 = RAW2.replace("А вы бы простили соседке эти ключи?", "И она ушла.")
-    (_, _), f8 = _parse_write(RAW_BAD2, POST, 2, 30)
+    (_, _), f8 = _parse_write(RAW_BAD2, POST, 2, 30, "ru")
     assert any(f.startswith("part 2") and "question" in f for f in f8), f8
     # a stock closing question is stage one's fault, since those are its words
     RAW_WEAK = RAW2.replace("А вы бы простили соседке эти ключи?",
                             "А как бы вы поступили на моём месте?")
-    (_, _), f12 = _parse_write(RAW_WEAK, POST, 2, 30)
+    (_, _), f12 = _parse_write(RAW_WEAK, POST, 2, 30, "ru")
     assert any("stock line" in f for f in f12), f12
     # one part where two were asked for is a fault, not a silent single video
-    (_, p5), f5 = _parse_write(RAW2.split("---")[0], POST, 2, 30)
+    (_, p5), f5 = _parse_write(RAW2.split("---")[0], POST, 2, 30, "ru")
     assert len(p5) == 1 and any("parts" in f for f in f5), f5
 
     # STAGE TWO takes those words back and may add nothing but brackets.
@@ -1504,7 +1506,7 @@ if __name__ == "__main__":
              "---\n"
              "Ключи она [emphasis] вернула через неделю. [doubtful] А вы бы "
              "[emphasis] простили соседке эти ключи?")
-    (t4, q4), fp = _parse_polish(RAW_P, WRITTEN, 2, POST)
+    (t4, q4), fp = _parse_polish(RAW_P, WRITTEN, 2, POST, "ru")
     assert not fp, fp
     # plain(), because a part keeps its markup all the way to voice.speak_parts
     # - the cues are what the engine reads - and only meta.json gets it
@@ -1515,7 +1517,7 @@ if __name__ == "__main__":
     # all: those words passed checks stage two is not even shown.
     (_, _), fd = _parse_polish(
         RAW_P.replace("Соседка [emphasis] забрала", "Соседка [emphasis] тихо забрала"),
-        WRITTEN, 2, POST)
+        WRITTEN, 2, POST, "ru")
     assert any("changed at word" in f for f in fd), fd
     assert not _drift_fault("Он [emphasis] ушёл.", "Он ушёл."), "brackets are free"
     assert "word 2" in _drift_fault("Он тихо ушёл.", "Он ушёл.")
@@ -1525,26 +1527,27 @@ if __name__ == "__main__":
     RAW_TITLED = RAW_P.replace(
         "Ключи она [emphasis] вернула",
         "TITLE: Соседка пришла с полицией\n\nКлючи она [emphasis] вернула")
-    (_, q9), f9 = _parse_polish(RAW_TITLED, WRITTEN, 2, POST)
+    (_, q9), f9 = _parse_polish(RAW_TITLED, WRITTEN, 2, POST, "ru")
     assert plain(q9[1]).startswith("Ключи она вернула"), q9[1]
     assert any(f.startswith("part 2") and "TITLE" in f for f in f9), f9
     # ...and the shared title is checked ONCE, however many parts there are
     assert sum("the TITLE is" in f for f in f9) <= 1, f9
     # every part that went in comes back, or a video quietly loses its second half
-    (_, _), fm = _parse_polish(RAW_P.split("---")[0], WRITTEN, 2, POST)
+    (_, _), fm = _parse_polish(RAW_P.split("---")[0], WRITTEN, 2, POST, "ru")
     assert any("were given" in f for f in fm), fm
     # One ceiling, and a split story's shared title answers to the same one -
     # it used to have its own, wider, until raising this number made the two
     # equal. Asserted on the length complaint alone: this fixture trips the
     # markup rules too, and it is the ceiling being tested.
     over = " ".join(["слово"] * (MAX_TITLE_WORDS + 1))
-    assert f"keep it under {MAX_TITLE_WORDS}" in _title_fault(over)
-    assert "keep it under" not in _title_fault(" ".join(["слово"] * MAX_TITLE_WORDS))
+    assert f"keep it under {MAX_TITLE_WORDS}" in _title_fault(over, "ru")
+    assert "keep it under" not in _title_fault(
+        " ".join(["слово"] * MAX_TITLE_WORDS), "ru")
     # and the single-video path must not start splitting on a stray dash line
     (_, q6), _ = _parse_polish(
         "TITLE: Заголовок\n\n---\n\nКлючи она вернула. [doubtful] А вы бы "
         "[emphasis] простили соседке эти ключи?",
-        ["Ключи она вернула. А вы бы простили соседке эти ключи?"], 1, POST)
+        ["Ключи она вернула. А вы бы простили соседке эти ключи?"], 1, POST, "ru")
     assert len(q6) == 1, q6
 
     # the prompt set has to exist for the channel this process is, or the run
