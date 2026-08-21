@@ -102,6 +102,13 @@ FISH_MODEL = os.getenv("FISH_MODEL", "s2.1-pro-free")
 # The same id on another language is a different performance, usually accented.
 FISH_VOICES_MALE = [v.strip() for v in chan_env("FISH_VOICES_MALE").split(",") if v.strip()]
 FISH_VOICES_FEMALE = [v.strip() for v in chan_env("FISH_VOICES_FEMALE").split(",") if v.strip()]
+# The horror slot reads with one fixed voice instead of drawing from the pool.
+# A recurring narrator is what the genre runs on - the same voice every night is
+# half of why a scary story sounds like one - and it is the reason this id was
+# taken OUT of FISH_VOICES_MALE rather than left there: a voice that also reads
+# the drama slot is nobody in particular. Unset falls back to the pool, so a
+# channel can run the slot without pinning anything.
+FISH_VOICE_HORROR = chan_env("FISH_VOICE_HORROR").strip()
 FISH_SPEED = float(os.getenv("FISH_SPEED", 1.0))
 # Chipmunk knob, and deliberately NOT the same thing as FISH_SPEED: the engine's
 # prosody speed changes the pace and leaves the pitch where it was, which is what
@@ -173,6 +180,15 @@ WHISPER_SIZE = os.getenv("WHISPER_SIZE", "base")
 # again, exactly as before.
 SUBREDDITS = [s.strip() for s in
               chan_env("SUBREDDITS", "tifu", shared=True).split(",") if s.strip()]
+# Horror is a pool of its OWN and deliberately not part of the list above.
+# _pick() ranks on contested() - how hard the comments fought over the post -
+# and a scary story is not argued about, so mixed into one list these subs would
+# lose every slot to a family row and never surface at all. Per channel rather
+# than shared: the pin above is a Russian-reading voice, and the English channel
+# has no horror slot until SUBREDDITS_HORROR_EN says otherwise. Empty means no
+# slot, which is the default and what every channel had before this existed.
+SUBREDDITS_HORROR = [s.strip() for s in
+                     chan_env("SUBREDDITS_HORROR").split(",") if s.strip()]
 # Floor, and a much lower one since 2026-08-12. It was never the thing judging
 # whether a story is good - source.contested() ranks on the votes and comments
 # the post already has, and since 2026-08-14 that is the ONLY thing ranking on
@@ -431,6 +447,12 @@ if __name__ == "__main__":
     # gives it two tickets in the draw.
     assert len(set(SUBREDDITS)) == len(SUBREDDITS), \
         f"{chan_key('SUBREDDITS', True)} repeats a sub"
+    # A sub in both lists would be harvested twice and, worse, could take the
+    # horror slot AND an ordinary one on the same day - the two pools are kept
+    # apart precisely so one cannot rank against the other.
+    assert not set(SUBREDDITS) & set(SUBREDDITS_HORROR), (
+        f"{sorted(set(SUBREDDITS) & set(SUBREDDITS_HORROR))} is in both "
+        f"{chan_key('SUBREDDITS', True)} and {chan_key('SUBREDDITS_HORROR')}")
     assert TIKTOK_BACKEND in ("api", "tau"), \
         f"{chan_key('TIKTOK_BACKEND')}={TIKTOK_BACKEND} is not api or tau"
     # A typo in the backend name would be caught above; a missing account would
@@ -485,6 +507,9 @@ if __name__ == "__main__":
     print(f"OK: channel {CHANNEL}, {len(SUBREDDITS)} subs, "
           f"{TARGET_SEC}s (floor {MIN_SEC}s), score from {MIN_SCORE}, "
           f"loud at {LOUD_AT}")
+    _hv = FISH_VOICE_HORROR[:8] if FISH_VOICE_HORROR else "from the male pool"
+    print(f"    horror: {len(SUBREDDITS_HORROR)} subs, voice {_hv}"
+          if SUBREDDITS_HORROR else "    horror: off")
     print(f"    voices: {len(FISH_VOICES_MALE)} male, {len(FISH_VOICES_FEMALE)} female"
           f"   yt token: {'set' if YT_REFRESH_TOKEN else 'MISSING'} ({YT_REFRESH_KEY})"
           f"   tiktok token: {'set' if TIKTOK_REFRESH_TOKEN else 'MISSING'}")

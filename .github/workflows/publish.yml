@@ -100,6 +100,10 @@ jobs:
       FISH_MODEL: ${{ vars.FISH_MODEL }}
       FISH_VOICES_MALE: ${{ vars.FISH_VOICES_MALE }}
       FISH_VOICES_FEMALE: ${{ vars.FISH_VOICES_FEMALE }}
+      # The horror slot's narrator, pinned rather than drawn: one voice every
+      # night is half of what makes a scary story sound like one. Unset, that
+      # slot draws from the pools above like any other story.
+      FISH_VOICE_HORROR: ${{ vars.FISH_VOICE_HORROR }}
       YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
       YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
       YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
@@ -154,6 +158,13 @@ jobs:
       # laugh. Unset arrives empty, config.py reads that as absent and both
       # channels go back to sharing SUBREDDITS.
       SUBREDDITS_EN: ${{ vars.SUBREDDITS_EN }}
+      # The horror pool, kept apart from the list above because the ranking is
+      # the wrong one for it: contested() sorts on how hard the comments fought,
+      # and a scary story is not fought over. One slot a day comes off this list
+      # and the rest of the day stays with the feed. Per channel and NOT shared -
+      # the pinned voice reads Russian - so the English channel has no horror slot
+      # until SUBREDDITS_HORROR_EN exists.
+      SUBREDDITS_HORROR: ${{ vars.SUBREDDITS_HORROR }}
       # Where the ranking calls a story loud and hands out its full loudness
       # point. Not a band and not a gate any more - a year of three subs held
       # twelve posts above this, so anything that treated it as a supply was

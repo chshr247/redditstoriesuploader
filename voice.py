@@ -25,7 +25,8 @@ from num2words import num2words
 import script
 from config import (FISH_API_KEY, FISH_BODY_CUE, FISH_CTA_CUE, FISH_MODEL,
                     FISH_SPEED, FISH_TITLE_CUE, FISH_VOICES_FEMALE,
-                    FISH_VOICES_MALE, OUT_DIR, OUTPUT_LANG, TTS_BACKEND,
+                    FISH_VOICES_MALE, FISH_VOICE_HORROR, OUT_DIR, OUTPUT_LANG,
+                    SUBREDDITS_HORROR, TTS_BACKEND,
                     TTS_VOICE, VOICE_DEHISS_DB, VOICE_SPEEDUP, WHISPER_SIZE)
 
 TICKS_PER_SEC = 10_000_000
@@ -290,8 +291,16 @@ def duration(path) -> float:
     return float(out)
 
 
-def pick_voice(gender: str = "male") -> str:
-    """A fish voice matching the narrator. Empty list means fish's default."""
+def pick_voice(gender: str = "male", sub: str = "") -> str:
+    """A fish voice matching the narrator. Empty list means fish's default.
+
+    A horror sub overrules the narrator outright. That slot is read by one
+    fixed voice on purpose - a recurring narrator is half of what makes a
+    scary story sound like one - so the gender the model tagged belongs to
+    the character in the story and not to whoever reads it out.
+    """
+    if sub in SUBREDDITS_HORROR and FISH_VOICE_HORROR:
+        return FISH_VOICE_HORROR
     pool = FISH_VOICES_FEMALE if gender == "female" else FISH_VOICES_MALE
     if not pool:
         pool = FISH_VOICES_MALE or FISH_VOICES_FEMALE
@@ -484,6 +493,22 @@ def speak_parts(title: str, body: str, name: str, gap: float = 0.0,
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+    # The horror slot is read by ONE voice, and the narrator's gender does not
+    # get a say: the gender belongs to the character in the story, the voice to
+    # the channel. Both directions matter - a horror sub must override a female
+    # narrator, and an ordinary sub must not pick the horror voice up.
+    _real_pin = (SUBREDDITS_HORROR, FISH_VOICE_HORROR)
+    globals()["SUBREDDITS_HORROR"] = ["_selftest_horror"]
+    globals()["FISH_VOICE_HORROR"] = "_pinned"
+    assert pick_voice("female", "_selftest_horror") == "_pinned"
+    assert pick_voice("male", "_selftest_horror") == "_pinned"
+    assert pick_voice("male", "AmItheAsshole") != "_pinned"
+    assert pick_voice("male") != "_pinned", "no sub means the ordinary pool"
+    # unpinned, the horror sub falls back to the pool like anything else
+    globals()["FISH_VOICE_HORROR"] = ""
+    assert pick_voice("male", "_selftest_horror") != "_pinned"
+    globals()["SUBREDDITS_HORROR"], globals()["FISH_VOICE_HORROR"] = _real_pin
 
     # gap filling must stay ordered and cover every word
     t = [{"word": "a", "start": 0.0, "end": 1.0}, None,
