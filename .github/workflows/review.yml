@@ -123,8 +123,10 @@ jobs:
         run: python main.py --park
 
       # The same reason publish.yml keeps it: the run records which comment it
-      # has already judged, and which story it has just written down. Thrown away with the runner, the next run judges it
-      # again and repeats the same complaint. Rebase and retry rather than merge
+      # has already judged, and which story it has just written down.
+      # Thrown away with the runner, the next run judges the comment
+      # again and repeats the same complaint - and writes the
+      # replacement story a second time. Rebase and retry rather than merge
       # - seen.db is binary and a conflict here is a state file to reconcile by
       # hand, never something to resolve automatically.
       - name: Keep the state file
