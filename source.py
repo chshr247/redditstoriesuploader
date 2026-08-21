@@ -36,7 +36,8 @@ import urllib.request
 
 import safety
 from config import (DAILY_FILE, DB_PATH, DEFAULT_CHANNEL, LOUD_AT, MIN_COMMENTS,
-                    MIN_SCORE, OUTPUT_LANG, PLAN_FILE, REDDITAPIS_KEY, SUBREDDITS)
+                    MIN_SCORE, OUTPUT_LANG, PLAN_FILE, REDDITAPIS_KEY, SUBREDDITS,
+                    SUBREDDITS_HORROR)
 
 REDDITAPIS = "https://api.redditapis.com"
 API = "https://api.pullpush.io/reddit/search/submission/"
@@ -317,11 +318,14 @@ def contested(title: str, comments: int, score: int,
 POOL_LOW = 40        # unused rows this channel can still choose from
 POOL_WINDOWS = 8     # archive reads one refill is allowed to spend
 
-# One refill per process. A run asks the pool twice - once for the loud band and
-# once for the ordinary one - and if the first refill did not lift it above the
-# mark (every archive down, or the subs simply spent), the second must not pay
-# for the same eight requests again.
-_refilled = False
+# One refill per process PER POOL. A run asks a pool twice - once for the loud
+# band and once for the ordinary one - and if the first refill did not lift it
+# above the mark (every archive down, or the subs simply spent), the second must
+# not pay for the same eight requests again. Keyed by the sub list rather than a
+# single flag because there are two pools now: the horror slot is asked for
+# first, and one flag would let its refill spend the run's only harvest and
+# leave the feed - which is every other slot in the day - unstocked.
+_refilled: set[tuple[str, ...]] = set()
 
 
 def _cursor(db, sub: str) -> int:
@@ -364,15 +368,22 @@ def _store(db, sub: str, posts: list[dict]) -> int:
     return db.total_changes - before
 
 
-def refill(db, windows: int = POOL_WINDOWS) -> int:
-    """Harvest into the pool: `windows` archive reads spread over the subs.
+def refill(db, windows: int = POOL_WINDOWS, subs: list[str] | None = None) -> int:
+    """Harvest into the pool: `windows` archive reads spread over `subs`.
 
     Shuffled, so a tie in the ranking does not always fall the same way -
     twenty-six of the first twenty-seven stories came from one sub back when the
     order was fixed.
+
+    The horror list is harvested by its own call with its own budget and is
+    never mixed in here: eight reads spread over both lists would thin the feed
+    on every run to keep one slot a day stocked.
     """
+    # None rather than SUBREDDITS as the default: a default is bound once, at
+    # import, and the self-test swaps the module global to plant its own subs.
+    subs = subs or SUBREDDITS
     added = 0
-    subs = random.sample(SUBREDDITS, len(SUBREDDITS))
+    subs = random.sample(subs, len(subs))
     for i in range(windows):
         sub = subs[i % len(subs)]
         try:
@@ -430,8 +441,8 @@ def _bodies(ids: list[str]) -> dict[str, dict]:
     return {p["id"]: p for p in data}
 
 
-def _pick(limit: int) -> list[dict]:
-    """Up to `limit` unused pool stories, best first.
+def _pick(limit: int, subs: list[str] | None = None) -> list[dict]:
+    """Up to `limit` unused stories from `subs`, best first.
 
     "Best" is contested() - the argument, not the score. Nothing here spreads
     the answer across subs on purpose; that is refill()'s job, which shuffles
@@ -439,19 +450,19 @@ def _pick(limit: int) -> list[dict]:
     takes the FIRST story the prompt accepts, so the only row that really
     matters is the top one.
     """
-    global _refilled
+    subs = subs or SUBREDDITS       # see refill() on why not a default argument
     db = _db()
-    subs = ",".join("?" * len(SUBREDDITS))
+    marks = ",".join("?" * len(subs))
     unused = (f"SELECT id, sub, score, comments, ratio, title FROM pool "
-              f"WHERE sub IN ({subs}) AND id NOT IN "
+              f"WHERE sub IN ({marks}) AND id NOT IN "
               "(SELECT id FROM seen WHERE lang=?)")
-    rows = db.execute(unused, (*SUBREDDITS, OUTPUT_LANG)).fetchall()
+    rows = db.execute(unused, (*subs, OUTPUT_LANG)).fetchall()
 
-    if not _refilled and len(rows) < POOL_LOW:
+    if tuple(subs) not in _refilled and len(rows) < POOL_LOW:
         log.info("pool: %d left to choose from, refilling", len(rows))
-        _refilled = True
-        log.info("pool: +%d rows", refill(db))
-        rows = db.execute(unused, (*SUBREDDITS, OUTPUT_LANG)).fetchall()
+        _refilled.add(tuple(subs))
+        log.info("pool: +%d rows", refill(db, subs=subs))
+        rows = db.execute(unused, (*subs, OUTPUT_LANG)).fetchall()
 
     ranked = [{"id": pid, "sub": sub, "score": score, "title": title,
                "comments": comments, "ratio": ratio,
@@ -751,6 +762,35 @@ def next_daily() -> dict | None:
     return None
 
 
+# -------------------------------------------------------------- the horror slot
+
+def next_horror() -> dict | None:
+    """One horror story a day, or None to leave the slot to the pool.
+
+    A pool of its own, drawn on the same terms the daily reserve draws its
+    slot: the gate is whether one of these subs is already in today's `seen`
+    rows, so a story that split counts from the moment its first part is
+    marked, and a pick the model SKIPs burns the day like any other.
+
+    Ranked by contested() like everything else. It is a strange measure for a
+    genre nobody argues about, but within one horror list it still puts the
+    loud and the commented-on at the top, and a second ranking function would
+    be a whole new thing to tune for one slot a day.
+    """
+    if not SUBREDDITS_HORROR:
+        return None
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    marks = ",".join("?" * len(SUBREDDITS_HORROR))
+    with _db() as db:
+        rows = db.execute(f"SELECT ts FROM seen WHERE lang=? AND sub IN ({marks})",
+                          (OUTPUT_LANG, *SUBREDDITS_HORROR)).fetchall()
+    if any(ts and datetime.datetime.fromtimestamp(
+            ts, datetime.timezone.utc).date() == today for (ts,) in rows):
+        return None
+    got = _pick(1, SUBREDDITS_HORROR)
+    return got[0] if got else None
+
+
 # ---------------------------------------------------------------- split stories
 
 def queue_parts(post: dict, parts: list[tuple[str, str]], gender: str,
@@ -939,7 +979,7 @@ if __name__ == "__main__":
     # language, the order, and a row whose post has gone since.
     _real = (SUBREDDITS, _refilled, _bodies)
     globals()["SUBREDDITS"] = ["_selftest_sub", "_selftest_other"]
-    globals()["_refilled"] = True                 # no archive is to be touched
+    globals()["_refilled"] = {("_selftest_sub", "_selftest_other")}   # no archive
     # the stub answers like a real backend, numbers included, because _pick()
     # writes those numbers back into the row it just read
     globals()["_bodies"] = lambda ids: {
@@ -1087,6 +1127,49 @@ if __name__ == "__main__":
     _dtmp.unlink()
     globals()["DAILY_FILE"], globals()["_by_id"] = _real_daily_file, _real_by_id
     print("daily reserve ok")
+
+    # The horror slot: one a day off a pool of its own, and the gate is the SUB
+    # rather than the id - what has to be true is that no scary story went out
+    # today, whichever one it was.
+    _real_bodies, _real_refill = _bodies, refill
+    _real_horror_subs = SUBREDDITS_HORROR
+    globals()["SUBREDDITS_HORROR"] = ["_selftest_horror"]
+    # a pool of one row is under POOL_LOW, and a refill here would go to the
+    # network for a sub that does not exist
+    globals()["refill"] = lambda db, **kw: 0
+    globals()["_bodies"] = lambda ids: {
+        i: {"id": i, "subreddit": "_selftest_horror", "score": MIN_SCORE + 5,
+            "num_comments": 500, "upvote_ratio": 0.8, "over_18": False,
+            "title": "The man on the stairs", "selftext": "x" * 500}
+        for i in ids}
+    with _db() as db:
+        db.execute("DELETE FROM seen WHERE id LIKE '_hr_%'")
+        db.execute("DELETE FROM pool WHERE id LIKE '_hr_%'")
+        db.execute("INSERT INTO pool(id, sub, score, comments, ratio, title, ts)"
+                   " VALUES (?,?,?,?,?,?,?)",
+                   ("_hr_a", "_selftest_horror", MIN_SCORE + 5, 500, 0.8,
+                    "The man on the stairs", time.time()))
+    assert next_horror()["id"] == "_hr_a", "the horror pool fills its own slot"
+    # taken: the story was accepted and marked, so the day has had its scare
+    mark_used("_hr_a", MIN_SCORE + 5, "_selftest_horror")
+    assert next_horror() is None, "only one horror story a day"
+    # a new day, and a second row: the same sub used yesterday does not count
+    with _db() as db:
+        db.execute("UPDATE seen SET ts=0 WHERE id='_hr_a'")
+        db.execute("INSERT INTO pool(id, sub, score, comments, ratio, title, ts)"
+                   " VALUES (?,?,?,?,?,?,?)",
+                   ("_hr_b", "_selftest_horror", MIN_SCORE + 5, 500, 0.8,
+                    "The other man on the stairs", time.time()))
+    assert next_horror()["id"] == "_hr_b", "yesterday's scare does not hold today"
+    # and a channel with no horror subs configured never sees the slot at all
+    globals()["SUBREDDITS_HORROR"] = []
+    assert next_horror() is None, "no horror subs means no horror slot"
+    with _db() as db:
+        db.execute("DELETE FROM seen WHERE id LIKE '_hr_%'")
+        db.execute("DELETE FROM pool WHERE id LIKE '_hr_%'")
+    globals()["SUBREDDITS_HORROR"] = _real_horror_subs
+    globals()["_bodies"], globals()["refill"] = _real_bodies, _real_refill
+    print("horror slot ok")
 
     # A story spent on one channel must stay available on the other - that is
     # the whole point of keying `seen` by (id, lang), and the failure mode is

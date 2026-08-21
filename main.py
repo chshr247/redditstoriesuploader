@@ -47,7 +47,7 @@ def _render(title: str, body: str, gender: str, key: str, sub: str,
     # so a story that lands under the floor comes back read by someone else, at
     # that voice's own pace instead of the -15% asked for. Measured 2026-08-18:
     # 173 wpm re-voiced to 124, a 29% drop from a 15% request.
-    fish_voice = fish_voice or voice.pick_voice(gender)
+    fish_voice = fish_voice or voice.pick_voice(gender, sub)
     mp3, words, title_end, title_words = voice.speak_parts(
         title, body, name, gender=gender, fish_voice=fish_voice)
 
@@ -113,7 +113,8 @@ def make_reviewed(r: dict) -> Path:
     written = r["written"]
     if len(written) > 1:
         source.queue_parts(post, written, r["gender"],
-                           voice.pick_voice(r["gender"]), issue=r["issue"])
+                           voice.pick_voice(r["gender"], r["sub"]),
+                           issue=r["issue"])
         out = make_part(source.next_part())
     else:
         # The score travels with the file: youtube.py decides by band and the
@@ -298,6 +299,13 @@ def main(count: int = 1, force: bool = False) -> int:
         if daily := source.next_daily():
             log.info("daily reserve: %s", daily["id"])
             posts = [daily]
+        # ...and after it the horror slot, which is the same bargain again: one
+        # story a day off a pool of its own, and the rest of the day untouched.
+        # Second rather than first because the reserve is hand-picked and finite,
+        # while this one draws from subs that keep producing.
+        elif horror := source.next_horror():
+            log.info("horror slot: r/%s %s", horror["sub"], horror["id"])
+            posts = [horror]
         else:
             posts = source.fetch(count * 4)
         if not posts and not done:
@@ -349,7 +357,7 @@ if __name__ == "__main__":
         # One story, one narrator: the re-voice under the floor is a SECOND
         # call, and unpinned it comes back in somebody else's voice.
         heard, dur = [], iter([30.0, 70.0])
-        voice.pick_voice = lambda g="male": "picked"
+        voice.pick_voice = lambda g="male", s="": "picked"
         voice.speak_parts = lambda *a, **k: (
             heard.append(k["fish_voice"]) or (Path("m.mp3"), [], 0.0, []))
         voice.duration = lambda p: next(dur)
@@ -365,9 +373,11 @@ if __name__ == "__main__":
         TIKTOK_ENABLED = True
         source.next_part = lambda: {"post_id": "x", "n": 2, "total": 2}
         source.fetch = lambda *a: []
-        # the reserve is its own source and would read daily_<chan>.md and the
-        # live archive; stub it off so these cases exercise the pool path alone
+        # the reserve and the horror slot are sources of their own and would read
+        # daily_<chan>.md and the live archive; stub them off so these cases
+        # exercise the pool path alone
         source.next_daily = lambda: None
+        source.next_horror = lambda: None
         make_part = lambda p: rendered.append(p) or Path("stub.mp4")  # noqa: E731
         publish.due = lambda: "only 0.4h since the last draft"
         # nothing is out for review in any of the part cases below, and asking

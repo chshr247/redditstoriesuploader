@@ -98,6 +98,17 @@ TOPICS_RU = [
      ["#авто", "#дорога", "#парковка"]),
     (r"кафе|ресторан|официант|заказ|доставк|магазин|касс|продавец|курьер",
      ["#сервис", "#клиенты", "#магазин"]),
+    # The horror slot, and the stems are deliberately the narrow ones. Жутк,
+    # страшн, ночью and шаги are the words the genre is made of and they are
+    # also ordinary Russian - a family row is жуткий and a drunk husband comes
+    # home ночью - so a bucket built on them would tag half the feed as
+    # mysticism. What is left names nothing but the genre.
+    # ponytail: the two generic tags that ride along still come from the drama
+    # list, so a scary story can go out carrying #ктоправ. Thread the genre
+    # into pick() if that shows up in the analytics as a wrong-audience tag.
+    (r"призрак|привидени|полтергейст|паранормальн|мистик|потусторонн"
+     r"|кладбищ|могил|экзорц|одержим|нечист",
+     ["#мистика", "#страшныеистории", "#паранормальное", "#ужасы"]),
 ]
 
 # The same idea in English, and not a translation of the list above: the topics
@@ -253,6 +264,15 @@ if __name__ == "__main__":
     money = pick("Мать сняла с моей карты 40000 на футбол брата",
                  "Я копила на квартиру. Мама забрала деньги без спроса.", lang="ru")
     assert hit(money, "деньги") and hit(money, "мама"), money
+
+    # The horror bucket must be reachable, and - the half that actually breaks -
+    # it must stay out of an ordinary story that happens to be told at night.
+    scary = pick("Ночью в подвале я увидел призрака",
+                 "Соседи говорили, что в доме привидение.", lang="ru")
+    assert hit(scary, "призрак"), scary
+    night = pick("Муж вернулся ночью и разбудил детей",
+                 "Я ждала его до трёх, потом легла спать.", lang="ru")
+    assert not hit(night, "призрак"), night
 
     law = pick("Свекровь въехала в нашу квартиру, пока мы были в отпуске",
                "Свекровь сказала, что квартира всё равно её сына.", lang="ru")

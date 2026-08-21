@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pr
 
 
 def _prompts():
-    """(WRITE, POLISH, MULTI), imported on use rather than at import time.
+    """(WRITE, POLISH, MULTI, GENRE), imported on use rather than at import time.
 
     Both this and the OpenAI SDK belong to write_script() and to nothing else,
     and CI checks the private repo out only for a run that is going to call the
@@ -46,11 +46,11 @@ def _prompts():
             "prompts.py not found - clone the private repo into .private/ "
             "(git clone https://github.com/chshr247/reddit-prompts.git .private)"
         ) from None
-    return prompts.WRITE, prompts.POLISH, prompts.MULTI
+    return prompts.WRITE, prompts.POLISH, prompts.MULTI, prompts.GENRE
 
 import safety
 from config import (LLM_BASE_URL, LLM_MODEL, OPENAI_API_KEY, OUTPUT_LANG,
-                    TARGET_SEC, VOICE_SPEEDUP)
+                    SUBREDDITS_HORROR, TARGET_SEC, VOICE_SPEEDUP)
 
 
 class Unsuitable(Exception):
@@ -999,12 +999,20 @@ def write_script(post: dict, parts: int = 1) -> tuple[str, list[tuple[str, str]]
 
     from openai import OpenAI
 
-    WRITE, POLISH, MULTI = _prompts()
+    WRITE, POLISH, MULTI, GENRE = _prompts()
     client = OpenAI(api_key=OPENAI_API_KEY, base_url=LLM_BASE_URL or None)
     target = _target_words()
     lang, name = OUTPUT_LANG, LANG_NAME[OUTPUT_LANG]
+    # Which slot this story came from is written nowhere but its sub, and both
+    # prompts need to know: the horror slot leads on a different thing, ends on
+    # a different line and builds its title's second beat out of something else.
+    # Everything else in either prompt is the same text - see prompts.GENRE. A
+    # language with no horror block falls back to drama, which is what the
+    # English channel does, having no horror subs to reach this with anyway.
+    kind = "horror" if post.get("sub") in SUBREDDITS_HORROR else "drama"
+    genre = GENRE[lang].get(kind) or GENRE[lang]["drama"]
 
-    system = WRITE[lang].format(lang=name)
+    system = WRITE[lang].format(lang=name, **genre)
     if parts > 1:
         system += MULTI[lang].format(n=parts)
     ask = (f"{'Each part' if parts > 1 else 'The'} narration must be about "
@@ -1027,7 +1035,7 @@ def write_script(post: dict, parts: int = 1) -> tuple[str, list[tuple[str, str]]
            "delivery markup to it without changing a single word.\n\n"
            + "\n---\n".join(written))
     title, tagged = _ask(
-        client, POLISH[lang].format(lang=name), ask,
+        client, POLISH[lang].format(lang=name, **genre), ask,
         lambda raw: _parse_polish(raw, written, parts, post),
         "Keep the narration exactly as it was given to you.")
 
