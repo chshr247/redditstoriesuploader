@@ -301,11 +301,24 @@ def _batch_room() -> int:
     takes the ceiling to zero, nothing is written overnight, and the first run
     after the midnight reset asks for the whole day at once.
 
+    Three things come off it and the third is the one that is easy to miss.
+    A story that has started publishing is NOT in `review` any more - its row
+    goes the moment part 1 renders - so without source.parts_left() the day
+    after a split story began would look two videos emptier than it is.
+
+    Counting those parts is deliberately stricter than TikTok is: a part is
+    exempt from the daily count once it exists, so the platform would take
+    them on top of the four. The same call _room() already makes, and for the
+    same reason - it caps how much of a day one story may lay claim to, and a
+    run spent on a part publishes nothing to YouTube, which is never offered
+    one.
+
     ponytail: sent_today() is TikTok's count. On a channel with TikTok off it
     is always zero and YouTube's slower allowance governs, so the batch there
     is one or two questions too generous - set REVIEW_BATCH for that channel.
     """
-    return max(0, REVIEW_BATCH - publish.sent_today() - review.queued())
+    return max(0, REVIEW_BATCH - publish.sent_today() - review.queued()
+               - source.parts_left())
 
 
 def _room() -> int:
@@ -494,12 +507,20 @@ if __name__ == "__main__":
                                     "title": "t", "text": "x" * 500}]
         globals()["write_and_park"] = lambda p, n=1: written.append(p["id"])
         publish.sent_today = lambda: 0
+        source.parts_left = lambda: 0
         review.queued = lambda: REVIEW_BATCH
         assert main(1) == 1 and not written, "a full batch must block the pool"
         # ...and so does a day already spent, with the batch empty
         review.queued = lambda: 0
         publish.sent_today = lambda: REVIEW_BATCH
         assert main(1) == 1 and not written, "a spent day must block it too"
+        # ...and so do parts still in flight, which are in NEITHER of those:
+        # the review row went when part 1 rendered, and the parts have not
+        # been sent. The day after a split story begins is the case.
+        publish.sent_today = lambda: 0
+        source.parts_left = lambda: REVIEW_BATCH
+        assert main(1) == 1 and not written, "a queued split must block it too"
+        source.parts_left = lambda: 0
         # ...and a batch with room fills to REVIEW_BATCH in one run, which is
         # the whole feature: a day's questions asked together, not one an hour.
         vids = [0]
@@ -536,6 +557,9 @@ if __name__ == "__main__":
             # and what already went out today counts against it the same way
             review.queued, publish.sent_today = (lambda: 0), (lambda: REVIEW_BATCH)
             assert _room() == 0, "a spent day leaves nothing to split into"
+            publish.sent_today, source.parts_left = (lambda: 0), (lambda: REVIEW_BATCH)
+            assert _room() == 0, "nor does one already split"
+            source.parts_left = lambda: 0
         finally:
             review.queued = lambda: vids[0]
             publish.sent_today = lambda: 0
