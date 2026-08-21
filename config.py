@@ -254,6 +254,15 @@ DAILY_FILE = ROOT / chan_env("DAILY_FILE", f"daily_{CHANNEL}.md")
 # language cannot arrive in one of them and not the other.
 PART_WORD = {"ru": "Часть", "en": "Part"}
 TARGET_SEC = int(os.getenv("TARGET_SEC", 75))
+# The ceiling for the horror slot, and only a ceiling: script.target_sec()
+# scales the target by the length of the source and stops here. A scary story
+# lives on the detail that a squeeze into 75 seconds throws away first, and it
+# is told as ONE video rather than split - a cliffhanger with its answer an
+# hour later is a device for a feed, not for a story somebody is watching to
+# find out what was on the stairs. Note that past 180 seconds YouTube no
+# longer treats the upload as a Short: youtube.py drops the #Shorts tag for
+# these, which is the correct label and also a smaller audience.
+HORROR_SEC = int(os.getenv("HORROR_SEC", 330))
 # hard floor: under this a video loses monetization eligibility, so main.py
 # re-synthesizes at a slower rate rather than shipping a 58-second clip
 MIN_SEC = int(os.getenv("MIN_SEC", 62))
@@ -438,6 +447,10 @@ if __name__ == "__main__":
     assert SUBREDDITS and all(SUBREDDITS), "SUBREDDITS is empty"
     assert 15 <= TARGET_SEC <= 180, f"TARGET_SEC={TARGET_SEC} out of sane range"
     assert MIN_SEC < TARGET_SEC, "TARGET_SEC must aim above the MIN_SEC floor"
+    # Below TARGET_SEC it would not be a ceiling at all, and past ten minutes
+    # TikTok refuses the upload outright.
+    assert TARGET_SEC < HORROR_SEC <= 600, \
+        f"HORROR_SEC={HORROR_SEC} must sit between TARGET_SEC and 600"
     # Loudness is a ranking term, so it has to sit above the floor to mean
     # anything: at or below it every candidate scores the full point and the
     # term stops separating anything at all.

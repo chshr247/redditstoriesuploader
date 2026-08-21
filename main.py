@@ -76,10 +76,13 @@ def _render(title: str, body: str, gender: str, key: str, sub: str,
                         if (meta or {}).get("total", 0) > 1 else 0)
     # publishing runs separately and later, so the text has to survive on disk.
     # The channel goes in with it - the part marker's language and which
-    # channel's queue the file belongs to are both read back from here.
+    # channel's queue the file belongs to are both read back from here. So does
+    # the measured length: youtube.py decides on the #Shorts tag by it, and by
+    # then the mp4 is all it has.
     (out.with_suffix(".meta.json")).write_text(json.dumps(
         {"title": script.plain(title), "body": script.plain(body), "sub": sub,
-         "channel": CHANNEL, **(meta or {})}, ensure_ascii=False), "utf-8")
+         "channel": CHANNEL, "sec": round(total), **(meta or {})},
+        ensure_ascii=False), "utf-8")
     return out
 
 
