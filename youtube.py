@@ -32,6 +32,7 @@ from pathlib import Path
 
 import tags as tags_          # `tags` is the local variable in description_for
 from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL, OUT_DIR,
+                    STOP_REASON, STOPPED,
                     YT_CLIENT_ID, YT_CLIENT_SECRET, YT_MIN_GAP_HOURS,
                     YT_PAUSED_UNTIL, YT_PER_DAY, YT_REFRESH_KEY,
                     YT_REFRESH_TOKEN, save_env)
@@ -367,6 +368,12 @@ def due() -> str:
     runner the rendered file dies with the job, so generating first and finding
     out afterwards that the schedule says no burns a story for nothing.
     """
+    # Same reason as everything else in this function, taken one step further:
+    # CI asks both platforms here, seconds in, and refuses the whole run when
+    # neither is due. Without this the stopped channel still installs ffmpeg and
+    # the deps before main.py tells it there was nothing to do.
+    if STOPPED:
+        return STOP_REASON
     if left := _pause_left():
         return f"paused for another {left:.1f}h (YT_PAUSED_UNTIL={YT_PAUSED_UNTIL})"
     s = status()

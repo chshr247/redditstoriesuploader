@@ -34,7 +34,8 @@ import script
 import source
 import voice
 from config import (CHANNEL, LOUD_AT, MIN_SEC, OUT_DIR, REVIEW_BATCH,
-                    TIKTOK_ENABLED, TIKTOK_PER_DAY, chan_file, chan_key)
+                    STOP_REASON, STOPPED, TIKTOK_ENABLED, TIKTOK_PER_DAY,
+                    chan_file, chan_key)
 
 log = logging.getLogger("main")
 
@@ -572,6 +573,15 @@ if __name__ == "__main__":
         assert main(1) == 0 and len(rendered) == 1 and not written, (rendered, written)
         print("part gating and title review ok")
         sys.exit(0)
+
+    # A stopped channel makes nothing at all - checked here rather than inside
+    # main(), so --park is covered by the same line: parking pays the LLM for a
+    # story and opens an issue for a human to answer, and both are wasted on a
+    # channel that cannot publish. Exit 1 is what CI already reads as "no video
+    # this run", so the workflow needs no change.
+    if STOPPED:
+        log.warning("%s - writing and rendering nothing", STOP_REASON)
+        sys.exit(1)
 
     # Park stories and render nothing. The review workflow runs this the
     # moment a `-` arrives, so the replacement story is written within the

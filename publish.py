@@ -58,7 +58,8 @@ import facts as facts_        # `facts` is the local variable in caption()
 import source
 import tags as tags_          # `tags` is the local variable in caption()
 from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL,
-                    LOCAL_DB_PATH, OUT_DIR, PART_GAP_HOURS, PART_WORD,
+                    LOCAL_DB_PATH, OUT_DIR, PART_GAP_HOURS, PART_WORD, STOPPED,
+                    STOP_REASON,
                     TIKTOK_BACKEND, TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET,
                     TIKTOK_ENABLED, TIKTOK_MIN_GAP_HOURS, TIKTOK_PER_DAY,
                     TIKTOK_PROXY, TIKTOK_PUBLIC, TIKTOK_REFRESH_KEY,
@@ -896,6 +897,10 @@ def due() -> str:
     shortly after. Two drafts forty minutes apart are two videos forty minutes
     apart, which is the thing the gap exists to prevent.
     """
+    # First line of the first gate: a stopped channel is refused before the
+    # count, the gap and the pause are even read.
+    if STOPPED:
+        return STOP_REASON
     if not TIKTOK_ENABLED:
         return f"TikTok is paused for this channel ({chan_key('TIKTOK_ENABLED')}=0)"
     # A warning and not a refusal, by decision - see _warn_cap().
@@ -935,6 +940,10 @@ def _due_part() -> str:
 
 def _blocked(meta: dict, force: bool = False) -> str:
     """Why this particular file may not go out now, empty if it may."""
+    # Ahead of everything, --force included: a stopped channel does not send a
+    # file left over in out/ from before the stop either.
+    if STOPPED:
+        return STOP_REASON
     # Ahead of --force and ahead of the part exemption below, both deliberately.
     # A paused channel that still delivers when a run is forced, or whenever a
     # story happens to be split, is not paused - and the part exemption is
@@ -1168,6 +1177,10 @@ if __name__ == "__main__":
     # these tests are most worth having - would otherwise fail every one of
     # them, and fail them with the wrong reason.
     _real_cap, INBOX_CAP = INBOX_CAP, 10_000
+    # And the same treatment for the stop, for the same reason: it sits ahead
+    # of every gate below, so on a stopped channel each of these would fail,
+    # and fail with the wrong reason. It gets its own block further down.
+    _real_stopped, STOPPED = STOPPED, False
     try:
         # A paused channel sends nothing at all: not an ordinary video, not a
         # part of a split story, and not on --force. The part is the one that
@@ -1394,6 +1407,19 @@ if __name__ == "__main__":
     # To stderr, not stdout. Every command's real output is read by something -
     # the workflow greps the caption out of --next and puts --stale straight
     # into an issue body - and a banner about the tests belongs in neither.
+    # The stop, restored and tested last: it is the outermost gate, ahead of
+    # the pause, the count, the clock and --force alike, so once it is back in
+    # place nothing else here would be measuring what it says it measures.
+    STOPPED = _real_stopped
+    try:
+        STOPPED = True
+        assert due() == STOP_REASON, due()
+        assert _blocked({}, force=True) == STOP_REASON, "--force must not lift a stop"
+        assert _blocked({"part": 2, "total": 2}) == STOP_REASON, (
+            "a part must not slip past a stop")
+    finally:
+        STOPPED = _real_stopped
+
     print("chunking, caption, allowance and status logic ok", file=sys.stderr)
 
     try:
@@ -1423,9 +1449,12 @@ if __name__ == "__main__":
             # so forcing it renders a video, spends the story and throws it
             # away. Measured 2026-08-07: the first force_tiktok dispatch did
             # exactly that to the English channel.
-            print("enabled" if TIKTOK_ENABLED else
+            # STOPPED counts as not enabled here, or force_tiktok would walk
+            # straight past the stop the same way it once walked past the pause.
+            ok = TIKTOK_ENABLED and not STOPPED
+            print("enabled" if ok else STOP_REASON if STOPPED else
                   f"paused ({chan_key('TIKTOK_ENABLED')}=0)")
-            sys.exit(0 if TIKTOK_ENABLED else 1)
+            sys.exit(0 if ok else 1)
         elif "--status" in sys.argv:
             with _db() as db:
                 rows = db.execute("SELECT file, publish_id, backend FROM tiktok "

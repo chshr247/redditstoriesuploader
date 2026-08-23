@@ -31,6 +31,17 @@ CHANNEL = OUTPUT_LANG
 # the untagged rows in seen.db, so nothing about it has to move.
 SUFFIX = "" if CHANNEL == DEFAULT_CHANNEL else f"_{CHANNEL.upper()}"
 
+# The English channel is stopped: its videos are not landing, so it writes,
+# renders and sends nothing until this goes False. Deliberately NOT
+# TIKTOK_ENABLED - that closes one destination and still pays the LLM, the TTS
+# and the render for a story, then leaves the file with nowhere to go. This is
+# the whole channel, checked before anything is generated and again before
+# anything is published. Flip to False to bring it back; no env key, because a
+# stop nobody can lift by accident is the point.
+EN_STOPPED = True
+STOPPED = EN_STOPPED and CHANNEL == "en"
+STOP_REASON = f"channel {CHANNEL} is stopped (EN_STOPPED)"
+
 
 def chan_key(key: str, shared: bool = False) -> str:
     """The env key this channel actually reads for `key`.
