@@ -26,7 +26,7 @@ import script
 from config import (FISH_API_KEY, FISH_BODY_CUE, FISH_CTA_CUE, FISH_MODEL,
                     FISH_SPEED, FISH_TITLE_CUE, FISH_VOICES_FEMALE,
                     FISH_VOICES_MALE, FISH_VOICE_HORROR, OUT_DIR, OUTPUT_LANG,
-                    SUBREDDITS_HORROR, TTS_BACKEND,
+                    SFX, SUBREDDITS_HORROR, TTS_BACKEND,
                     TTS_VOICE, VOICE_DEHISS_DB, VOICE_SPEEDUP, WHISPER_SIZE)
 
 TICKS_PER_SEC = 10_000_000
@@ -274,12 +274,18 @@ def _speedup(k: float = VOICE_SPEEDUP, dehiss: float = VOICE_DEHISS_DB) -> str:
 
 
 def _scaled(words: list[dict], offset: float = 0.0,
-            k: float = VOICE_SPEEDUP) -> list[dict]:
-    """Timings measured on the unsped takes, moved onto the finished track."""
-    if k == 1.0 and not offset:
+            k: float = VOICE_SPEEDUP, lead: float = 0.0) -> list[dict]:
+    """Timings measured on the unsped takes, moved onto the finished track.
+
+    `offset` is on the unsped clock and scales with everything else; `lead` is
+    the silence the finished track is delayed by, so it is added AFTER the
+    division - it is real seconds on the video's own timeline, not narration
+    that got faster.
+    """
+    if k == 1.0 and not offset and not lead:
         return words
-    return [{**w, "start": round((w["start"] + offset) / k, 3),
-             "end": round((w["end"] + offset) / k, 3)} for w in words]
+    return [{**w, "start": round((w["start"] + offset) / k + lead, 3),
+             "end": round((w["end"] + offset) / k + lead, 3)} for w in words]
 
 
 def duration(path) -> float:
@@ -470,19 +476,28 @@ def speak_parts(title: str, body: str, name: str, gap: float = 0.0,
     merged = OUT_DIR / f"{name}.mp3"
     pad = f"[0:a]apad=pad_dur={gap}[t];[t]" if gap else "[0:a]"
     chain = pad + "".join(f"[{i}:a]" for i in range(1, len(parts)))
+    # Silence in front of everything, the length of the whoosh render.py lays
+    # over the same opening: the sound finishes, then the first word. AFTER
+    # _speedup(), or the pause would be sped up along with the voice and come
+    # out shorter than the sound it is making room for.
+    lead = round(duration(SFX), 3) if SFX.exists() else 0.0
+    delay = f",adelay={int(lead * 1000)}:all=1" if lead else ""
     subprocess.run(
         ["ffmpeg", "-y", "-loglevel", "error",
          *[a for p in parts for a in ("-i", str(p))],
          "-filter_complex",
-         f"{chain}concat=n={len(parts)}:v=0:a=1{_speedup()}",
+         f"{chain}concat=n={len(parts)}:v=0:a=1{_speedup()}{delay}",
          str(merged)], check=True)
 
-    title_end = offset / VOICE_SPEEDUP
-    words = _scaled(words, offset)
+    title_end = offset / VOICE_SPEEDUP + lead
+    words = _scaled(words, offset, lead=lead)
     # the card's own highlight rides the sped-up title audio too, so these move
-    # by the same factor - they just have no offset, the card starts at zero
-    t_words = _scaled(t_words)
+    # by the same factor - and by the lead as well, because the card is on
+    # screen from frame zero while the voice it follows is not
+    t_words = _scaled(t_words, lead=lead)
     (OUT_DIR / f"{name}.json").write_text(json.dumps(words, ensure_ascii=False), "utf-8")
+    if lead:
+        log.info("%s: %.2fs of %s in front of the first word", name, lead, SFX.name)
     log.info("%s: title %.1fs + story %.1fs%s = %.1fs total%s", name, title_end,
              duration(b_mp3),
              f" + question {duration(parts[-1]):.1f}s" if cta else "",
@@ -529,6 +544,14 @@ if __name__ == "__main__":
     assert "treble" in _speedup(1.25, -7) and "treble" not in _speedup(1.25, 0)
     moved = _scaled([{"word": "w", "start": 1.0, "end": 2.0}], offset=3.0, k=2.0)[0]
     assert (moved["start"], moved["end"]) == (2.0, 2.5), moved
+    # The lead is silence on the FINISHED track, so it must not be divided by
+    # the speed-up along with the narration - half a whoosh of room is a whoosh
+    # playing over the first word.
+    led = _scaled([{"word": "w", "start": 1.0, "end": 2.0}], offset=3.0, k=2.0,
+                  lead=0.7)[0]
+    assert (led["start"], led["end"]) == (2.7, 3.2), led
+    # and with nothing to make room for, nothing moves
+    assert _scaled([{"start": 1.0, "end": 2.0}], k=1.0, lead=0.0)[0]["start"] == 1.0
     # ...and the filter really does shorten it by that factor, whatever rate the
     # take arrives at - the 24 kHz case is exactly what asetrate gets wrong when
     # it is not resampled first

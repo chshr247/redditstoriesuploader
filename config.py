@@ -473,6 +473,17 @@ BG_DIR = ROOT / "assets" / "bg"      # background clips, 1080x1920
 # Empty directory means no banner, which is the default - drop a file in and
 # every render from then on carries it. See render._pick_ad().
 AD_DIR = ROOT / "assets" / "ad"
+# The whoosh the title card arrives on. Here rather than in render.py because
+# BOTH ends need it: render mixes it in, and voice.py holds the narration back
+# by exactly its length so the sound finishes before the first word. Missing
+# file means no whoosh and no delay - the video is simply the way it was.
+# Trim it to the audible part before dropping it in: its length IS the pause in
+# front of the story, so a second of trailing silence is a second of nothing.
+SFX = ROOT / "assets" / "whoosh.mp3"
+# Background music, one subdirectory per mood: horror/ for the scary slot,
+# simple/ for everything else. Empty or missing means no music, the same way an
+# empty assets/ad means no banner. See render._pick_music().
+MUSIC_DIR = ROOT / "assets" / "music"
 OUT_DIR = ROOT / "out"               # audio, .ass, finished mp4
 DB_PATH = ROOT / "seen.db"           # sqlite: post_ids already turned into videos
 # State written by a machine that is NOT CI, and therefore kept where CI cannot

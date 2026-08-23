@@ -3,6 +3,10 @@
 Subtitles are ASS, not drawtext: one Dialogue line per word with a scale-up
 transition, which is the whole kinetic-typography effect. ffmpeg burns them
 in a single pass, so no frame ever reaches Python.
+
+The title is the exception: it is a drawn reddit post rather than text, so it
+arrives as a stack of PNGs from card.py and goes over the burnt-in subtitles
+as overlays. That is the only place a frame is built outside ffmpeg.
 """
 import hashlib
 import json
@@ -13,10 +17,10 @@ import statistics
 import subprocess
 from pathlib import Path
 
+import card
 import safety
-import script
-from config import (AD_DIR, BG_DIR, CHANNEL, CHANNELS, OUT_DIR, PART_WORD,
-                    SUBTITLE_FONT)
+from config import (AD_DIR, BG_DIR, CHANNEL, CHANNELS, MUSIC_DIR, OUT_DIR, SFX,
+                    SUBREDDITS_HORROR, SUBTITLE_FONT)
 from voice import duration as _dur
 
 W, H = 1080, 1920
@@ -50,34 +54,35 @@ AD_Y = 240                 # below the platform's top interface strip, and word
                            # cards sit dead centre, so this band is free
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp")
 
+# The whoosh runs under the card's first frames, and voice.py has already left
+# room for it - the narration starts where the sound ends, so the two are never
+# heard over each other. See config.SFX.
+SFX_VOL = 0.5              # against the narration, which is the thing being heard
+
+# --- background music ---
+# Barely audible on purpose. Measured 2026-08-23: the narration means -22.4 dB
+# and the tracks mean about -16, so the music arrives LOUDER than the voice and
+# the gain here is what puts it under. 0.045 is about -27 dB, landing the bed
+# some 20 dB below the speech - present in the pauses, gone under a sentence.
+# Turn this UP only after listening on a phone speaker: headphones flatter it.
+MUSIC_VOL = 0.045
+MUSIC_FADE = 2.0           # in after the whoosh, out over the closing question
+# Ducking. The narration is the key: every time the voice comes in the bed is
+# pushed down further, so the two never compete for the same instant. Without
+# it a constant -27 dB still fights consonants, which is what makes cheap
+# voice-overs sound muddy rather than quiet.
+MUSIC_DUCK = "threshold=0.03:ratio=8:attack=5:release=300"
+# Compressed only, and wav is left out deliberately. The masters sit in the
+# same folders untracked (see .gitignore), so counting them would give this
+# desk eight tracks where CI has four - and _pick_music() indexes into that
+# list, so the two machines would disagree about which track a story gets and
+# this one could pick a file that is not in the repo at all.
+MUSIC_EXT = (".mp3", ".m4a", ".opus", ".ogg")
+
 log = logging.getLogger(__name__)
 
-CARD_FONT_SIZE = 82
-# ASS stores colour as &HAABBGGRR. The card is near-black on near-white, so the
-# accent cannot come from SPEAKER_COLOURS below - those are picked to sit on
-# video and yellow on a white card is invisible. Deep red reads on paper white.
-CARD_TEXT = "&H00101010"
-CARD_BOX = "&H00F2F2F2"
-CARD_ACCENT = "&H001A1ACC"
-# What prompts.py guarantees every title rests on: a figure, or a line somebody
-# actually said. Those two are findable; the third (a named stake) is not.
-# Both quote shapes, because the channels use different ones - «» and “”.
-ACCENT = re.compile(r"\d+|«[^»]*»|“[^”]*”")
-CARD_POP_MS = 70           # how fast the card's highlight moves onto a word
-# How long the whole title holds before the pairs begin. It was one frame, on
-# the belief that TikTok lifts the cover from frame zero; it does not - uploads
-# land in the inbox and TikTok picks the cover itself, and on 2026-08-14 it
-# picked out of the first pair's window, so the cover read "Дочь разрушила"
-# instead of the title. Frame zero is verified correct, it is just not the frame
-# they take. Wide enough to catch that pick, short enough to stay a cover rather
-# than a still.
-COVER_SEC = 0.6
-# "Часть 2", set under the title inside the same box. Small and grey: it is a
-# label, not part of the hook, and it must not compete with the line above it
-# for the second the card has. It is drawn here and nowhere else in the video -
-# the narration never contains it, so it is never spoken.
-CARD_PART_SIZE = 48
-CARD_PART = "&H00787878"
+# The title card is not an ASS style any more - it is a stack of PNGs drawn by
+# card.py and laid over the footage here. See _card_chain().
 
 # ASS stores colour as &HAABBGGRR - byte order reversed from RGB. Narrator stays
 # white; each speaker takes the next colour the first time they say anything.
@@ -92,8 +97,6 @@ SPEECH_STYLES = "\n".join(
     f"Style: Speech{i},{FONT},{FONT_SIZE},{c},&H000000FF,&H00000000,"
     "&H80000000,-1,0,0,0,100,100,0,0,1,8,3,5,80,80,0,1"
     for i, c in enumerate(SPEAKER_COLOURS))
-# BorderStyle 3 paints an opaque box in OutlineColour - a title card with no
-# image files and no PIL. Outline doubles as the box padding.
 ASS_HEADER = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {W}
@@ -105,7 +108,6 @@ ScaledBorderAndShadow: yes
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Main,{FONT},{FONT_SIZE},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,8,3,5,80,80,0,1
 {SPEECH_STYLES}
-Style: Card,{FONT},{CARD_FONT_SIZE},{CARD_TEXT},&H000000FF,{CARD_BOX},{CARD_BOX},-1,0,0,0,100,100,0,0,3,24,0,5,120,120,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -119,94 +121,6 @@ def _ts(sec: float) -> str:
     m, cs = divmod(cs, 6000)
     s, cs = divmod(cs, 100)
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
-
-
-def _sung(words: list[dict], title_end: float) -> list[tuple[float, float, str]]:
-    """(start, end, card text) for the title card: a cover, then windows.
-
-    The opening COVER_SEC carry the whole title and nothing else. TikTok picks
-    the cover of an inbox draft itself, and it picks out of the opening - so the
-    opening has to be the finished line rather than the first two words of it.
-    It was one frame until 2026-08-14, on the belief that frame zero is what
-    gets lifted; frame zero is right and is not what they took.
-
-    Everything after it is a PAIR of words, both in CARD_TEXT, with whichever
-    one is being spoken lit in CARD_ACCENT. The pair holds still while the
-    accent walks from its first word to its second, and only once the second
-    has been spoken does the next pair arrive. A sliding window that stepped
-    one word at a time was the first attempt and reads worse: every word moves
-    on every step, so nothing on the card is ever a fixed point for the eye.
-    Here the text moves once per two words and the colour does the rest.
-
-    The card used to hold the whole title static with one word coloured, which
-    put movement where the eye already was but left three seconds of a still
-    block of text around it - read in about a second, then two more of nothing
-    happening, which is most of the hook spent on a still image.
-
-    What that trades away is the reader who is faster than the narrator: the
-    end of the title is no longer on screen to be finished early. The cover
-    frame is where the whole line still exists.
-
-    Words are grouped exactly as the story's cards are, so a pair is never
-    spent on "в" alone - see _group(). An odd title leaves its last unit
-    standing by itself, which is a pair with nothing left to fill it.
-
-    One Dialogue event per lit word rather than one animated line. An ASS
-    override block applies from where it sits to the END of the line, so
-    per-word \\t animations are inherited by every word after them and
-    accumulate - the first attempt lit the whole tail of the title instead of
-    one word. Static colour on separate events has no such reach.
-
-    Timings come from the title's own take, so the accent follows the actual
-    voice rather than an estimate: a word the narrator lingers on stays lit.
-    """
-    grouped = _group(words)
-    clean = []
-    for i, w in enumerate(grouped):
-        text = safety.mask(re.sub(r"[{}\\]", "", w["word"]))
-        if i == len(grouped) - 1:
-            # _cued() ends the take on a full stop so the title does not run
-            # into the story; the card never showed that stop and still must not
-            text = re.sub(r"[.!?]+$", "", text)
-        if text:
-            clean.append((w["start"], text))
-    if not clean:
-        return []
-
-    # In the same centiseconds _ts() will round it to, so the cover and the
-    # first pair cannot both be live on any frame - two Dialogue events on one
-    # layer would draw over each other. Never past the card itself: a title
-    # shorter than COVER_SEC keeps the cover and drops every window below.
-    cover_end = round(min(COVER_SEC, title_end), 2)
-    out = [(0.0, cover_end, " ".join(t for _, t in clean))]
-    for i, (start, _) in enumerate(clean):
-        end = clean[i + 1][0] if i + 1 < len(clean) else title_end
-        # the cover has already run, so the first pair opens after it
-        start = max(start, cover_end)
-        if end <= start:
-            continue
-        # the pair this unit belongs to, whether it opens or closes it
-        lo = i - i % 2
-        out.append((start, end, " ".join(
-            f"{{\\c{CARD_ACCENT}&}}{t}{{\\c{CARD_TEXT}&}}" if lo + n == i else t
-            for n, (_, t) in enumerate(clean[lo:lo + 2]))))
-    return out
-
-
-def _accent(text: str) -> str:
-    """Colour the figure or the quoted line the title is built on.
-
-    A digit is the one thing the eye catches while scrolling, and until now it
-    was set in exactly the same near-black as the prepositions around it. The
-    title rule in prompts.py already guarantees one of these is present, so
-    this reads what the prompt promised rather than guessing at emphasis.
-
-    Returns the text unchanged when neither is there - a title resting on a
-    named stake has nothing to colour, and colouring a random word instead
-    would tell the eye to catch the wrong thing.
-    """
-    return ACCENT.sub(
-        lambda m: f"{{\\c{CARD_ACCENT}&}}{m.group(0)}{{\\c{CARD_TEXT}&}}", text)
 
 
 def _styles(words: list[dict]) -> dict:
@@ -251,51 +165,13 @@ def _group(words: list[dict], min_chars: int = 3, max_words: int = 2,
     return out
 
 
-def _part_line(part: int, channel: str = CHANNEL) -> str:
-    """"\\NЧасть 2", small and grey, or "" for an ordinary video.
+def build_ass(words: list[dict], path) -> None:
+    """One word card at a time, over whatever the footage is doing.
 
-    A second line inside the title card's own box rather than a card of its
-    own: the title sets on one, two or three lines depending on its length, so
-    anything positioned under it by hand would sit on top of it half the time.
-    \\N keeps it attached to whatever the title turned out to be.
-
-    Everything after \\N is re-styled, and nothing resets at the end, which is
-    fine - it IS the end of the line.
-    """
-    if part < 1:
-        return ""
-    word = PART_WORD.get(channel, PART_WORD["en"])
-    return rf"\N{{\fs{CARD_PART_SIZE}\c{CARD_PART}&}}{word} {part}"
-
-
-def build_ass(words: list[dict], path, title: str = "", title_end: float = 0,
-              title_words: list[dict] | None = None, part: int = 0) -> None:
-    """Title card for the intro, then one word card at a time.
-
-    `part` writes "Часть N" under the title, on the card and only on the card.
-    It is not in `title`, so the voice never reads it - which is the point: the
-    marker tells a scrolling viewer this is the middle of something, and three
-    syllables of it in front of the hook is dead air.
+    The title is not here any more: it is a drawn post, laid over the video as
+    images rather than set as text - see card.py.
     """
     lines = [ASS_HEADER]
-    if title and title_end > 0:
-        # No scale-up on the card. It used to ride the first event, back when
-        # that event was the card arriving; the card is now the first frame of
-        # the video, so there is nothing for it to arrive over - and a cover
-        # frame caught at 85% is a cover frame with the title cropped small.
-        marker = _part_line(part)
-        cards = _sung(title_words, title_end) if title_words else []
-        if not cards:
-            # No timings for the title - an older render, or an aligner that
-            # came back empty. The card still has to carry emphasis, so it
-            # falls back to colouring the figure or the quoted line.
-            # the title reaches here straight from the model, cues and stray
-            # accents and all - plain() is what keeps both off the card
-            cards = [(0.0, title_end,
-                      _accent(safety.mask(script.plain(re.sub(r"[{}\\]", "", title)))))]
-        for start, end, text in cards:
-            lines.append(
-                f"Dialogue: 0,{_ts(start)},{_ts(end)},Card,,0,0,0,,{text}{marker}")
     styles = _styles(words)
     words = _group(words)
     for i, w in enumerate(words):
@@ -605,14 +481,94 @@ def _ad_chain(idx: int, dur: float, wide: int) -> str:
             f"[base][ad]overlay=(W-w)/2:{AD_Y}:format=auto:eof_action=pass[v]")
 
 
+def _pick_music(key: str = "", sub: str = "", channel: str = CHANNEL) -> Path | None:
+    """A track for this story's mood, or None when the folder is empty.
+
+    The mood is the subreddit's: a horror story gets the horror bed, everything
+    else gets the ordinary one. Same test voice.py uses to pin the horror
+    narrator, so the voice and the music can never disagree about what kind of
+    story this is.
+
+    Chosen from the story like the footage, and for the same reason - two runs
+    of the same story agree without having met - but off a DIFFERENT seed. Left
+    on the same one, a story would always pair track 3 with clip 3 and the two
+    would repeat as a set.
+    """
+    folder = MUSIC_DIR / ("horror" if sub in SUBREDDITS_HORROR else "simple")
+    tracks = sorted(p for p in folder.glob("*") if p.suffix.lower() in MUSIC_EXT)
+    if not tracks:
+        return None
+    if not key:
+        return random.choice(tracks)
+    seed = int(hashlib.md5(f"music:{key}".encode()).hexdigest()[:8], 16)
+    offset = CHANNELS.index(channel) if channel in CHANNELS else 0
+    return tracks[(seed + offset) % len(tracks)]
+
+
+def _music_chain(idx: int, spoken: str, dur: float, at: float) -> list[str]:
+    """Filter graph laying a ducked music bed under `spoken` -> [a].
+
+    The narration is needed twice - once as what you hear, once as the key the
+    compressor listens to - so it is split rather than referenced twice: a
+    filter output feeds exactly one input, and wiring it to two is a graph
+    ffmpeg refuses to build.
+
+    adelay before the fade, not `afade` with a late start: a fade that begins
+    at 0.7s plays the first 0.7s at FULL level and only then starts moving.
+    Delaying the stream puts real silence there instead, which is where the
+    whoosh goes.
+    """
+    return [
+        f"[{idx}:a]volume={MUSIC_VOL},adelay={int(at * 1000)}:all=1,"
+        f"afade=t=in:st={at:.2f}:d={MUSIC_FADE},"
+        f"afade=t=out:st={max(0.0, dur - MUSIC_FADE):.2f}:d={MUSIC_FADE}[mus]",
+        f"{spoken}asplit=2[sp][key]",
+        f"[mus][key]sidechaincompress={MUSIC_DUCK}[duck]",
+        # duration=first ends on the narration: the bed is looped and would
+        # otherwise decide how long the video is
+        "[sp][duck]amix=inputs=2:duration=first:normalize=0[a]",
+    ]
+
+
+def _card_chain(idx: int, cards: list[tuple[float, float, Path]],
+                src: str, out: str) -> str:
+    """Lay one card PNG per lit word over `src`, each on its own window -> `out`.
+
+    `enable` rather than one animated file: ffmpeg reads an APNG's per-frame
+    delays as a fixed rate and plays the whole card in a blink, and these
+    windows are not a rate - they are the narrator's own word timings.
+
+    Every input is a still, so `enable` costs a decode of one frame each and
+    nothing per video frame it is hidden for. loop=1 on each input holds that
+    frame for the whole window instead of ending after one video frame.
+
+    The stack goes on AFTER the story's subtitles are burnt in, because it
+    covers the middle of the frame where the word cards live - not that the two
+    ever share a moment, the story starts where the card leaves.
+    """
+    if not cards:
+        return f"[{src}]null[{out}]"
+    chain, cur = [], src
+    for i, (start, end, _) in enumerate(cards):
+        nxt = out if i == len(cards) - 1 else f"cd{i}"
+        chain.append(f"[{cur}][{idx + i}:v]overlay=0:0:format=auto:"
+                     f"enable='between(t,{start},{end})'[{nxt}]")
+        cur = nxt
+    return ";".join(chain)
+
+
 def render(mp3, words: list[dict], name: str, bg=None,
            title: str = "", title_end: float = 0, key: str = "",
-           title_words: list[dict] | None = None, ad=None, part: int = 0):
+           title_words: list[dict] | None = None, ad=None, part: int = 0,
+           sub: str = ""):
     """Burn subtitles over a background clip and mux the narration.
 
     `key` identifies the STORY rather than the file: out/<id>_en.mp4 and
     out/<id>.mp4 are the same story on two channels, and that is exactly the
     pair that must not share footage.
+
+    `sub` is the subreddit, and it reaches exactly one decision: which music
+    folder the bed comes from. A story with no sub gets the ordinary one.
 
     `part` is which video of a split story this is, 0 for an ordinary one. It
     reaches the title card and nothing else.
@@ -622,7 +578,9 @@ def render(mp3, words: list[dict], name: str, bg=None,
     dur = _dur(mp3)
     ass = OUT_DIR / f"{name}.ass"
     out = OUT_DIR / f"{name}.mp4"
-    build_ass(words, ass, title, title_end, title_words, part)
+    build_ass(words, ass)
+    cards = (card.build(title_words or [], title, title_end, name, part)
+             if title and title_end > 0 else [])
 
     scores = _motion(bg)
     bg_dur = _dur(bg)
@@ -640,12 +598,12 @@ def render(mp3, words: list[dict], name: str, bg=None,
     # join streams that disagree about it, and with one branch it costs nothing.
     chain = (f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
              f"crop={W}:{H},setsar=1,hflip,fps={FPS}")
-    # the banner goes on last, over the burnt-in subtitles, so whatever it was
-    # paid for is never half-covered by a word card
-    last = "[base]" if ad else "[v]"
+    # the banner goes on last, over the burnt-in subtitles and over the title
+    # card, so whatever it was paid for is never half-covered by either
+    last = "base" if ad else "v"
     if cut is None:
         inputs = ["-ss", str(seek), "-stream_loop", "-1", "-i", str(bg)]
-        video, audio = f"[0:v]{chain},subtitles={ass.name}{last}", "1:a"
+        video, audio = f"[0:v]{chain},subtitles={ass.name}[sub]", "1:a"
     else:
         # Two reads of the same file, joined where the title card leaves and
         # the story starts. Subtitles go on AFTER the join, so the word cards
@@ -655,20 +613,60 @@ def render(mp3, words: list[dict], name: str, bg=None,
                   "-ss", str(cut), "-stream_loop", "-1", "-i", str(bg)]
         video = (f"[0:v]{chain}[hook];[1:v]{chain}[rest];"
                  f"[hook][rest]concat=n=2:v=1:a=0[cat];"
-                 f"[cat]subtitles={ass.name}{last}")
+                 f"[cat]subtitles={ass.name}[sub]")
         audio = "2:a"
 
-    # after the mp3, so the audio input keeps the index the map above expects
+    # inputs are the backgrounds, then the mp3, then the card frames, then the
+    # banner - and everything after the mp3 has to keep the index `audio` above
+    # was written for, so nothing is ever inserted before it
+    nbg = 1 if cut is None else 2
+    # loop=1 with no -t: the still is held for as long as the graph asks, and
+    # `enable` is what decides how long that is
+    card_in = [a for _, _, p in cards
+               for a in ("-loop", "1", "-i", str(p))]
+    video += ";" + _card_chain(nbg + 1, cards, "sub", last)
+
     ad_in = _ad_input(ad) if ad else []
     if ad:
-        # inputs are the backgrounds, then the mp3, then the banner
-        video += ";" + _ad_chain((1 if cut is None else 2) + 1, dur, _ad_size(ad))
+        video += ";" + _ad_chain(nbg + 1 + len(cards), dur, _ad_size(ad))
+
+    # Audio inputs come after every video one, in the order they are appended
+    # below. `spoken` is whatever the voice has become so far - the bare mp3, or
+    # the mp3 with the whoosh already in it - and each stage hands the next one
+    # its label.
+    aidx = nbg + 1 + len(cards) + bool(ad)
+    spoken = f"[{audio}]"
+
+    # normalize=0, or amix halves the narration to make room for half a second
+    # of whoosh and the whole video comes out quiet. duration=first ends the
+    # mix on the narration, so a long sfx can never extend the track. It plays
+    # from zero because that is where the card arrives - no delay to set.
+    sfx_in = []
+    if SFX.exists() and cards:
+        sfx_in = ["-i", str(SFX)]
+        video += (f";[{aidx}:a]volume={SFX_VOL}[sfx];"
+                  f"{spoken}[sfx]amix=inputs=2:duration=first:normalize=0[said]")
+        spoken, audio = "[said]", "[said]"
+        aidx += 1
+
+    music = _pick_music(key, sub)
+    music_in = []
+    if music:
+        # -stream_loop, because a 90 second bed under a 2 minute horror story
+        # would otherwise simply stop halfway and leave the rest bare
+        music_in = ["-stream_loop", "-1", "-i", str(music)]
+        video += ";" + ";".join(_music_chain(
+            aidx, spoken, dur, _dur(SFX) if SFX.exists() else 0.0))
+        audio = "[a]"
 
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
         *inputs,
         "-i", str(mp3),
+        *card_in,
         *ad_in,
+        *sfx_in,
+        *music_in,
         "-filter_complex", video,
         "-map", "[v]", "-map", audio, "-t", f"{dur:.3f}", "-r", str(FPS),
         # The ceiling is the point, not the CRF. crf 23 alone let high-motion
@@ -694,6 +692,12 @@ def render(mp3, words: list[dict], name: str, bg=None,
     log.info("%s: %.1f sec from %s at %.1fs%s%s", out.name, dur, bg.name, seek,
              f", cutting to %.1fs at %.1fs" % (cut, title_end) if cut else "",
              f", banner {ad.name} from {AD_AT:.0f}s" if ad else "")
+    if cards:
+        log.info("%s: title card over %.1fs in %d frames%s", out.name, title_end,
+                 len(cards), f", {SFX.name} under it" if sfx_in else "")
+    if music:
+        log.info("%s: %s/%s ducked under the voice at %.3f", out.name,
+                 music.parent.name, music.name, MUSIC_VOL)
     return out
 
 
@@ -811,31 +815,60 @@ if __name__ == "__main__":
     assert _lum(AD_AT + AD_FADE + 0.2) < 40, "the banner did not start from frame one"
     assert _lum(AD_AT + 1.5) > 200, "the banner never faded in"
 
-    # "Часть N" is the renderer's alone: it is on the card and it is in no
-    # narrated text anywhere, which is the only reason it can be shown without
-    # being read out. Ahead of the mp3 gate below on purpose - this needs no
-    # audio and it is the assertion that catches the marker leaking into the
-    # voice track, so it must run even when out/ is empty.
-    _tw = [{"word": "Соседка", "start": 0.0, "end": 0.7},
-           {"word": "прислала", "start": 0.7, "end": 1.2}]
+    # The card is images now, so the ass file must carry nothing of it - a
+    # leftover Card style would draw its own box UNDER the png and show as a
+    # pale border around it. Ahead of the mp3 gate on purpose: it needs no
+    # audio, so it must run even when out/ is empty.
+    assert "Card" not in ASS_HEADER, ASS_HEADER
     _ass = OUT_DIR / "_check_part.ass"
-    build_ass([], _ass, "Соседка прислала счёт", 1.5, _tw, part=2)
-    _txt = _ass.read_text("utf-8")
-    # one window per word, plus the cover in front of them
-    assert _txt.count(f"\\N{{\\fs{CARD_PART_SIZE}") == len(_tw) + 1, _txt
-    assert f"{PART_WORD['ru']} 2" in _txt, _txt
-    # ...on every event of the card, so it does not blink with the lit word
-    for _line in _txt.splitlines():
-        if _line.startswith("Dialogue") and ",Card," in _line:
-            assert _line.endswith(f"{PART_WORD['ru']} 2"), _line
-    # and an ordinary video carries no marker at all
-    build_ass([], _ass, "Соседка прислала счёт", 1.2, _tw)
-    assert "\\N{\\fs" not in _ass.read_text("utf-8")
-    # the fallback card - no timings from the aligner - must carry it too, or a
-    # part rendered without word timings would silently lose its marker
-    build_ass([], _ass, "Соседка прислала счёт", 1.2, None, part=3)
-    assert f"{PART_WORD['ru']} 3" in _ass.read_text("utf-8")
+    build_ass([], _ass)
+    assert "Dialogue" not in _ass.read_text("utf-8")
     _ass.unlink()
+
+    # One overlay per card frame, chained, ending on the label the rest of the
+    # graph expects. The window is what carries the timing - an overlay wired
+    # up without `enable` would hold the first frame for the whole video.
+    _cards = [(0.0, 0.7, Path("a.png")), (0.7, 1.4, Path("b.png"))]
+    _ch = _card_chain(3, _cards, "sub", "v")
+    assert _ch.count("overlay=") == 2, _ch
+    assert _ch.startswith("[sub][3:v]"), _ch
+    assert "[4:v]" in _ch and _ch.endswith("[v]"), _ch
+    assert _ch.count("enable=") == 2, _ch
+    assert "between(t,0.0,0.7)" in _ch and "between(t,0.7,1.4)" in _ch, _ch
+    # ...and with no card at all the graph still has to reach [v], or ffmpeg
+    # fails on a filter output nothing maps to
+    assert _card_chain(3, [], "sub", "v") == "[sub]null[v]"
+
+    # The bed is split off the narration and fed back as the compressor's key:
+    # one filter output cannot feed two inputs, and forgetting the split is a
+    # graph ffmpeg refuses rather than a quiet mistake.
+    _mc = ";".join(_music_chain(5, "[said]", 60.0, 0.7))
+    assert "[said]asplit=2[sp][key]" in _mc, _mc
+    assert f"sidechaincompress={MUSIC_DUCK}" in _mc, _mc
+    assert _mc.endswith("[a]"), _mc
+    # silence first, THEN the fade - a fade starting at 0.7 would play the
+    # whoosh's own 0.7 seconds at full level before it began moving
+    assert _mc.index("adelay=700") < _mc.index("afade=t=in:st=0.70"), _mc
+    # and the bed is gone before the video is
+    assert "afade=t=out:st=58.00" in _mc, _mc
+
+    # Mood follows the subreddit, exactly as the horror voice does.
+    if (MUSIC_DIR / "simple").is_dir() and (MUSIC_DIR / "horror").is_dir():
+        _horror_sub = (SUBREDDITS_HORROR or ["nosleep"])[0]
+        assert _pick_music("k", _horror_sub).parent.name == "horror"
+        assert _pick_music("k", "AITAH").parent.name == "simple"
+        # same story, same track, on any machine and any run - no state
+        assert _pick_music("k", "AITAH") == _pick_music("k", "AITAH")
+        # ...and the music seed is not the footage seed, or a story would keep
+        # arriving as the same clip-and-track pair
+        _pairs = {(_pick_bg(k).name, _pick_music(k, "AITAH").name)
+                  for k in ("a", "b", "c", "d", "e", "f")}
+        assert len({b for b, _ in _pairs}) > 1 or len({m for _, m in _pairs}) > 1
+        # Only what ships is counted. The wav masters live in these folders
+        # untracked, and a desk that counted them would index a different list
+        # than CI - the same story would get a different track per machine.
+        assert all(p.suffix != ".wav" for p in MUSIC_DIR.rglob("*")
+                   if p.suffix in MUSIC_EXT), "wav is back in MUSIC_EXT"
 
     mp3 = OUT_DIR / "_selftest.mp3"
     assert mp3.exists(), "run `python voice.py` first"
@@ -843,75 +876,6 @@ if __name__ == "__main__":
 
     def _w(t, s, e):
         return {"word": t, "start": s, "end": e}
-
-    def _bare(card: str) -> str:
-        """A card's words with every ASS override stripped - what is on screen."""
-        return re.sub(r"\{[^}]*\}", "", card).strip()
-
-    # The accent must find what prompts.py promised, and nothing else. Colour
-    # is reset to the Card style's own primary, so the two are asserted equal
-    # here - drift between them would tint the rest of the title.
-    assert f",{CARD_TEXT}," in ASS_HEADER, "the card style stopped using CARD_TEXT"
-    assert _accent("счёт на 80000 за потоп").count(CARD_ACCENT) == 1
-    assert _accent("счёт на 80000 за потоп").endswith("за потоп")
-    assert "80000" in _accent("счёт на 80000 за потоп")
-    assert _accent("сказала «этот ребёнок не наш»").count(CARD_ACCENT) == 1
-    assert _accent("said “that baby isn't ours”").count(CARD_ACCENT) == 1
-    # a title resting on a named stake has nothing to catch, and must be left be
-    assert _accent("Мать парня звала меня на обед") == "Мать парня звала меня на обед"
-    # every override we open is closed again, or the rest of the card changes colour
-    for t in ("счёт на 80000 за потоп", "сказала «этот ребёнок не наш»"):
-        assert _accent(t).count(CARD_ACCENT) == _accent(t).count(CARD_TEXT)
-
-    # The opening is the whole title - that is what TikTok lifts as the cover,
-    # so it must carry the finished line and not the first window.
-    tw = [_w("Соседка", 0.0, 0.6), _w("прислала", 0.7, 1.1), _w("счёт.", 1.2, 1.7)]
-    cards = _sung(tw, 2.0)
-    cover, windows = cards[0], cards[1:]
-    assert cover[0] == 0.0 and cover[2] == "Соседка прислала счёт", cover
-    assert CARD_ACCENT not in cover[2], "the cover is not lit, it is read"
-    # ...and it holds long enough that TikTok's own pick lands inside it. One
-    # frame was the bug: the pick came out of the first pair instead.
-    assert cover[1] == COVER_SEC > 3 / FPS, cover
-    # after it, one event per word that still has room left
-    assert len(windows) == len(tw), windows
-    # a title shorter than the cover is all cover and no windows - the cover
-    # must not outlive the card it opens
-    assert _sung([_w("Съехали", 0.0, 0.3)], 0.4) == [(0.0, 0.4, "Съехали")]
-    # exactly ONE word is lit at a time. The first attempt animated a single
-    # line and every word inherited the ones before it, so the whole tail of
-    # the title lit up at once - this is the assertion that would have caught it.
-    for start, end, text in windows:
-        assert text.count(CARD_ACCENT) == 1, text
-    # the cover owns the opening, so the first pair starts after it
-    assert [round(s, 2) for s, _, _ in windows] == [COVER_SEC, 0.7, 1.2], windows
-    assert [round(e, 2) for _, e, _ in windows] == [0.7, 1.2, 2.0], windows
-    # The pair HOLDS while the accent walks across it - both events show the
-    # same two words. A sliding window would have moved the text every step,
-    # and this is the assertion that tells the two apart.
-    assert windows[0][2] == f"{{\\c{CARD_ACCENT}&}}Соседка{{\\c{CARD_TEXT}&}} прислала"
-    assert windows[1][2] == f"Соседка {{\\c{CARD_ACCENT}&}}прислала{{\\c{CARD_TEXT}&}}"
-    assert _bare(windows[0][2]) == _bare(windows[1][2]), "the pair must not move"
-    # ...and only then does the next pair arrive. An odd title leaves its last
-    # word standing alone - with no trailing space, which libass would set as a
-    # visible gap on a centred line
-    assert windows[2][2] == f"{{\\c{CARD_ACCENT}&}}счёт{{\\c{CARD_TEXT}&}}"
-    # never more than a pair on screen, however the words grouped
-    for _, _, text in windows:
-        assert len(_bare(text).split()) <= 4, text
-    # no event may overlap the cover: two Card events live on one frame draw
-    # over each other, and the cover is the one that loses
-    assert all(_ts(s) >= _ts(cover[1]) for s, _, _ in windows), windows
-    # a one-letter word must not be lit on its own, exactly as it gets no card
-    # of its own in the story - _group() is what both the card and the story go
-    # through, so "в" arrives glued to the word it belongs with
-    narrow = _sung([_w("Тёща", 0.0, 0.7), _w("в", 0.7, 0.8),
-                    _w("нашей", 0.8, 1.3), _w("квартире.", 1.3, 1.9)], 2.1)
-    assert len(narrow) == 4, narrow          # cover + three events, not four
-    assert f"{{\\c{CARD_ACCENT}&}}в нашей{{\\c{CARD_TEXT}&}}" in narrow[2][2], narrow[2]
-    assert _bare(narrow[1][2]) == _bare(narrow[2][2]) == "Тёща в нашей", narrow
-    # timings absent: the card must still render, via the figure/quote accent
-    assert _sung([], 3.0) == []
 
     wide = _group([_w("через", 0, 1), _w("двадцать", 1, 2), _w("минут", 2, 3)])
     assert all(len(c["word"]) <= 14 for c in wide), wide
@@ -971,11 +935,49 @@ if __name__ == "__main__":
                         "-c:v", "libx264", "-preset", "ultrafast", str(bg)], check=True)
         print(f"no clips in {BG_DIR}, using generated test pattern")
 
-    out = render(mp3, words, "_selftest", bg=bg)
+    # With a title, so the overlay stack is exercised for real: the graph is
+    # built by hand here and a wrong input index or a dangling label is a
+    # failed ffmpeg run, not a wrong picture, so this is what catches it.
+    _title = "Соседка прислала счёт на 80000 за потоп"
+    _tw = [{"word": w, "start": round(i * 0.45, 2), "end": round(i * 0.45 + 0.4, 2)}
+           for i, w in enumerate(_title.split())]
+    _tend = round(_tw[-1]["end"] + 0.3, 2)
+    out = render(mp3, words, "_selftest", bg=bg, title=_title,
+                 title_end=_tend, title_words=_tw)
     probe = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
          "stream=width,height", "-of", "csv=p=0", str(out)],
         capture_output=True, text=True, check=True).stdout.strip()
     assert probe == f"{W},{H}", f"wrong resolution: {probe}"
     assert abs(_dur(out) - _dur(mp3)) < 1.0, "video length does not match audio"
+
+    def _centre(at: float, scale: float = 1.0) -> int:
+        """Mean brightness of the card's left gutter at `scale`, 0-255.
+
+        The gutter rather than the middle: the middle is type, which is white
+        whatever is behind it, while this strip is flat card - dark while the
+        card is up, and whatever the gameplay is doing once it leaves. It sits
+        inside the padding at the card's own vertical centre, which is the one
+        spot that stays blank however tall the title set.
+
+        `scale` follows the pop: the card grows out of the centre, so its left
+        edge is somewhere else entirely on those first two frames.
+        """
+        return subprocess.run(
+            ["ffmpeg", "-v", "error", "-ss", f"{at}", "-i", str(out), "-vf",
+             f"crop=20:200:{round((W - card.CARD_W * scale) / 2 + 8 * scale)}:"
+             f"{H // 2 - 100},scale=1:1,format=gray",
+             "-frames:v", "1", "-f", "rawvideo", "-"],
+            capture_output=True, check=True).stdout[0]
+
+    # The card is the first frame of the video, arriving mid-pop - scaled down
+    # and already on screen, never absent.
+    assert _centre(0.02, card.POP_SCALES[0]) < 45, "no card on the opening frame"
+    # ...and where the settled card's edge will be, there is still footage,
+    # which is the assertion that catches a pop that never scaled anything
+    assert _centre(0.02) != _centre(_tend / 2), "the pop frame is full size"
+    assert _centre(_tend / 2) < 45, "the card went away mid-title"
+    # ...and it leaves the moment the narration reaches the story, or the
+    # word cards would be reading out from behind it
+    assert _centre(_tend + 1.0) != _centre(0.05), "the card outlived the title"
     print(f"ok: {out.name}, {_dur(out):.1f}s, {probe}")

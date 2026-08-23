@@ -4,4 +4,5 @@ python-dotenv==1.1.1 # .env
 # reddit: не нужен — pullpush.io тянем stdlib'ом (urllib), см. source.py
 faster-whisper==1.2.1  # word timings for the fish backend (edge needs none)
 num2words==0.5.14    # цифры -> слова: fish читает "5" как "five"
+pillow==12.1.0       # рисует карточку-пост: ASS умеет только текст в коробке
 pymorphy3==2.0.6     # склонение числительных: "после пяти", не "после пять"

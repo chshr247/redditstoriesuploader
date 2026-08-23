@@ -318,7 +318,11 @@ jobs:
         if: steps.gate.outputs.go == 'true'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core
+          # noto-color-emoji is the title card's, not the subtitles': the card
+          # carries a row of reactions and an avatar, and without the font
+          # card.py draws neither - a post with an empty grey circle for a
+          # poster, which is the one detail that says "this is a screenshot".
+          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core fonts-noto-color-emoji
           # Arial Black keeps the look identical to local renders; its installer
           # wants an EULA answer and occasionally 404s, so it must not be fatal
           echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true \

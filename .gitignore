@@ -17,6 +17,11 @@ assets/bg/
 # Ad banners, same reason as the backgrounds: a ProRes 4444 banner is 260 MB
 # for ten seconds, and this repo is public.
 assets/ad/
+# Music is tracked - unlike the footage above - because it is small once it is
+# mp3 and CI has to have it: no music in the checkout means every published
+# video silently loses its bed. The masters are not: eight 90-second wavs are
+# 131 MB against 11 MB of mp3, and nothing in the pipeline reads them.
+assets/music/**/*.wav
 .env.*
 !.env.example
 # State the local TikTok poster writes. Deliberately NOT tracked: seen.db

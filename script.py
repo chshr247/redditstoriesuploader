@@ -843,8 +843,8 @@ def _split(raw: str, fallback_gender: str = "male",
         head, _, body = rest.strip().partition("\n")
         title = head
         log.warning("no TITLE: tag, taking the first line")
-    # The title keeps its cues, exactly as the body does. It is burned on
-    # screen, but nothing burns it raw: build_ass() runs plain() over it, the
+    # The title keeps its cues, exactly as the body does. It is drawn on
+    # screen, but nothing draws it raw: card.build() runs plain() over it, the
     # card's word timings come from the aligner, which works on plain text, and
     # the meta file publishing reads is written plain. Stripping here instead
     # cost the title card the only delivery the model could give it.
