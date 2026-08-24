@@ -1264,7 +1264,21 @@ if __name__ == "__main__":
     _real_sent, _real_since = sent_today, _since_last_h
     _real_per_day, _real_gap = TIKTOK_PER_DAY, TIKTOK_MIN_GAP_HOURS
     _real_enabled = TIKTOK_ENABLED
+    # ...and the clock with them, because eta() counts forward from NOW across a
+    # grid that stops at 23:37 UTC. Read at 15:00 the fourth video of the day is
+    # already tomorrow's, so is the fifth, and "the count must roll the day"
+    # failed - every evening, on every channel, in front of every CLI command
+    # there is. A green run with no TikTok in it for eight hours a day
+    # (2026-08-24, ru, run 32787877284). A self-check must not depend on the
+    # minute it is read at; morning is simply a time all of these hold.
+    # ponytail: the stdlib clock itself, restored below - the whole module is
+    # single-threaded here and nothing else runs inside the block. Give eta() a
+    # `now=` argument instead if anything ever reads the clock alongside it.
+    _real_clock = time.time
+    _MORNING = datetime.datetime(2026, 1, 1, 9, 15,
+                                 tzinfo=datetime.timezone.utc).timestamp()
     try:
+        time.time = lambda: _MORNING
         TIKTOK_ENABLED = True
         TIKTOK_PER_DAY, TIKTOK_MIN_GAP_HOURS = 4, 3
         sent_today = lambda: 0                              # noqa: E731
@@ -1293,6 +1307,7 @@ if __name__ == "__main__":
         sent_today, TIKTOK_PER_DAY = (lambda: 0), 0
         assert eta() == 0.0
     finally:
+        time.time = _real_clock
         sent_today, _since_last_h = _real_sent, _real_since
         TIKTOK_PER_DAY, TIKTOK_MIN_GAP_HOURS = _real_per_day, _real_gap
         TIKTOK_ENABLED = _real_enabled
