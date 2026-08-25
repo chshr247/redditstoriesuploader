@@ -225,8 +225,9 @@ def _park_one(part: dict | None, may_split: bool) -> tuple[bool, int, int]:
     # Second rather than first because the reserve is hand-picked and finite,
     # while this one draws from subs that keep producing.
     elif horror := source.next_horror():
-        log.info("horror slot: r/%s %s", horror["sub"], horror["id"])
-        posts = [horror]
+        log.info("horror slot: r/%s %s and %d more to fall back on",
+                 horror[0]["sub"], horror[0]["id"], len(horror) - 1)
+        posts = horror
     else:
         posts = source.fetch(4)
     if not posts:
@@ -479,7 +480,7 @@ if __name__ == "__main__":
         # daily_<chan>.md and the live archive; stub them off so these cases
         # exercise the pool path alone
         source.next_daily = lambda: None
-        source.next_horror = lambda: None
+        source.next_horror = lambda: []
         make_part = lambda p: rendered.append(p) or Path("stub.mp4")  # noqa: E731
         publish.due = lambda: "only 0.4h since the last draft"
         # nothing is out for review in any of the part cases below, and asking

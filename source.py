@@ -56,6 +56,10 @@ MIN_CHARS, MAX_CHARS = 400, 4000   # ~40 sec .. ~4 min of narration
 # has to be compressed more than two to one, and compression is what takes the
 # detail the genre lives on.
 HORROR_CHARS = 9000
+# How many horror candidates one day's slot may try before giving up. Four,
+# which is what the pool path already asks for, and the ceiling matters only on
+# the days every one of them is refused - a SKIP costs one short LLM call.
+HORROR_TRIES = 4
 ARCTIC_DAYS = 2                    # width of the window arctic shift reads
 ARCTIC_BACK = 4 * 365              # ...taken from anywhere in the last 4 years
 
@@ -777,8 +781,18 @@ def next_daily() -> dict | None:
 
 # -------------------------------------------------------------- the horror slot
 
-def next_horror() -> dict | None:
-    """One horror story a day, or None to leave the slot to the pool.
+def next_horror() -> list[dict]:
+    """Today's horror candidates, best first, or empty to leave the slot alone.
+
+    Several and not one, because the SKIP gate throws most of these out and
+    the slot only gets one go a day. r/Paranormal is half photo posts whose
+    body is a caption - long enough for _tellable(), no story in it - and the
+    model is the only thing that can tell: four slots in a row went to one
+    such post, were skipped, and left the day with no scare at all (08-22 to
+    08-25, ids 1k9x2et 1boovsb 1nzl86j 16467ky). The caller already walks a
+    list and takes the first story the prompt accepts, so handing it the
+    runners-up costs one archive request for four bodies instead of one, and
+    an LLM call only on the days a pick is actually refused.
 
     A pool of its own, drawn on the same terms the daily reserve draws its
     slot: the gate is whether one of these subs is already in today's `seen`
@@ -791,7 +805,7 @@ def next_horror() -> dict | None:
     be a whole new thing to tune for one slot a day.
     """
     if not SUBREDDITS_HORROR:
-        return None
+        return []
     # These run past what YouTube will take as a Short, so youtube._too_long()
     # keeps them out of that queue entirely and TikTok is the only outlet they
     # have. With TikTok paused there is none: the slot would spend a story and
@@ -799,7 +813,7 @@ def next_horror() -> dict | None:
     # sit in out/ for as long as the pause lasted.
     if not TIKTOK_ENABLED:
         log.info("horror slot stands down: it publishes to TikTok alone, and TikTok is paused for %s", OUTPUT_LANG)
-        return None
+        return []
     today = datetime.datetime.now(datetime.timezone.utc).date()
     marks = ",".join("?" * len(SUBREDDITS_HORROR))
     with _db() as db:
@@ -807,9 +821,8 @@ def next_horror() -> dict | None:
                           (OUTPUT_LANG, *SUBREDDITS_HORROR)).fetchall()
     if any(ts and datetime.datetime.fromtimestamp(
             ts, datetime.timezone.utc).date() == today for (ts,) in rows):
-        return None
-    got = _pick(1, SUBREDDITS_HORROR)
-    return got[0] if got else None
+        return []
+    return _pick(HORROR_TRIES, SUBREDDITS_HORROR)
 
 
 # ---------------------------------------------------------------- split stories
@@ -1200,10 +1213,10 @@ if __name__ == "__main__":
                    " VALUES (?,?,?,?,?,?,?)",
                    ("_hr_a", "_selftest_horror", MIN_SCORE + 5, 500, 0.8,
                     "The man on the stairs", time.time()))
-    assert next_horror()["id"] == "_hr_a", "the horror pool fills its own slot"
+    assert next_horror()[0]["id"] == "_hr_a", "the horror pool fills its own slot"
     # taken: the story was accepted and marked, so the day has had its scare
     mark_used("_hr_a", MIN_SCORE + 5, "_selftest_horror")
-    assert next_horror() is None, "only one horror story a day"
+    assert not next_horror(), "only one horror story a day"
     # a new day, and a second row: the same sub used yesterday does not count
     with _db() as db:
         db.execute("UPDATE seen SET ts=0 WHERE id='_hr_a'")
@@ -1211,14 +1224,20 @@ if __name__ == "__main__":
                    " VALUES (?,?,?,?,?,?,?)",
                    ("_hr_b", "_selftest_horror", MIN_SCORE + 5, 500, 0.8,
                     "The other man on the stairs", time.time()))
-    assert next_horror()["id"] == "_hr_b", "yesterday's scare does not hold today"
+        # a second live row, so the SKIP of the top pick still leaves a story
+        db.execute("INSERT INTO pool(id, sub, score, comments, ratio, title, ts)"
+                   " VALUES (?,?,?,?,?,?,?)",
+                   ("_hr_c", "_selftest_horror", MIN_SCORE + 4, 400, 0.8,
+                    "A photo of the stairs", time.time()))
+    assert [p["id"] for p in next_horror()] == ["_hr_b", "_hr_c"], (
+        "yesterday's scare does not hold today, and the runner-up comes too")
     # and a channel with no horror subs configured never sees the slot at all
     globals()["SUBREDDITS_HORROR"] = []
-    assert next_horror() is None, "no horror subs means no horror slot"
+    assert not next_horror(), "no horror subs means no horror slot"
     # ...and neither does a channel whose only outlet for them is switched off
     globals()["SUBREDDITS_HORROR"] = ["_selftest_horror"]
     globals()["TIKTOK_ENABLED"] = False
-    assert next_horror() is None, "no TikTok, no horror slot"
+    assert not next_horror(), "no TikTok, no horror slot"
     globals()["TIKTOK_ENABLED"] = True
     with _db() as db:
         db.execute("DELETE FROM seen WHERE id LIKE '_hr_%'")
