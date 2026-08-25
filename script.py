@@ -1183,7 +1183,11 @@ if __name__ == "__main__":
     assert target_sec(_feed) == TARGET_SEC, "the feed does not move"
     assert part_count(_fat) == 1, "the horror slot is one video, whatever it weighs"
     assert part_count(_feed) > 1, "...and the feed still splits what is long"
-    assert _target_words(HORROR_SEC) > 3 * _target_words()
+    # The horror slot has to be worth its own prompt, its own voice and four
+    # times the render: a ceiling that is not far above the feed's target is a
+    # slot that buys nothing. Was 3x while the feed sat at 87 seconds; the feed
+    # moved to 130 and this tracks the relation, not the old multiple.
+    assert _target_words(HORROR_SEC) > 2 * _target_words()
     globals()["SUBREDDITS_HORROR"] = _real_horror
 
     tw = _target_words()

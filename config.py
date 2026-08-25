@@ -296,7 +296,11 @@ PART_WORD = {"ru": "Часть", "en": "Part"}
 # надо около 195" at 09:54 and "Принято" at 10:07 (issue #133, 2026-08-25). A
 # knob that decides a verdict must have one value and not one per caller; an env
 # key still overrides, but nothing has to remember to pass it.
-_TARGET_SEC = {"ru": 87, "en": 75}
+# ru raised 87 -> 130 on 2026-08-26 as an experiment: the complaint was that
+# stories come out squeezed, and 130 seconds is ~335 Russian words against 225.
+# Still a Short - YouTube's ceiling is 180 and OVER puts the longest at ~153.
+# Put it back if retention drops; that is what this is being watched for.
+_TARGET_SEC = {"ru": 130, "en": 75}
 TARGET_SEC = int(chan_env("TARGET_SEC", str(_TARGET_SEC.get(CHANNEL, 75))))
 # The ceiling for the horror slot, and only a ceiling: script.target_sec()
 # scales the target by the length of the source and stops here. A scary story
