@@ -38,6 +38,20 @@ jobs:
       issues: write          # ...and said out loud on the issue
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Both of these are why publish.yml carries them, and this file went
+          # without until it cost two answers. Answer three issues inside ten
+          # minutes and the concurrency group queues the runs; each one then
+          # checks out the commit the COMMENT was made on, which predates the
+          # push the run before it just made, so its own commit is not a
+          # fast-forward and the rebase below lands on a binary conflict in
+          # seen.db - "the verdict above is NOT recorded", run 32833844285,
+          # 2026-08-25. A branch NAME resolves at checkout time and hands each
+          # run the state the last one left; github.sha would not.
+          ref: ${{ github.ref_name }}
+          # ...and the rebase needs a merge base, which the default depth of 1
+          # does not have and does not fetch on its own.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"

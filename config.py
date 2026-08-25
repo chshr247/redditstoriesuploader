@@ -142,7 +142,11 @@ FISH_SPEED = float(os.getenv("FISH_SPEED", 1.0))
 # not two. Per channel, default 1.0 = off, so ru is untouched.
 # Word timings are scaled by the same factor in voice.speak_parts(), or every
 # subtitle would arrive late by the amount the track was shortened.
-VOICE_SPEEDUP = float(chan_env("VOICE_SPEEDUP", "1.0"))
+# The per-channel value lives HERE rather than in a workflow's `||` fallback -
+# see TARGET_SEC below for what a knob with two homes did to a title review.
+_VOICE_SPEEDUP = {"en": 1.25}
+VOICE_SPEEDUP = float(chan_env("VOICE_SPEEDUP",
+                               str(_VOICE_SPEEDUP.get(CHANNEL, 1.0))))
 # ...and the price of doing it that way, paid back. asetrate moves EVERY
 # frequency up by the same factor, so the voice's own sibilance and breath climb
 # with it and the take reads as hissy. It is not noise and a denoiser is the
@@ -280,13 +284,20 @@ PART_WORD = {"ru": "Часть", "en": "Part"}
 # Per channel, because a second of video is not the same amount of story in
 # both. The budget is words and they come out of TARGET_SEC at _heard_wpm():
 # en is voiced at VOICE_SPEEDUP 1.25 and gets 288 of them, ru is not sped up
-# at all and gets 195 - the same post told with a third less of the connective
-# tissue that says who is who, which is what "reads like a translation" turned
-# out to mean. ru buys those words back with runtime rather than with speed:
-# the voice stays where it is and the video runs longer. Unsuffixed, so a bare
-# TARGET_SEC in the env moves the default channel only and en holds 75 until
-# TARGET_SEC_EN says otherwise.
-TARGET_SEC = int(chan_env("TARGET_SEC", "75"))
+# at all and gets 225 - the same post told with less of the connective tissue
+# that says who is who, which is what "reads like a translation" turned out to
+# mean. ru buys those words back with runtime rather than with speed: the voice
+# stays where it is and the video runs longer.
+#
+# THE NUMBERS LIVE HERE, not in a workflow. ru's 87 used to be a `||` fallback
+# in publish.yml, and review.yml - which judges the very same titles on the fast
+# path - was never given the key, so it fell through to this default. Two
+# callers, two budgets, and the same comment was answered "Не приму, 256 слов,
+# надо около 195" at 09:54 and "Принято" at 10:07 (issue #133, 2026-08-25). A
+# knob that decides a verdict must have one value and not one per caller; an env
+# key still overrides, but nothing has to remember to pass it.
+_TARGET_SEC = {"ru": 87, "en": 75}
+TARGET_SEC = int(chan_env("TARGET_SEC", str(_TARGET_SEC.get(CHANNEL, 75))))
 # The ceiling for the horror slot, and only a ceiling: script.target_sec()
 # scales the target by the length of the source and stops here. A scary story
 # lives on the detail that a squeeze into 75 seconds throws away first, and it

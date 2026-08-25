@@ -136,7 +136,9 @@ jobs:
       # variable rather than a constant because it is a taste knob that wants
       # trying at 1.10 and 1.15 without a push. Unset arrives empty, which
       # config.py reads as absent, so both channels fall back to 1.0 = off.
-      VOICE_SPEEDUP_EN: ${{ vars.VOICE_SPEEDUP_EN || '1.25' }}
+      # ...but WITHOUT a literal fallback: the code default is the value, and a
+      # copy here is a second one that only this workflow gets. See TARGET_SEC.
+      VOICE_SPEEDUP_EN: ${{ vars.VOICE_SPEEDUP_EN }}
       # What that shift costs, taken back - see VOICE_DEHISS_DB in config.py.
       # Here for the same reason as the line above: it is a listening call, and
       # trying -4 against -10 should not need a push. Unset falls through to
@@ -150,7 +152,14 @@ jobs:
       # who is who. 87 buys it back at 225 words without touching the voice. A
       # repo variable for the same reason as VOICE_SPEEDUP_EN above: it is a
       # retention call and wants trying at 80 and 90 without a push.
-      TARGET_SEC: ${{ vars.TARGET_SEC || '87' }}
+      #
+      # The 87 itself is NOT here any more. It was - as `|| '87'` - and review.yml
+      # judges the same titles on the fast path and was never given the key, so
+      # it fell through to config.py's default and measured the same comment
+      # against a different budget: refused at 09:54, accepted at 10:07, issue
+      # #133 on 2026-08-25. An unset variable arrives empty, config.py reads
+      # empty as absent, and both callers land on the one number in config.py.
+      TARGET_SEC: ${{ vars.TARGET_SEC }}
       # Pause TikTok for one channel without touching YouTube: set the variable
       # to 0. Unset arrives here as an empty string, which config.py reads as
       # "not set" and therefore as enabled.
