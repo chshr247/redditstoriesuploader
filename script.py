@@ -530,6 +530,34 @@ ARCHAIC_KIN = {
 }
 
 
+# Two or three per two hundred words is what the prompt asks for. Only the
+# FLOOR is enforced, and only at zero: a story with no loud line at all is the
+# failure we actually measured - 43 sentences and not one mark - while a story
+# with four is merely at the top of its budget, and refusing that would cost a
+# rewrite for something no listener would notice.
+EXCLAIM_PER = 200
+
+
+def _flat_fault(body: str, lang: str = "") -> str:
+    """Empty unless the narration is punctuated entirely on full stops.
+
+    A rule in the prompt was not enough on its own, which is the same thing
+    every other check in this file exists to say. The engine takes its contour
+    from punctuation and from nothing else, so a narration written on nothing
+    but full stops is read on one note however good its words are - and the
+    model reverts to exactly that unless it is told, in the answer it gets back,
+    that it did.
+    """
+    t = plain(body)
+    n = len(t.split())
+    if n < EXCLAIM_PER or "!" in t:
+        return ""
+    return ("the narration is punctuated entirely on full stops and will be "
+            "read on one note - find the line where somebody actually raised "
+            "their voice and end it on `!`, two or three times in the whole "
+            "text and nowhere else")
+
+
 def _kin_fault(text: str, lang: str = "") -> str:
     """Empty unless the text names a relative by a word nobody says any more."""
     t = plain(text)
@@ -576,6 +604,18 @@ def _title_fault(title: str, lang: str = "") -> str:
     if h:
         return (f"\"{h.group()}\" is said two ways and the TITLE is too short "
                 "for the engine to guess right - say it with a different word")
+    # The title is stated, never exclaimed and never asked. The prompt has said
+    # so since the beginning and the model obeyed, because nothing in the
+    # narration used those marks either - now the narration budgets them on
+    # purpose (see the punctuation rule in prompts.py) and the habit leaks. A
+    # title that shouts reads as clickbait on the card and is narrated with the
+    # lift that belongs to the story's own loud line.
+    # END of the line only: a mark INSIDE a quoted line is how several titles
+    # already work - «Не дам [emphasis] деньги на спорткар!» - отказал сыну -
+    # and that shape is not what this is about.
+    if t.rstrip("»”\"").endswith(("!", "?")):
+        return ("the TITLE ends on an exclamation or question mark - it is one "
+                "stated line, so end it on the last word with no mark at all")
     # One sentence, always. The same boundary split_cta() uses, so "two
     # sentences" means here exactly what it means everywhere else in the file.
     if len(SENTENCE.split(t)) > 1:
@@ -909,6 +949,7 @@ def _parse_write(raw: str, post: dict, parts: int, target: int,
 
         faults += [label + f for f in
                    (_kin_fault(body, lang),
+                    _flat_fault(body, lang),
                     _ending_fault(body, final=i == len(chunks), markup=False,
                                   lang=lang))
                    if f]
@@ -1253,6 +1294,27 @@ if __name__ == "__main__":
         "second half - the scroll has already been decided"
     assert _title_fault("[angry] Соседка [surprised] прислала [emphasis] счёт на 80000", "ru"), \
         "a cue inside the line"
+
+    # The narration budgets exclamation marks on purpose now, and the habit
+    # leaks upward - a title is stated, never exclaimed and never asked.
+    assert _title_fault("Соседка прислала мне [emphasis] счёт за свой потоп!", "ru"), \
+        "an exclaimed title"
+    assert _title_fault("А вы бы [emphasis] оплатили соседке её потоп?", "ru"), \
+        "a title that asks is the closing question, not a title"
+    # ...but a mark INSIDE a quoted line is a shape several titles already use
+    _quoted = "«Оплати мой [emphasis] потоп!» - написала соседка сверху"
+    assert not _title_fault(_quoted, "ru"), _title_fault(_quoted, "ru")
+
+    # A narration on nothing but full stops is read on one note. Only the floor
+    # is checked, and only at zero - see _flat_fault.
+    _flat = "Она положила чек на стол и ушла. " * 30
+    assert _flat_fault(_flat, "ru"), "an all-full-stops narration must be caught"
+    assert not _flat_fault(_flat + "Я не поверил своим глазам!", "ru"), \
+        "one mark is inside the budget"
+    assert not _flat_fault("Она положила чек и ушла.", "ru"), \
+        "a chunk too short to judge is left alone"
+    # the mark counts wherever it is, including inside a quoted line
+    assert not _flat_fault(_flat + "[мать] «Это не твои деньги!»", "ru")
 
     # a title has to show a moment, not describe a stance
     assert ru("Не используйте меня для воспитания детей"), "the plea shape must be caught"
