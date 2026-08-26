@@ -213,6 +213,34 @@ def _align(text: str, mp3_path) -> list[dict]:
     return _fill_gaps(timed, ours, heard[-1][2])
 
 
+# The smallest slot a word can hold on screen. Nothing is spoken this fast -
+# it exists so a word whisper left no room for still gets a card.
+MIN_WORD = 0.06
+
+
+def _monotonic(words: list[dict]) -> list[dict]:
+    """Force strictly increasing starts, and give every word a real slot.
+
+    Whisper's anchors can meet: the next one starting exactly where the last
+    one ended. A run of unmatched words spread across a gap of zero then comes
+    out with every word at the same instant, and build_ass - which ends each
+    card where the next one starts - hands that word an empty slot and drops
+    it. The word is never seen, the audio says it, and nothing downstream
+    notices, because the timings agree with themselves.
+
+    So the fix belongs here rather than in the renderer: card.py and the
+    caption path read the same list and would each need the same guard.
+    Pushing a collision forward by MIN_WORD costs a few milliseconds of drift
+    on a line too short to hear, and keeps the word.
+    """
+    for prev, w in zip(words, words[1:]):
+        if w["start"] <= prev["start"]:
+            w["start"] = round(prev["start"] + MIN_WORD, 3)
+    for w in words:
+        w["end"] = round(max(w["end"], w["start"] + MIN_WORD), 3)
+    return words
+
+
 def _fill_gaps(timed: list, ours: list[str], audio_end: float) -> list[dict]:
     """Spread unmatched runs evenly between the anchors around them."""
     out = []
@@ -233,7 +261,7 @@ def _fill_gaps(timed: list, ours: list[str], audio_end: float) -> list[dict]:
             out.append({"word": ours[k], "start": round(s, 3),
                         "end": round(s + step, 3)})
         i = j
-    return out
+    return _monotonic(out)
 
 
 # ------------------------------------------------------------------ interface
@@ -534,6 +562,22 @@ if __name__ == "__main__":
     tail = _fill_gaps([None, None], ["x", "y"], 2.0)
     assert [w["word"] for w in tail] == ["x", "y"] and tail[1]["end"] == 2.0
 
+    # Anchors that MEET leave a gap of zero, and the words spread across it used
+    # to land on one instant and be dropped by the renderer, unseen. Every word
+    # must come back with a slot of its own, in order.
+    squeezed = _fill_gaps([{"word": "a", "start": 0.0, "end": 2.0}, None, None,
+                           {"word": "d", "start": 2.0, "end": 3.0}],
+                          ["a", "b", "c", "d"], 3.0)
+    assert [w["word"] for w in squeezed] == ["a", "b", "c", "d"], squeezed
+    assert all(x["start"] < y["start"] for x, y in zip(squeezed, squeezed[1:])), squeezed
+    assert all(w["end"] - w["start"] >= MIN_WORD - 1e-9 for w in squeezed), squeezed
+    # ...and that is exactly what the renderer needs: a card ends where the next
+    # one starts, so equal starts are what made the slot empty
+    assert all(y["start"] > x["start"] for x, y in zip(squeezed, squeezed[1:]))
+    # an already-sane run is left where it was
+    ok = [{"word": "a", "start": 0.0, "end": 1.0}, {"word": "b", "start": 1.0, "end": 2.0}]
+    assert _monotonic([dict(w) for w in ok]) == ok, "a clean run must not move"
+
     # The speed-up shortens the audio, so the subtitles have to shorten with it
     # or every word lands later than it is spoken - by seconds, by the end.
     assert _speedup(1.0) == "" and _scaled([{"start": 1.0, "end": 2.0}], k=1.0)[0]["start"] == 1.0
@@ -657,7 +701,8 @@ if __name__ == "__main__":
     assert mp3.stat().st_size > 1000, "mp3 is suspiciously small"
     assert len(words) == len(sample.split()), "word count must match the script"
     assert all(w["start"] <= w["end"] for w in words), "negative-length word"
-    assert all(a["start"] <= b["start"] for a, b in zip(words, words[1:])), "out of order"
+    assert all(a["start"] < b["start"] for a, b in zip(words, words[1:])), "out of order"
+    assert all(w["end"] > w["start"] for w in words), "zero-length word survived"
 
     dur = duration(mp3)
     print(f"ok: {mp3.name} via {TTS_BACKEND}, {dur:.1f}s, {len(words)} words")
