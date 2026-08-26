@@ -134,6 +134,49 @@ FISH_VOICES_FEMALE = [v.strip() for v in chan_env("FISH_VOICES_FEMALE").split(",
 # channel can run the slot without pinning anything.
 FISH_VOICE_HORROR = chan_env("FISH_VOICE_HORROR").strip()
 FISH_SPEED = float(os.getenv("FISH_SPEED", 1.0))
+# Sampling knobs, and the only thing in the request that touches INTONATION.
+# Left unset the engine picks its own conservative pair, which reads flat over a
+# two-minute take: the longer the run, the more a low temperature regresses to
+# one average delivery, and cues cannot fight that from the text side. Higher
+# means more variation between sentences and also more chance of a fluffed word,
+# so this is a knob to turn by ear per voice, not a constant to pin - a clone
+# that is already lively needs less than one that is not.
+FISH_TEMPERATURE = float(os.getenv("FISH_TEMPERATURE", 0.9))
+FISH_TOP_P = float(os.getenv("FISH_TOP_P", 0.9))
+# How much text the engine plans as one prosodic unit. Smaller re-plans more
+# often, which is what stops the drift above; too small and sentences stop
+# leaning on each other. 0 leaves it to the engine.
+FISH_CHUNK = int(os.getenv("FISH_CHUNK", 0))
+# OUR OWN split, and not the same thing as FISH_CHUNK above: that one asks the
+# engine to re-plan inside one generation, this one ends the generation. A
+# two-minute body asked for in a single call drifts to one averaged delivery -
+# the further in, the less the opening cue is worth - and no amount of cue in
+# the text fights that, because the engine is no longer reading the cue, it is
+# reading its own last thirty seconds. Each take starts the story's cue again.
+# Measured in PLAIN characters, so cues do not count toward the length. Roughly
+# 400 is three or four takes for a ru body; 0 turns the split off and restores
+# the single call. Raise it if the joins are audible, lower it if it is flat.
+# ponytail: default OFF because it was measured and bought nothing. Tried
+# 2026-08-26 against a single call on the same voice and text: no audible
+# difference in liveliness, and a split can only ADD seams. Kept as a knob
+# rather than deleted because it costs nothing switched off and is the first
+# thing to try again on a different model - but it is not a fix, and the thing
+# it was meant to fix turned out not to live here. Same verdict on
+# FISH_TEMPERATURE / FISH_TOP_P above: both moved nothing on s2.1-pro-free.
+FISH_TAKE_CHARS = int(os.getenv("FISH_TAKE_CHARS", 0))
+# How many takes of the story are offered for a listen before it renders. The
+# engine reseeds on every call - measured, two runs of the same text and voice
+# came back 6.06s and 6.32s - so N calls are N different performances of one
+# script, and the best of them is picked by ear. 0 or 1 turns the whole stage
+# off and the story renders straight off its title, as it did before.
+# Costs N times the TTS on the body, and a second round trip with the user.
+# Only single-part stories are offered: three takes of each of three parts is
+# nine links and nobody picks from nine.
+# Per channel, like every other voice knob here: the flat narration this was
+# built for is the Russian feed's problem, and the English one is a different
+# voice at a different speed. It is also what keeps a story already settled on
+# one channel from being pulled into a stage the other opted into.
+REVIEW_TAKES = int(chan_env("REVIEW_TAKES", "3"))
 # Chipmunk knob, and deliberately NOT the same thing as FISH_SPEED: the engine's
 # prosody speed changes the pace and leaves the pitch where it was, which is what
 # a Russian drama channel wants. The English one is there to be funny, and the

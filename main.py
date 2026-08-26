@@ -25,6 +25,8 @@ touched until the plan runs out.
 import json
 import logging
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import publish
@@ -34,8 +36,8 @@ import script
 import source
 import voice
 from config import (CHANNEL, LOUD_AT, MIN_SEC, OUT_DIR, REVIEW_BATCH,
-                    STOP_REASON, STOPPED, TIKTOK_ENABLED, TIKTOK_PER_DAY,
-                    chan_file, chan_key)
+                    REVIEW_TAKES, STOP_REASON, STOPPED, TIKTOK_ENABLED,
+                    TIKTOK_PER_DAY, chan_file, chan_key)
 
 log = logging.getLogger("main")
 
@@ -43,7 +45,8 @@ MAX_SLOWDOWN = 0.15   # beyond this the voice starts sounding drugged
 
 
 def _render(title: str, body: str, gender: str, key: str, sub: str,
-            fish_voice: str = "", meta: dict | None = None) -> Path:
+            fish_voice: str = "", meta: dict | None = None,
+            body_mp3=None) -> Path:
     """Narrate one script and burn it into out/<key>[_<channel>].mp4.
 
     `key` names the STORY; the channel is what turns it into a file name. Both
@@ -58,7 +61,8 @@ def _render(title: str, body: str, gender: str, key: str, sub: str,
     # 173 wpm re-voiced to 124, a 29% drop from a 15% request.
     fish_voice = fish_voice or voice.pick_voice(gender, sub)
     mp3, words, title_end, title_words = voice.speak_parts(
-        title, body, name, gender=gender, fish_voice=fish_voice)
+        title, body, name, gender=gender, fish_voice=fish_voice,
+        body_mp3=body_mp3)
 
     # Word counts only approximate duration - the voice paced 167-214 wpm across
     # runs. Cheaper to re-synthesize slower than to ask the model for more words.
@@ -67,6 +71,14 @@ def _render(title: str, body: str, gender: str, key: str, sub: str,
         slow = min((MIN_SEC + 2) / total - 1, MAX_SLOWDOWN)
         log.info("%.1fs is under the %ds floor, re-voicing at -%.0f%%",
                  total, MIN_SEC, slow * 100)
+        # NOT body_mp3: the floor is missed by the audio being too short, and
+        # the only way to lengthen it is to have the engine read it again. The
+        # take the user picked is lost here, and saying so beats a video that
+        # is quietly eight seconds under the minimum.
+        if body_mp3:
+            log.warning("the chosen take is %.1fs, under the %ds floor - "
+                        "re-voicing, so it is not the take that ships",
+                        total, MIN_SEC)
         mp3, words, title_end, title_words = voice.speak_parts(
             title, body, name, rate=f"-{slow * 100:.0f}%",
             speed=round(1 - slow, 2), gender=gender, fish_voice=fish_voice)
@@ -111,6 +123,43 @@ def write_and_park(post: dict, n: int = 1) -> None:
     source.mark_used(post["id"], post["score"], post["sub"])
 
 
+def offer_takes(r: dict) -> None:
+    """Read the approved story aloud N times and ask which reading goes out.
+
+    Runs in the render slot rather than in review.yml: this is where the TTS
+    key and the minutes already are, so the stage costs no new workflow. The
+    story does not render on this tick - it renders on the one after the answer,
+    or six hours later on the first take.
+    """
+    name = chan_file(r["post_id"])
+    story, _ = script.split_cta(r["written"][0][1])
+    mp3s = voice.takes(story, name, REVIEW_TAKES,
+                       voice.pick_voice(r["gender"], r["sub"]))
+    review.offer_takes(r, mp3s)
+
+
+def _chosen(r: dict) -> "Path | None":
+    """The picked take, downloaded. None if the stage is off or it is missing.
+
+    A take that cannot be fetched is not worth failing the render over - the
+    story is approved either way, and a fresh reading of it is what every video
+    got before this existed. So this warns and hands back None, which sends
+    speak_parts() down its ordinary path.
+    """
+    if r.get("take", -1) < 0:
+        return None
+    dest = OUT_DIR / f"{chan_file(r['post_id'])}_chosen.mp3"
+    try:
+        urllib.request.urlretrieve(review.take_url(r), dest)
+    except (urllib.error.URLError, OSError) as e:
+        log.warning("could not fetch take %d (%s) - narrating it fresh",
+                    r["take"] + 1, e)
+        return None
+    log.info("%s: take %d fetched, %.1f sec",
+             r["post_id"], r["take"] + 1, voice.duration(dest))
+    return dest
+
+
 def make_reviewed(r: dict) -> Path:
     """Render the parked story under the title that came back off the issue.
 
@@ -134,8 +183,9 @@ def make_reviewed(r: dict) -> Path:
         # rendered mp4. The issue travels the same way and for the same reason:
         # publish.py puts the caption back into the issue the title came from.
         out = _render(written[0][0], written[0][1], r["gender"], post["id"],
-                      post["sub"],
+                      post["sub"], body_mp3=_chosen(r),
                       meta={"score": post["score"], "issue": r["issue"]})
+        review.drop_takes(post["id"], REVIEW_TAKES)
     # Last, so a render that dies leaves the answer on the row for a retry.
     review.rendered(r["post_id"])
     return out
@@ -417,9 +467,16 @@ def main(count: int = 1, force: bool = False) -> int:
     # answered in one sitting - and ready() hands back the one that has been
     # waiting longest, which is the order the user was quoted times for.
     if len(done) < count and (r := review.ready()):
-        log.info("%s: title settled, rendering", r["post_id"])
         try:
-            done.append(make_reviewed(r))
+            if r.get("needs_takes"):
+                # Not a render: this tick spends its slot on the takes instead,
+                # and the video follows on the tick after the answer.
+                log.info("%s: title settled, offering %d takes",
+                         r["post_id"], REVIEW_TAKES)
+                offer_takes(r)
+            else:
+                log.info("%s: title settled, rendering", r["post_id"])
+                done.append(make_reviewed(r))
         except Exception:
             log.exception("failed on %s after its title came back", r["post_id"])
             failed += 1

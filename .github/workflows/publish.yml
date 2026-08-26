@@ -114,6 +114,13 @@ jobs:
       # night is half of what makes a scary story sound like one. Unset, that
       # slot draws from the pools above like any other story.
       FISH_VOICE_HORROR: ${{ vars.FISH_VOICE_HORROR }}
+      # How many readings of an approved story are offered on its issue before
+      # it renders. A repo variable and not a constant for the same reason
+      # VOICE_SPEEDUP_EN is one: it is a taste knob, and turning the stage off
+      # for a day should not need a push. Unset arrives empty, which config.py
+      # reads as absent and falls back to the code default.
+      REVIEW_TAKES: ${{ vars.REVIEW_TAKES }}
+      REVIEW_TAKES_EN: ${{ vars.REVIEW_TAKES_EN }}
       YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
       YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
       YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}

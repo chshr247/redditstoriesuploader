@@ -37,7 +37,7 @@ import time
 
 import script
 import source
-from config import OUTPUT_LANG, REVIEW_BATCH, REVIEW_TZ_H
+from config import OUTPUT_LANG, REVIEW_BATCH, REVIEW_TAKES, REVIEW_TZ_H
 
 log = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ ACCEPT = {"+", "да", "ок", "ok", "ага", "yes"}
 REJECT = {"-", "нет", "скип", "skip", "no", "мимо", "хуйня"}
 
 _COLS = ("post_id", "issue", "ts", "gender", "sub", "score", "written",
-         "answered", "title", "body")
+         "answered", "title", "body", "takes", "take")
 
 
 def _db():
@@ -71,11 +71,22 @@ def _db():
                "post_id TEXT, lang TEXT, issue INT, ts REAL, gender TEXT, "
                "sub TEXT, score INT, written TEXT, answered INT DEFAULT 0, "
                "title TEXT DEFAULT '', body TEXT DEFAULT '', "
+               "takes TEXT DEFAULT '', take INT DEFAULT -1, "
                "PRIMARY KEY(post_id, lang))")
     # `body` arrived after `title`; a row written before it keeps '' and the
     # story is narrated as the model wrote it, which is what '' means anyway.
-    if "body" not in {c[1] for c in db.execute("PRAGMA table_info(review)")}:
+    have = {c[1] for c in db.execute("PRAGMA table_info(review)")}
+    if "body" not in have:
         db.execute("ALTER TABLE review ADD COLUMN body TEXT DEFAULT ''")
+    # `takes` is the offer that was posted - the release asset names, and the
+    # id of the comment carrying them - and `take` is which one was picked, -1
+    # while it is still out. A row written before these existed reads as
+    # takes='' ("nothing offered yet"), and REVIEW_TAKES <= 1 short-circuits
+    # the whole stage, so upgrading mid-flight cannot strand a row waiting for
+    # an answer to a question that was never asked.
+    if "takes" not in have:
+        db.execute("ALTER TABLE review ADD COLUMN takes TEXT DEFAULT ''")
+        db.execute("ALTER TABLE review ADD COLUMN take INT DEFAULT -1")
     return db
 
 
@@ -96,6 +107,18 @@ def _owner() -> str:
     if not _owner_cache:
         _owner_cache = _gh("repo", "view", "--json", "owner", "-q", ".owner.login")
     return _owner_cache
+
+
+_slug_cache = ""
+
+
+def _slug() -> str:
+    """owner/repo, for building a release download URL."""
+    global _slug_cache
+    if not _slug_cache:
+        _slug_cache = _gh("repo", "view", "--json", "nameWithOwner",
+                          "-q", ".nameWithOwner")
+    return _slug_cache
 
 
 def ok() -> str:
@@ -364,9 +387,33 @@ def _poll(timeout: bool) -> dict | None:
     """
     first = None
     for r in _rows():
-        if (got := _judge(r, timeout)) and first is None:
-            first = got
+        got = _judge(r, timeout)
+        if not got or first is not None:
+            continue
+        if (stage := _stage(got, timeout)) == "wait":
+            continue
+        # The caller renders, or makes the takes and renders on a later tick.
+        got["needs_takes"] = stage == "offer"
+        first = got
     return first
+
+
+def _stage(r: dict, timeout: bool) -> str:
+    """What a title-settled row still owes: "render", "offer" or "wait".
+
+    The takes stage sits BETWEEN the title being settled and the render, and
+    only for a story that ships as one video: three takes of each of three
+    parts is nine links, and nobody picks from nine. Turned off - REVIEW_TAKES
+    of 0 or 1 - every row goes straight to "render", which is what every row
+    did before this existed.
+    """
+    if REVIEW_TAKES <= 1 or len(r["written"]) > 1:
+        return "render"
+    if not r["takes"]:
+        return "offer"
+    if r["take"] >= 0:
+        return "render"
+    return "render" if _judge_take(r, timeout) else "wait"
 
 
 def _judge(r: dict, timeout: bool) -> dict | None:
@@ -427,6 +474,130 @@ def _judge(r: dict, timeout: bool) -> dict | None:
     if settled:
         _say_when(r["issue"], r["ts"])
     return _final(r, bodies)
+
+
+# ------------------------------------------------------------------- the takes
+
+# Where the offered mp3s live between the run that makes them and the run that
+# renders one. NOT an issue attachment: GitHub's API has no endpoint for those
+# at all - the web drag-drop posts to a private one - and <audio> is stripped
+# out of comment markdown, so an inline player was never on the table either.
+# A release asset is the only durable, API-writable store here that costs no
+# second secret and leaves nothing in git history. One release holds every
+# story's takes; the assets are deleted as each story renders.
+TAKES_TAG = "voice-review"
+TAKES_HOURS = 6
+
+
+def _asset(post_id: str, i: int) -> str:
+    return f"{post_id}_{OUTPUT_LANG}_take{i + 1}.mp3"
+
+
+def _release() -> None:
+    """Make sure the holding release exists. Idempotent and cheap."""
+    try:
+        _gh("release", "view", TAKES_TAG, "--json", "tagName")
+        return
+    except RuntimeError:
+        pass          # not there yet - gh exits non-zero, which _gh raises on
+    _gh("release", "create", TAKES_TAG, "--notes",
+        "Черновые дубли озвучки, которые ждут выбора в issue. "
+        "Файлы удаляются, как только история отрендерена.",
+        "--title", "voice review", "--prerelease")
+
+
+def offer_takes(r: dict, mp3s: list) -> None:
+    """Upload the takes and ask which one goes out.
+
+    Called from the render slot rather than from review.yml, so it runs where
+    the TTS key and the time already are, and needs no new workflow. The story
+    does not render on this tick - it renders on the one after the answer.
+    """
+    _release()
+    urls = []
+    for i, mp3 in enumerate(mp3s):
+        name = _asset(r["post_id"], i)
+        # clobber: a retry after a half-finished offer must not collide with
+        # the assets the failed attempt already pushed
+        _gh("release", "upload", TAKES_TAG, f"{mp3}#{name}", "--clobber")
+        urls.append(f"https://github.com/{_slug()}/releases/"
+                    f"download/{TAKES_TAG}/{name}")
+
+    numbers = ", ".join(f"`{i + 1}`" for i in range(len(urls)))
+    links = "\n".join(f"{i + 1}. {u}" for i, u in enumerate(urls))
+    out = _gh("issue", "comment", str(r["issue"]), "--body", f"""\
+**Озвучка готова, дублей {len(urls)} — выбери.**
+
+{links}
+
+Движок пересеивается на каждом вызове, так что это один и тот же текст,
+прочитанный по-разному.
+
+**Первой строкой — номер:** {numbers}.
+Молчание {TAKES_HOURS} ч — уйдёт первый.""")
+    cid = int(out.rstrip("/").rsplit("-", 1)[-1]) if "-" in out else 0
+    with _db() as db:
+        db.execute("UPDATE review SET takes=? WHERE post_id=? AND lang=?",
+                   (json.dumps({"n": len(urls), "cid": cid, "ts": time.time()}),
+                    r["post_id"], OUTPUT_LANG))
+    log.info("%s: %d takes offered on issue #%d", r["post_id"], len(urls), r["issue"])
+
+
+def _pick(comments: list[dict], owner: str, after: int, n: int) -> int:
+    """Which take the user asked for, or -1 while nothing valid has been said.
+
+    Only the owner, and only comments AFTER the one that carried the links -
+    the issue is public and already full of the title conversation, and a `1`
+    written up there was about something else.
+    """
+    for c in comments:
+        if c["user"]["login"] != owner or c["id"] <= after:
+            continue
+        first = (c["body"] or "").strip().splitlines()
+        if first and (d := first[0].strip().strip(".")).isdigit() and 1 <= int(d) <= n:
+            return int(d) - 1
+    return -1
+
+
+def _judge_take(r: dict, timeout: bool) -> bool:
+    """True once the row has a take to render. Mirrors _judge()'s contract."""
+    offer = json.loads(r["takes"])
+    got = _pick(_comments(r["issue"]), _owner(), offer["cid"], offer["n"])
+    if got < 0:
+        if not timeout or time.time() - offer["ts"] < TAKES_HOURS * 3600:
+            return False
+        _gh("issue", "comment", str(r["issue"]),
+            "--body", f"{TAKES_HOURS} ч без ответа — ушёл первый дубль.")
+        log.info("%s: no take picked in %dh, using the first",
+                 r["post_id"], TAKES_HOURS)
+        got = 0
+    else:
+        _gh("issue", "comment", str(r["issue"]), "--body",
+            f"Принято, дубль {got + 1}.")
+    r["take"] = got
+    with _db() as db:
+        db.execute("UPDATE review SET take=? WHERE post_id=? AND lang=?",
+                   (got, r["post_id"], OUTPUT_LANG))
+    return True
+
+
+def take_url(r: dict) -> str:
+    """Where the chosen take lives, for the render to fetch."""
+    return (f"https://github.com/{_slug()}/releases/download/"
+            f"{TAKES_TAG}/{_asset(r['post_id'], r['take'])}")
+
+
+def drop_takes(post_id: str, n: int) -> None:
+    """Delete a story's assets once it has rendered. Best effort.
+
+    A leftover asset costs nothing but clutter, so a failure here must never
+    take the render down with it - by this point the video already exists.
+    """
+    for i in range(n):
+        try:
+            _gh("release", "delete-asset", TAKES_TAG, _asset(post_id, i), "--yes")
+        except Exception:
+            log.info("could not delete %s, leaving it", _asset(post_id, i))
 
 
 def _local(ts: float) -> str:
@@ -712,12 +883,40 @@ if __name__ == "__main__":
     _mem.execute("CREATE TABLE review(post_id TEXT, lang TEXT, issue INT, "
                  "ts REAL, gender TEXT, sub TEXT, score INT, written TEXT, "
                  "answered INT DEFAULT 0, title TEXT DEFAULT '', "
-                 "body TEXT DEFAULT '')")
+                 "body TEXT DEFAULT '', takes TEXT DEFAULT '', "
+                 "take INT DEFAULT -1)")
     _mem.executemany("INSERT INTO review(post_id, lang, issue, ts, gender, sub, "
                      "score, written, title) VALUES (?,?,?,?,'m','s',1,?,?)",
                      [(pid, OUTPUT_LANG, iss, ts, w, t)
                       for pid, iss, ts, t, w in _rows_of])
     _db = lambda: _mem                                  # noqa: E731
+
+    # Which take the user asked for. The issue is PUBLIC and already carries
+    # the whole title conversation, so a bare "1" is an answer only from the
+    # owner and only below the comment that posted the links.
+    _cs = [c(30, "stranger", "2"), c(31, OWNER, "1"), c(32, OWNER, "3")]
+    assert _pick(_cs, OWNER, after=31, n=3) == 2, "must read the LAST word, not the first"
+    assert _pick(_cs, OWNER, after=29, n=3) == 0, "the owner's first pick wins"
+    assert _pick([c(31, "stranger", "2")], OWNER, 29, 3) == -1, "a stranger decides nothing"
+    assert _pick([c(31, OWNER, "9")], OWNER, 29, 3) == -1, "out of range is not a pick"
+    assert _pick([c(31, OWNER, "")], OWNER, 29, 3) == -1, "an empty comment is not a pick"
+    # a number has to LEAD the comment, or every title containing one is a vote
+    assert _pick([c(31, OWNER, "мне нравится 2")], OWNER, 29, 3) == -1
+    assert _pick([c(31, OWNER, "2.\nвторой живее")], OWNER, 29, 3) == 1, "trailing stop ok"
+
+    # The stage a title-settled row is in. Off, or split across several videos,
+    # and it goes straight to the render exactly as it did before takes existed.
+    _one = {"written": [["t", "b"]], "takes": "", "take": -1, "issue": 1,
+            "post_id": "z"}
+    assert _stage({**_one, "written": [["t", "b"], ["t", "c"]]}, False) == "render",         "a split story is never offered takes"
+    assert _stage({**_one, "takes": "{}", "take": 2}, False) == "render"
+    _real_takes = REVIEW_TAKES
+    globals()["REVIEW_TAKES"] = 1
+    assert _stage(_one, False) == "render", "REVIEW_TAKES=1 turns the stage off"
+    globals()["REVIEW_TAKES"] = 3
+    assert _stage(_one, False) == "offer", "nothing offered yet"
+    globals()["REVIEW_TAKES"] = _real_takes
+
     try:
         assert parked() == 3, parked()
         # three issues, but FIVE videos - the three-parter is the whole point

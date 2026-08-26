@@ -22,9 +22,12 @@ import urllib.request
 import edge_tts
 from num2words import num2words
 
+from pathlib import Path
+
 import script
-from config import (FISH_API_KEY, FISH_BODY_CUE, FISH_CTA_CUE, FISH_MODEL,
-                    FISH_SPEED, FISH_TITLE_CUE, FISH_VOICES_FEMALE,
+from config import (FISH_API_KEY, FISH_BODY_CUE, FISH_CHUNK, FISH_CTA_CUE,
+                    FISH_MODEL, FISH_SPEED, FISH_TEMPERATURE, FISH_TITLE_CUE,
+                    FISH_TAKE_CHARS, FISH_TOP_P, FISH_VOICES_FEMALE,
                     FISH_VOICES_MALE, FISH_VOICE_HORROR, OUT_DIR, OUTPUT_LANG,
                     SFX, SUBREDDITS_HORROR, TTS_BACKEND,
                     TTS_VOICE, VOICE_DEHISS_DB, VOICE_SPEEDUP, WHISPER_SIZE)
@@ -65,7 +68,10 @@ def _fish_synth(text: str, mp3_path, speed: float, voice: str = "") -> None:
     if not FISH_API_KEY:
         raise RuntimeError("FISH_API_KEY is empty - fill in .env")
     body = {"text": text, "format": "mp3", "mp3_bitrate": 128,
+            "temperature": FISH_TEMPERATURE, "top_p": FISH_TOP_P,
             "prosody": {"speed": speed, "normalize_loudness": True}}
+    if FISH_CHUNK:
+        body["chunk_length"] = FISH_CHUNK
     if voice:
         body["reference_id"] = voice
 
@@ -350,21 +356,33 @@ def pick_voice(gender: str = "male", sub: str = "") -> str:
 
 
 def speak(text: str, name: str, voice: str = TTS_VOICE, rate: str = RATE,
-          speed: float = FISH_SPEED, fish_voice: str | None = None) -> tuple:
-    """Synthesize into out/<name>.mp3 and out/<name>.json. Returns (mp3, words)."""
+          speed: float = FISH_SPEED, fish_voice: str | None = None,
+          have: "Path | None" = None) -> tuple:
+    """Synthesize into out/<name>.mp3 and out/<name>.json. Returns (mp3, words).
+
+    `have` is audio that ALREADY exists for this exact text - a take the user
+    picked off the issue. It is aligned and labelled like any other, just not
+    synthesized: the engine reseeds on every call, so re-synthesizing here
+    would hand back a fourth performance nobody listened to.
+    """
     mp3 = OUT_DIR / f"{name}.mp3"
+    if have is not None:
+        if have != mp3:
+            mp3.write_bytes(Path(have).read_bytes())
+        log.info("%s: using the chosen take, not re-synthesizing", name)
 
     # cues steer the engine and are never seen; accents steer nothing at all
     # (measured, see ACCENTS in script.py) and must not be seen either, so
     # subtitles and alignment only ever get the plain text
     readable = script.plain(text)
 
-    if TTS_BACKEND == "fish":
+    if TTS_BACKEND == "fish" or have is not None:
         # the engine hears words, whisper hears words, but `readable` still
         # carries the digits - difflib just misses those tokens and _fill_gaps
         # times them from the anchors either side
-        _fish_synth(spell(text), mp3, speed,
-                    pick_voice() if fish_voice is None else fish_voice)
+        if have is None:
+            _fish_synth(spell(text), mp3, speed,
+                        pick_voice() if fish_voice is None else fish_voice)
         words = _align(readable, mp3)
     else:
         # edge has no cue syntax and would read the brackets out loud
@@ -450,9 +468,112 @@ def _cued(text: str, cue: str, sep: str = ", ") -> str:
     return merged + " " + text[lead.end():]
 
 
+def _concat(parts: list, out) -> None:
+    """Join mp3s end to end. No padding: see speak_parts() on digital silence."""
+    if len(parts) == 1:
+        out.write_bytes(parts[0].read_bytes())
+        return
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         *[a for p in parts for a in ("-i", str(p))],
+         "-filter_complex",
+         "".join(f"[{i}:a]" for i in range(len(parts))) + f"concat=n={len(parts)}:v=0:a=1",
+         str(out)], check=True)
+
+
+def _takes(text: str, limit: int | None = None) -> list[str]:
+    """Split a story into takes on SENTENCE boundaries, never inside one.
+
+    A take is closed once it is at least `limit` plain characters long, so the
+    last sentence carries it over the line rather than being orphaned - which
+    is what a hard character cut does, and a two-word take reads as a hiccup.
+    Cues do not count toward the length: they are not spoken, and letting them
+    count makes a dialogue-heavy stretch split more often than a plain one for
+    no reason the ear can hear.
+    """
+    # read at CALL time, not baked into the default: a default argument is
+    # evaluated once at import, so a knob turned afterwards is silently ignored
+    limit = FISH_TAKE_CHARS if limit is None else limit
+    if limit <= 0:
+        return [text]
+    # Even takes, not "limit until the remainder". A fixed cut on 1100 chars at
+    # 400 gives 400 and 700, because the tail is glued back on - and a 700-char
+    # take is most of the drift this split exists to stop. Fitting the same
+    # number of takes to equal length gives 550 and 550 instead.
+    total = len(script.plain(text))
+    limit = -(-total // max(1, -(-total // limit)))
+    out, cur, n = [], [], 0
+    for sent in script.SENTENCE.split(text.strip()):
+        cur.append(sent)
+        n += len(script.plain(sent))
+        if n >= limit:
+            out.append(" ".join(cur))
+            cur, n = [], 0
+    if cur:
+        tail = " ".join(cur)
+        # Only a SHORT tail is glued back onto the take before it - a five-word
+        # take read in isolation lands with no run-up, and the join costs less
+        # than that. A tail that is most of a take stands on its own, or gluing
+        # it undoes the even sizing above and hands back the long take this
+        # function exists to avoid.
+        if out and n < limit / 2:
+            out[-1] += " " + tail
+        else:
+            out.append(tail)
+    return out
+
+
+def takes(story: str, name: str, n: int, fish_voice: str = "") -> list:
+    """n readings of the same story, for a human to choose between.
+
+    No alignment: whisper is what turns audio into subtitles, and n-1 of these
+    are going to be thrown away. The chosen one is aligned later, at the render,
+    by speak_body(have=...) - which is also the only place the timings would be
+    right, since the take that wins is the only one the video is built on.
+    """
+    out = []
+    for i in range(n):
+        mp3 = OUT_DIR / f"{name}_take{i + 1}.mp3"
+        _fish_synth(spell(_cued(story, FISH_BODY_CUE, " ")), mp3, FISH_SPEED, fish_voice)
+        log.info("%s take %d: %.1f sec", name, i + 1, duration(mp3))
+        out.append(mp3)
+    return out
+
+
+def speak_body(story: str, name: str, rate: str = RATE, speed: float = FISH_SPEED,
+               fish_voice: str = "", have: "Path | None" = None) -> tuple:
+    """The story as one or more takes, concatenated. Same contract as speak().
+
+    edge keeps its single call: its flatness is not drift, it is the engine,
+    and splitting only buys joins for nothing.
+    """
+    # A chosen take is ONE recording of the whole story, so it cannot be split
+    # across several - and must not be re-synthesized to fit.
+    parts = _takes(story) if TTS_BACKEND == "fish" and have is None else [story]
+    if len(parts) == 1:
+        return speak(_cued(parts[0], FISH_BODY_CUE, " "), f"{name}_body",
+                     rate=rate, speed=speed, fish_voice=fish_voice, have=have)
+
+    log.info("%s: story in %d takes of ~%d chars", name, len(parts), FISH_TAKE_CHARS)
+    mp3s, words, at = [], [], 0.0
+    for i, take in enumerate(parts):
+        m, w = speak(_cued(take, FISH_BODY_CUE, " "), f"{name}_body{i}",
+                     rate=rate, speed=speed, fish_voice=fish_voice)
+        words += [{**x, "start": round(x["start"] + at, 3),
+                   "end": round(x["end"] + at, 3)} for x in w]
+        at += duration(m)
+        mp3s.append(m)
+
+    mp3 = OUT_DIR / f"{name}_body.mp3"
+    _concat(mp3s, mp3)
+    (OUT_DIR / f"{name}_body.json").write_text(json.dumps(words, ensure_ascii=False), "utf-8")
+    return mp3, words
+
+
 def speak_parts(title: str, body: str, name: str, gap: float = 0.0,
                 rate: str = RATE, speed: float = FISH_SPEED,
-                gender: str = "male", fish_voice: str = "") -> tuple:
+                gender: str = "male", fish_voice: str = "",
+                body_mp3: "Path | None" = None) -> tuple:
     """Narrate the title card, the story, then the closing question - one track.
 
     Three takes rather than one, for two different reasons. The title is split
@@ -488,8 +609,8 @@ def speak_parts(title: str, body: str, name: str, gap: float = 0.0,
     # were always computed here and thrown away
     t_mp3, t_words = speak(_cued(title, FISH_TITLE_CUE), f"{name}_title",
                            rate=rate, speed=speed, fish_voice=fish_voice)
-    b_mp3, b_words = speak(_cued(story, FISH_BODY_CUE, " "), f"{name}_body",
-                           rate=rate, speed=speed, fish_voice=fish_voice)
+    b_mp3, b_words = speak_body(story, name, rate=rate, speed=speed,
+                                fish_voice=fish_voice, have=body_mp3)
     parts, words = [t_mp3, b_mp3], list(b_words)
 
     if cta:
@@ -558,6 +679,52 @@ if __name__ == "__main__":
     globals()["FISH_VOICE_HORROR"] = ""
     assert pick_voice("male", "_selftest_horror") != "_pinned"
     globals()["SUBREDDITS_HORROR"], globals()["FISH_VOICE_HORROR"] = _real_pin
+
+    # The sampling knobs are the only thing in the request that steers
+    # intonation, and a typo in a field name is silently ignored by the API -
+    # it answers 200 with the same flat take. So the payload is checked here
+    # rather than by listening to it.
+    _sent = {}
+
+    class _Fake:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b"x" * 2000
+
+    def _capture(req, timeout=0):
+        _sent.update(json.loads(req.data))
+        return _Fake()
+
+    _real_open, urllib.request.urlopen = urllib.request.urlopen, _capture
+    try:
+        _fish_synth("Проверка.", OUT_DIR / "_selftest_body.mp3", 1.0, "_v")
+    finally:
+        urllib.request.urlopen = _real_open
+    assert _sent["temperature"] == FISH_TEMPERATURE, _sent
+    assert _sent["top_p"] == FISH_TOP_P, _sent
+    # chunk_length is omitted rather than sent as 0, which the engine reads as
+    # a real length and refuses
+    assert ("chunk_length" in _sent) == bool(FISH_CHUNK), _sent
+    assert _sent["prosody"]["speed"] == 1.0 and _sent["reference_id"] == "_v", _sent
+
+    # The split must not lose a word or cut a cue in half - both come back as
+    # a story that is silently missing a sentence, which no assert downstream
+    # catches because the audio is fine and the timings agree with it.
+    _story = ("Она положила чек на стол и ушла. Чек пролежал там до вечера. "
+              "[emphasis] Никто его не тронул. [мать, тихо] «Это не мои деньги» "
+              "Я не поверил своим глазам! Утром чека уже не было.")
+    for _lim in (0, 20, 60, 10_000):
+        _t = _takes(_story, _lim)
+        assert " ".join(_t) == _story, (_lim, _t)
+        assert all(x.count("[") == x.count("]") for x in _t), (_lim, _t)
+        assert all(x.strip() for x in _t), (_lim, _t)
+    assert _takes(_story, 0) == [_story], "limit 0 is one take"
+    assert len(_takes(_story, 20)) > 1, "a small limit must actually split"
+    # a sentence is never cut in the middle, so every take but the last ends on
+    # a terminal mark
+    assert all(x.rstrip()[-1] in script.TERMINAL for x in _takes(_story, 60)),         _takes(_story, 60)
+    # the short tail rides on the take before it rather than standing alone
+    assert not _takes(_story, 60)[-1].startswith("Утром"), "orphaned tail"
 
     # gap filling must stay ordered and cover every word
     t = [{"word": "a", "start": 0.0, "end": 1.0}, None,
