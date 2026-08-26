@@ -339,7 +339,13 @@ def pick_voice(gender: str = "male", sub: str = "") -> str:
     if not pool:
         pool = FISH_VOICES_MALE or FISH_VOICES_FEMALE
         if pool:
-            log.warning("no %s voices configured, falling back", gender)
+            # info, not a warning: an empty pool is the CONFIGURED state, not a
+            # mistake. One narrator reads every story - the female clones were
+            # flat and nothing in the request moved them - and whose story it is
+            # is said by the subtitle colour instead (render.NARRATOR_COLOURS).
+            # Left as a warning this fires on every video and trains the eye to
+            # skip the log.
+            log.info("no %s voices configured, one narrator reads all", gender)
     return random.choice(pool) if pool else ""
 
 
