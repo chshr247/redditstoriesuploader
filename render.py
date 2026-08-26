@@ -97,6 +97,14 @@ SPEECH_STYLES = "\n".join(
     f"Style: Speech{i},{FONT},{FONT_SIZE},{c},&H000000FF,&H00000000,"
     "&H80000000,-1,0,0,0,100,100,0,0,1,8,3,5,80,80,0,1"
     for i, c in enumerate(SPEAKER_COLOURS))
+# The NARRATOR's own colour, which is what lets one voice read every story:
+# the job of saying whose story this is moves off the ear and onto the eye.
+# Muted on purpose - these are full-screen word cards over footage, and a
+# saturated pink is unreadable at the size they run. An unknown gender keeps
+# the white it always had.
+NARRATOR_WHITE = "&H00FFFFFF"
+NARRATOR_COLOURS = {"female": "&H00B48CFF",   # soft pink
+                    "male": "&H00FFC88C"}     # soft blue
 ASS_HEADER = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {W}
@@ -112,6 +120,18 @@ Style: Main,{FONT},{FONT_SIZE},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+
+
+def _header(gender: str = "") -> str:
+    """The header with Main tinted for the narrator's gender.
+
+    Substituted rather than templated: ASS_HEADER is an f-string, so a
+    placeholder left in it for this would have to survive that pass, and the
+    one time a {FONT} did not, libass quietly fell back to a default font at a
+    default size. The colour appears once, in Main's PrimaryColour - the
+    speaker styles carry their own - and the selftest holds that to one.
+    """
+    return ASS_HEADER.replace(NARRATOR_WHITE, NARRATOR_COLOURS.get(gender, NARRATOR_WHITE), 1)
 
 
 def _ts(sec: float) -> str:
@@ -165,13 +185,13 @@ def _group(words: list[dict], min_chars: int = 3, max_words: int = 2,
     return out
 
 
-def build_ass(words: list[dict], path) -> None:
+def build_ass(words: list[dict], path, gender: str = "") -> None:
     """One word card at a time, over whatever the footage is doing.
 
     The title is not here any more: it is a drawn post, laid over the video as
     images rather than set as text - see card.py.
     """
-    lines = [ASS_HEADER]
+    lines = [_header(gender)]
     styles = _styles(words)
     words = _group(words)
     for i, w in enumerate(words):
@@ -560,7 +580,7 @@ def _card_chain(idx: int, cards: list[tuple[float, float, Path]],
 def render(mp3, words: list[dict], name: str, bg=None,
            title: str = "", title_end: float = 0, key: str = "",
            title_words: list[dict] | None = None, ad=None, part: int = 0,
-           sub: str = ""):
+           sub: str = "", gender: str = ""):
     """Burn subtitles over a background clip and mux the narration.
 
     `key` identifies the STORY rather than the file: out/<id>_en.mp4 and
@@ -578,7 +598,7 @@ def render(mp3, words: list[dict], name: str, bg=None,
     dur = _dur(mp3)
     ass = OUT_DIR / f"{name}.ass"
     out = OUT_DIR / f"{name}.mp4"
-    build_ass(words, ass)
+    build_ass(words, ass, gender)
     cards = (card.build(title_words or [], title, title_end, name, part)
              if title and title_end > 0 else [])
 
@@ -901,6 +921,19 @@ if __name__ == "__main__":
     body = (OUT_DIR / "_check.ass").read_text("utf-8").splitlines()
     events = [l for l in body if l.startswith("Dialogue:")]
     assert len(events) == len(cards), f"{len(events)} lines for {len(cards)} cards"
+
+    # The narrator's tint is a one-shot substitution, so the colour it replaces
+    # must occur exactly once - a second white anywhere in the header and the
+    # tint silently lands on the wrong style instead of Main.
+    assert ASS_HEADER.count(NARRATOR_WHITE) == 1, "Main is no longer the only white"
+    assert NARRATOR_WHITE not in NARRATOR_COLOURS.values(), "a gender tint is white"
+    for _g, _c in (("female", NARRATOR_COLOURS["female"]),
+                   ("male", NARRATOR_COLOURS["male"]),
+                   ("", NARRATOR_WHITE), ("nonsense", NARRATOR_WHITE)):
+        _main = [l for l in _header(_g).splitlines() if l.startswith("Style: Main,")]
+        assert len(_main) == 1 and _main[0].split(",")[3] == _c, (_g, _main)
+        # the speaker palette must not move when the narrator is tinted
+        assert all(c in _header(_g) for c in SPEAKER_COLOURS), _g
 
     try:
         clips = sorted(p for p in BG_DIR.rglob("*")

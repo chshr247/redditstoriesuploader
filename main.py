@@ -80,7 +80,7 @@ def _render(title: str, body: str, gender: str, key: str, sub: str,
     # the same meta that publish.py captions from - one source, so the card and
     # the caption can never disagree about which part this is.
     out = render.render(mp3, words, name, title=title, title_end=title_end,
-                        key=key, title_words=title_words, sub=sub,
+                        key=key, title_words=title_words, sub=sub, gender=gender,
                         part=(meta or {}).get("part", 0)
                         if (meta or {}).get("total", 0) > 1 else 0)
     # publishing runs separately and later, so the text has to survive on disk.
