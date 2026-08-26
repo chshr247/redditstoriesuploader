@@ -569,8 +569,16 @@ if __name__ == "__main__":
     OWNER = "chshr247"
     MODEL = "Я [emphasis] закрыла камеру сестре мужа ладонью, хотя она обещала"
     MODEL_CTA = "[curious] А вы бы [emphasis] открыли эту коробку?"
-    ONE = [[MODEL, "Модель нашла коробку. " * 60 + MODEL_CTA]]
-    FILLER = "Модель нашла эту коробку сама. " * 37
+    # Every fixture narration is counted off the LIVE target, never written out
+    # at a fixed length: _target_words() moves with TARGET_SEC, and a hand-
+    # counted body silently drops under the budget the next time it does - which
+    # is what left these at 195 and 185 words against a target of 332 when the
+    # Russian narration went to 130 seconds.
+    def _filler(line: str, parts: int = 1) -> str:
+        return line * (script._target_words() // len(line.split()) // parts + 2)
+
+    ONE = [[MODEL, _filler("Модель нашла коробку. ") + MODEL_CTA]]
+    FILLER = _filler("Модель нашла эту коробку сама. ")
     THREE = [[MODEL, FILLER + "И тут всё оборвалось."],
              [MODEL, FILLER + "И тут оборвалось снова."],
              [MODEL, FILLER + MODEL_CTA]]
@@ -610,7 +618,7 @@ if __name__ == "__main__":
 
     # A narration of one's own, under the blank line. Long enough to pass the
     # budget and closed with a question, which is what the format is built on.
-    story = ("Я работал в ночную смену и однажды нашёл в подсобке коробку. " * 16
+    story = (_filler("Я работал в ночную смену и однажды нашёл в подсобке коробку. ")
              + "[doubtful] А вы бы [emphasis] открыли эту коробку?")
     got, bodies, fault, cid = _choose([c(8, OWNER, f"{mine}\n\n{story}")],
                                       OWNER, ONE, 0)
@@ -624,7 +632,7 @@ if __name__ == "__main__":
     assert _choose([c(10, OWNER, mine)], OWNER, ONE, 0)[1] == []
     # A rewrite that just ends, with no question at all, borrows the model's -
     # the markup it needs is a nuisance to type and the model already typed it.
-    plain_story = "Я работал в ночную смену и нашёл в подсобке коробку. " * 18
+    plain_story = _filler("Я работал в ночную смену и нашёл в подсобке коробку. ")
     got, bodies, fault, _ = _choose([c(11, OWNER, f"{mine}\n\n{plain_story}")],
                                     OWNER, ONE, 0)
     assert (got, fault) == (mine, ""), (got, fault)
@@ -664,7 +672,7 @@ if __name__ == "__main__":
 
     # A split story rewritten by hand: parts split on the model's own separator,
     # and only the last one closes on the question to the viewer.
-    mid = "Я работал в ночную смену и однажды нашёл в подсобке коробку. " * 17
+    mid = _filler("Я работал в ночную смену и однажды нашёл в подсобке коробку. ")
     three = f"{mid}\n---\n{mid}\n---\n{story}"
     got, bodies, fault, _ = _choose([c(13, OWNER, f"{mine}\n\n{three}")],
                                     OWNER, THREE, 0)
