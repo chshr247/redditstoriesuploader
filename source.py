@@ -241,11 +241,35 @@ def _cap(sub: str) -> int:
     return HORROR_CHARS if sub in SUBREDDITS_HORROR else MAX_CHARS
 
 
+def _linked(p: dict) -> bool:
+    """True when the archive says this post is a link, a gallery or a video.
+
+    Every filter here reads the TEXT, and a photo post has text: the caption
+    under it. r/Paranormal is half gallery posts, their captions run 460 to
+    2600 characters, and every one of them clears MIN_CHARS, ranks at the top
+    of the sub on score - the photo is what the karma is for - and is not a
+    story anyone can narrate. Only the model could say so, and by then the post
+    had cost an LLM call and burned the day's horror slot, which is spent by
+    the pick and not by the video: thirteen posts between 2026-08-21 and 08-27
+    and not one scare made. All six that could still be looked up afterwards
+    were is_self=False, five of them galleries - 1ljtrhk, "Blood-colored
+    footprints keep appearing on my garage", among them.
+
+    Asked from the positive answer only. Three backends fill these fields and
+    a missing one arrives as None, which is "the archive did not say" and not
+    "this is a link" - read the other way round, a backend that omits is_self
+    would empty the pool on the next refill.
+    """
+    return (p.get("is_self") is False
+            or bool(p.get("is_gallery")) or bool(p.get("is_video")))
+
+
 def _usable(p: dict, sub: str = "") -> bool:
     text = p.get("selftext") or ""
     return (
         not p.get("over_18")
         and not p.get("stickied") and not p.get("locked")
+        and not _linked(p)
         and not CONTEXT_BOUND.match(p.get("title") or "")
         and p.get("num_comments", 0) >= MIN_COMMENTS
         and text not in ("[removed]", "[deleted]")
@@ -634,8 +658,14 @@ def _by_id(post_id: str) -> dict | None:
 # nothing about the story under it, and three of plan_ru.md's stories are locked.
 # What is left is what makes a video impossible rather than unpromising.
 def _tellable(p: dict) -> bool:
+    # _linked() here as well as in _usable(), and it earns its place twice: the
+    # pool was filled before that check existed, so it still holds gallery rows
+    # that _usable() will never see again. This is where the body comes back,
+    # and a row that fails here is DELETED from the pool rather than marked
+    # used - so the ones already in there are cleaned out as they surface, at
+    # no cost to the day they surfaced on.
     text = p.get("selftext") or ""
-    return (not p.get("over_18")
+    return (not p.get("over_18") and not _linked(p)
             and text not in ("[removed]", "[deleted]")
             and MIN_CHARS <= len(text) <= _cap(p.get("subreddit", "")))
 
@@ -966,6 +996,21 @@ if __name__ == "__main__":
         assert not _usable({**ok, "title": bad}), f"context-bound: {bad!r}"
     for good in ["Updating my resume ruined my week", "My dad is kicking me out"]:
         assert _usable({**ok, "title": good}), f"false positive: {good!r}"
+
+    # A photo post has text - the caption under the picture - so every filter
+    # above passes it, and it ranks at the top of a sub like r/Paranormal
+    # because the photo is what the karma is for. These are the real shapes,
+    # off the six horror posts the model refused between 08-21 and 08-27.
+    assert not _usable({**ok, "is_self": False}), "179p9ug, a link post"
+    assert not _usable({**ok, "is_gallery": True}), "1lcgx2h, Photo Evidence"
+    assert not _usable({**ok, "is_video": True})
+    assert not _tellable({**ok, "is_self": False}), "and again where bodies land"
+    # ...but a field the backend did not send is not an answer. Read the other
+    # way round this empties the pool on the first refill from a source that
+    # does not carry is_self at all.
+    assert _usable({**ok, "is_self": None}) and _usable({**ok, "is_gallery": None})
+    assert _usable({**ok, "is_self": True}), "a text post is the whole point"
+
     assert _clean("don&#39;t") == "don't"
 
     # The pool is ordered by how much of a fight a post is, and every signal has
