@@ -9,7 +9,8 @@ stories. The whole split is written in a single LLM call and parked in seen.db;
 one part is rendered per run, in the run that publishes it, because on a CI
 runner out/ does not survive to the next one.
 
-    python main.py --park   write the day's stories, render nothing
+    python main.py --park    write the day's stories, render nothing
+    python main.py --takes   read the settled ones aloud and ask which take
 
 Nothing is rendered until a human has answered for it: a story is written and
 parked on a GitHub issue (review.py), and a whole day's worth are parked at
@@ -665,6 +666,34 @@ if __name__ == "__main__":
     if STOPPED:
         log.warning("%s - writing and rendering nothing", STOP_REASON)
         sys.exit(1)
+
+    # Read every settled story aloud and ask which reading goes out. Renders
+    # nothing and publishes nothing - like --park, this is the half of main.py
+    # that needs no slot, so it can neither spend the day's allowance nor move
+    # the gap between sends.
+    #
+    # The review workflow runs it the moment a title is accepted. It used to
+    # happen in the render slot instead, which is where the TTS key and the
+    # minutes already were, and that put up to TIKTOK_MIN_GAP_HOURS between
+    # answering one question and being asked the next: #141 was accepted at
+    # 09:57 and read aloud at 13:41. The render slot keeps it as the fallback -
+    # a row that gets there still owing takes is offered them exactly as before,
+    # so a failure here costs a wait and never the stage.
+    if "--takes" in sys.argv:
+        if why := review.ok():
+            log.error("cannot reach GitHub to offer the readings (%s)", why)
+            sys.exit(1)
+        owed = review.owed_takes()
+        for r in owed:
+            # One story's failure is not the others': the takes are three TTS
+            # calls and an upload, and the story that follows this one in the
+            # batch has nothing to do with any of them.
+            try:
+                offer_takes(r)
+            except Exception:
+                log.exception("could not offer readings for %s", r["post_id"])
+        log.info("%d stor%s read aloud", len(owed), "y" if len(owed) == 1 else "ies")
+        sys.exit(0)
 
     # Park stories and render nothing. The review workflow runs this the
     # moment a `-` arrives, so the replacement story is written within the

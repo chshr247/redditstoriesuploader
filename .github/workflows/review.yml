@@ -10,6 +10,11 @@ name: review
 # freed slot is what the next question goes into - so a rejection answered here
 # is a replacement story on a new issue within the minute, which is the whole
 # point of turning one down rather than editing it.
+#
+# And it reads the story aloud. A settled title is followed by one more
+# question - which of REVIEW_TAKES readings goes out - and that used to be
+# asked from the render slot, up to TIKTOK_MIN_GAP_HOURS after the title was
+# answered. Both questions arrive on the same fast path now.
 on:
   issue_comment:
     types: [created]
@@ -76,11 +81,20 @@ jobs:
           fi
           echo "lang=$lang" >> "$GITHUB_OUTPUT"
 
+      # REVIEW_TAKES rides along with every step that reads the table, not just
+      # the one that narrates: _stage() asks whether a settled story still owes
+      # a reading, and a runner that cannot see the variable falls back to the
+      # code default of 3. On the English channel, which is set to 0, that made
+      # this step believe a question was still out and skip the publish time it
+      # should have promised - a disagreement between two runners about a story
+      # neither of them was wrong about.
       - name: Read the answer
         if: steps.who.outputs.lang != ''
         env:
           GH_TOKEN: ${{ github.token }}
           OUTPUT_LANG: ${{ steps.who.outputs.lang }}
+          REVIEW_TAKES: ${{ vars.REVIEW_TAKES }}
+          REVIEW_TAKES_EN: ${{ vars.REVIEW_TAKES_EN }}
         run: python review.py --check
 
       # Only when the answer actually freed a slot. A `+` or a rewritten title
@@ -99,9 +113,75 @@ jobs:
             echo "room=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # The other thing a `+` can leave behind: a title that has just settled
+      # and a story nobody has heard yet. Same bargain as the step above and
+      # read the same way - sqlite only, so a comment that settled no title
+      # pays for neither ffmpeg nor the TTS half of requirements.txt.
+      - name: Is anything waiting to be read aloud?
+        id: takes
+        if: steps.who.outputs.lang != ''
+        env:
+          OUTPUT_LANG: ${{ steps.who.outputs.lang }}
+          REVIEW_TAKES: ${{ vars.REVIEW_TAKES }}
+          REVIEW_TAKES_EN: ${{ vars.REVIEW_TAKES_EN }}
+        run: |
+          if python review.py --owes-takes; then
+            echo "takes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "takes=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install dependencies
-        if: steps.room.outputs.room == 'true'
+        if: steps.room.outputs.room == 'true' || steps.takes.outputs.takes == 'true'
         run: pip install -q -r requirements.txt
+
+      # voice.duration() shells out to ffprobe on every take it makes, and the
+      # runner image does not carry either. Only the readings need it - writing
+      # a story touches no audio at all - so it is behind that gate alone.
+      - name: Install ffmpeg
+        if: steps.takes.outputs.takes == 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+
+      # Reads the settled story aloud REVIEW_TAKES times, uploads the mp3s and
+      # asks which one goes out. Renders nothing and publishes nothing, so it
+      # can neither spend the day's allowance nor move the gap between sends.
+      #
+      # Here rather than in the render slot, which is where it used to be: a
+      # slot opens once every TIKTOK_MIN_GAP_HOURS, so answering the title and
+      # being asked about the voice were up to three hours apart - #141 was
+      # accepted at 09:57 and read aloud at 13:41. The slot keeps it as the
+      # fallback, so a failure here is a wait rather than a stage lost.
+      - name: Read it aloud
+        if: steps.takes.outputs.takes == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUTPUT_LANG: ${{ steps.who.outputs.lang }}
+          FISH_API_KEY: ${{ secrets.FISH_API_KEY }}
+          FISH_MODEL: ${{ vars.FISH_MODEL }}
+          FISH_VOICES_MALE: ${{ vars.FISH_VOICES_MALE }}
+          FISH_VOICES_FEMALE: ${{ vars.FISH_VOICES_FEMALE }}
+          FISH_VOICE_HORROR: ${{ vars.FISH_VOICE_HORROR }}
+          FISH_VOICES_MALE_EN: ${{ vars.FISH_VOICES_MALE_EN }}
+          FISH_VOICES_FEMALE_EN: ${{ vars.FISH_VOICES_FEMALE_EN }}
+          # Not decoration. voice.pick_voice() hands a horror sub to
+          # FISH_VOICE_HORROR and everything else to the ordinary pool, so a
+          # runner that cannot see this list reads a horror story aloud in the
+          # wrong narrator - and then the render, which CAN see it, puts the
+          # right one on the title and the closing question. One video, two
+          # voices, and the take the user picked is the half that is wrong.
+          SUBREDDITS_HORROR: ${{ vars.SUBREDDITS_HORROR }}
+          # Which engine reads it, so the audition is made by whatever the
+          # render will use rather than by this file's default.
+          TTS_BACKEND: ${{ vars.TTS_BACKEND }}
+          # REVIEW_TAKES of 0 or 1 turns the stage off, and the English channel
+          # is set to 0 - so this has to be here or the runner falls back to the
+          # code default and offers takes on a channel that wants none.
+          REVIEW_TAKES: ${{ vars.REVIEW_TAKES }}
+          REVIEW_TAKES_EN: ${{ vars.REVIEW_TAKES_EN }}
+        run: python main.py --takes
 
       # Same private repo and same read-only deploy key as publish.yml, and
       # behind the same kind of gate: a comment that freed no slot pays for no

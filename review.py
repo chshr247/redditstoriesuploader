@@ -857,6 +857,35 @@ def ready() -> dict | None:
     return _poll(timeout=True)
 
 
+def owed_takes() -> list[dict]:
+    """Settled stories that still owe the reader a choice of readings.
+
+    The rows only. Narrating them is the caller's half and the expensive one -
+    it needs the TTS key, ffmpeg and the whole of requirements.txt - so this
+    answers with nothing but sqlite, and review.yml asks it before installing
+    any of that. A comment that settled no title pays for none of it.
+
+    Offering the takes used to wait for a render slot, on the grounds that the
+    slot is where the TTS key and the minutes already were. What that cost is
+    the wait: #141's title was accepted at 09:57 and its readings arrived at
+    13:41, because a slot opens once every TIKTOK_MIN_GAP_HOURS. The question
+    is asked off the comment now, and the slot keeps the fallback - a row that
+    reaches one still owing takes is offered them there exactly as before.
+
+    _final() is applied for the reason _judge() applies it: a take is read off
+    `written`, and a story rewritten by hand in the comment has to be narrated
+    as it was rewritten rather than as the model first wrote it.
+    """
+    out = []
+    for r in _rows():
+        # An empty `takes` is what keeps _stage() away from _judge_take(),
+        # which reads the issue's comments - a gh call per row, on a gate whose
+        # whole point is to be cheap.
+        if r["title"] and not r["takes"] and _stage(r, False) == "offer":
+            out.append(_final(r, json.loads(r["body"]) if r["body"] else []))
+    return out
+
+
 def check() -> list[str]:
     """Answer the user without rendering anything. Safe outside the gate.
 
@@ -922,6 +951,16 @@ if __name__ == "__main__":
         n = queued()
         print(f"{n}/{REVIEW_BATCH} video(s) parked over {parked()} issue(s)")
         sys.exit(0 if n < REVIEW_BATCH else 1)
+
+    # Does anything owe a choice of readings? The same bargain as --room and
+    # read the same way: review.yml asks before it installs ffmpeg and the TTS
+    # half of requirements.txt, and a comment that settled no title pays for
+    # neither. Sqlite only - no gh call, no network.
+    if "--owes-takes" in sys.argv:
+        owed = owed_takes()
+        print(f"{len(owed)} settled stor{'y' if len(owed) == 1 else 'ies'} "
+              f"still to be read aloud")
+        sys.exit(0 if owed else 1)
 
     # The gate does not guard this and must not: it decides whether a video can
     # be made, and reading a comment is not making one.
@@ -1158,6 +1197,21 @@ if __name__ == "__main__":
         assert _rows()[2]["written"] == THREE, "written comes back parsed"
         _mem.execute("DELETE FROM review WHERE post_id='c'")
         assert not split_parked() and parked() == 2 and queued() == 2
+
+        # Which settled stories still owe the reader a choice of readings, and
+        # answered off the table alone - review.yml asks this before it installs
+        # ffmpeg and the TTS half of requirements.txt. `b` has its title and has
+        # not been read; `a` is still out for one.
+        if REVIEW_TAKES > 1:
+            assert [r["post_id"] for r in owed_takes()] == ["b"], owed_takes()
+            assert owed_takes()[0]["written"] == [("T", ONE[0][1])], "title folded in"
+            _mem.execute("UPDATE review SET takes='{}' WHERE post_id='b'")
+            assert owed_takes() == [], "asked once is asked"
+            _mem.execute("UPDATE review SET takes='', written=? WHERE post_id='b'",
+                         (json.dumps(THREE),))
+            assert owed_takes() == [], "a split story is never read aloud"
+            _mem.execute("UPDATE review SET written=? WHERE post_id='b'",
+                         (json.dumps(ONE),))
 
         # Two stories decided in one sitting must not be promised the SAME
         # slot. #140 and #141 were - both "сегодня в 22:07" - because each
