@@ -631,7 +631,11 @@ jobs:
           # then this opens an issue exactly as it used to.
           issue=$(sed -n 's/^ISSUE: //p' /tmp/tiktok.out | tail -1)
           if [ -n "$caption" ] && [ -n "$issue" ] && [ "$issue" != "0" ]; then
-            printf 'Черновик ушёл в инбокс TikTok. Подпись:\n\n%s\n' "$caption" \
+            # The trailing marker is review.py's: every comment the pipeline
+            # writes carries one, and review.py reads no comment that has it.
+            # Without it this caption is the newest comment by the repo owner
+            # on an issue still in the review table, which is an answer.
+            printf 'Черновик ушёл в инбокс TikTok. Подпись:\n\n%s\n\n<!-- reddit-bot:caption -->\n' "$caption" \
               | gh issue comment "$issue" --body-file -
           elif [ -n "$caption" ]; then
             # The channel is in the title because the reminder is useless

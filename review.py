@@ -10,10 +10,22 @@ the whole shape of this file. One at a time meant a question every three hours,
 each arriving minutes before its own video was due, and an unanswered one held
 the pipeline: nothing else could be written until it was answered. A batch is
 read in one sitting instead. A story turned down frees its slot on the spot and
-the replacement is written within the minute (review.yml), and a story accepted
-is answered with the time it actually publishes - which is a real answer only
-because the queue position is in it, three of four accepted together being
-hours apart. See main.top_up() for the writing half.
+the replacement is written within the minute (review.yml). See main.top_up()
+for the writing half.
+
+A story that has been fully decided - the title, and the reading where readings
+were offered - is answered with the time it publishes, and that time is a claim
+rather than an estimate: it is written onto the row, no other story may take
+it, and _poll() holds the story back until the clock reaches it. It was an
+estimate until 2026-08-27 and was recomputed on every tick from whatever had
+settled so far, which is how #140 and #141 were both promised 22:07.
+
+The repository is PUBLIC and this file runs in two places - as github-actions on
+a runner, and under the operator's own login on their desk. Every comment it
+writes carries a mark and it reads no comment that has one; without that its own
+verdicts came back to it as answers, and its own record of what it had already
+said (seen.db, which crosses between the two by git and is stale in between)
+was not enough to stop it saying everything twice. See MARK and _said().
 
 Why an issue rather than a file or a chat bot. The workflow already holds a
 token that can open one, so there is no second secret. An issue comment stays
@@ -54,7 +66,7 @@ ACCEPT = {"+", "да", "ок", "ok", "ага", "yes"}
 REJECT = {"-", "нет", "скип", "skip", "no", "мимо", "хуйня"}
 
 _COLS = ("post_id", "issue", "ts", "gender", "sub", "score", "written",
-         "answered", "title", "body", "takes", "take")
+         "answered", "title", "body", "takes", "take", "pub_at")
 
 
 def _db():
@@ -72,6 +84,7 @@ def _db():
                "sub TEXT, score INT, written TEXT, answered INT DEFAULT 0, "
                "title TEXT DEFAULT '', body TEXT DEFAULT '', "
                "takes TEXT DEFAULT '', take INT DEFAULT -1, "
+               "pub_at REAL DEFAULT 0, "
                "PRIMARY KEY(post_id, lang))")
     # `body` arrived after `title`; a row written before it keeps '' and the
     # story is narrated as the model wrote it, which is what '' means anyway.
@@ -87,6 +100,11 @@ def _db():
     if "takes" not in have:
         db.execute("ALTER TABLE review ADD COLUMN takes TEXT DEFAULT ''")
         db.execute("ALTER TABLE review ADD COLUMN take INT DEFAULT -1")
+    # `pub_at` is the time this story was PROMISED on its issue, and the row is
+    # held until it. 0 means nothing has been promised yet, which is what every
+    # row written before this reads as - it gets a time on the next tick.
+    if "pub_at" not in have:
+        db.execute("ALTER TABLE review ADD COLUMN pub_at REAL DEFAULT 0")
     return db
 
 
@@ -97,6 +115,45 @@ def _gh(*args: str, stdin: str = "") -> str:
     if r.returncode:
         raise RuntimeError(f"gh {' '.join(args[:2])}: {r.stderr.strip()[:200]}")
     return r.stdout.strip()
+
+
+# Every comment this file writes carries it, and nothing this file READS may
+# have it. The pipeline runs in two places - as github-actions on a runner, and
+# through the operator's own `gh` login on their desk - and on the desk the bot
+# IS the owner, so each verdict it posted became the newest "answer" on the
+# issue and the next poll read it back as a hand-written title. Issue #136,
+# 2026-08-26: the desk re-posted the six-hour timeout and a second, contradictory
+# publish time four hours after CI had said both, on a story already out.
+#
+# An HTML comment, because GitHub renders it as nothing at all. The tag after it
+# says WHICH verdict, which is the other half - see _said().
+MARK = "<!-- reddit-bot"
+
+
+def _say(issue: int, body: str, tag: str = "") -> str:
+    """Comment on the issue, marked as ours. Returns the comment URL."""
+    return _gh("issue", "comment", str(issue), "--body",
+               f"""{body}
+
+{MARK}:{tag} -->""")
+
+
+def _mine(comments: list[dict], owner: str) -> list[dict]:
+    """The owner's own comments - ours dropped, whoever's login posted them."""
+    return [c for c in comments
+            if c["user"]["login"].lower() == owner.lower()
+            and MARK not in (c["body"] or "")]
+
+
+def _said(comments: list[dict], tag: str) -> bool:
+    """Has this verdict already been announced on this issue?
+
+    The only record of one that BOTH machines can read. seen.db is the other
+    one, and it crosses between them by git: a row CI answered at 16:04 is
+    still sitting unanswered in the desk's copy at 21:18, and the desk then
+    answers it again. The issue itself has one copy.
+    """
+    return any(f"{MARK}:{tag} -->" in (c["body"] or "") for c in comments)
 
 
 _owner_cache = ""
@@ -216,7 +273,7 @@ def _choose(comments: list[dict], owner: str, written: list, answered: int
     three things: the title `+` accepts, how many parts the story has, and the
     closing question to fall back on when a rewrite arrives without one.
     """
-    mine = [c for c in comments if c["user"]["login"].lower() == owner.lower()]
+    mine = _mine(comments, owner)
     if not mine or mine[-1]["id"] <= answered:
         return "", [], "", 0
     last = mine[-1]
@@ -360,11 +417,19 @@ def split_parked() -> bool:
 
 
 def _rows() -> list[dict]:
-    """Every story of this channel out for a title, oldest first."""
+    """Every story of this channel out for a title, in the order they go out.
+
+    Which is the order they were PROMISED, and only falls back on the order
+    they were parked in for a story with no promise yet. The two part company
+    as soon as one question is answered before an older one: #141 was answered
+    the minute it was asked and #140 took three tries, so #140 was parked first
+    and publishes second.
+    """
     out = []
     with _db() as db:
         rows = db.execute(f"SELECT {','.join(_COLS)} FROM review WHERE lang=? "
-                          "ORDER BY ts", (OUTPUT_LANG,)).fetchall()
+                          "ORDER BY CASE WHEN pub_at>0 THEN pub_at ELSE ts END",
+                          (OUTPUT_LANG,)).fetchall()
     for row in rows:
         r = dict(zip(_COLS, row))
         r["written"] = json.loads(r["written"])
@@ -380,21 +445,35 @@ def _poll(timeout: bool) -> dict | None:
     the fourth issue has to be picked up while the first is still untouched.
     One gh call per parked story - four on a full batch, twice an hour.
 
-    Rows come oldest-first, so the story handed back is the one that has waited
-    longest among those actually settled. That is the order main.py renders in
-    and the order publish.eta() counts, which is what makes the time quoted
-    back to the user the time it really goes out.
+    Rows come in the order they were promised, so the story handed back is the
+    one whose slot came round first - which is the order main.py renders in and
+    the order the times on the issues were counted in.
+
+    Nothing is handed back before the time its issue was promised. That promise
+    used to be an estimate that moved: publish.eta() was asked again from
+    scratch every time another story settled in front of this one, so the time
+    written on the issue and the time the video actually went out were two
+    different times. _claim() writes one down and this holds the row until it.
     """
     first = None
+    now = time.time()
     for r in _rows():
         got = _judge(r, timeout)
-        if not got or first is not None:
+        if not got:
             continue
+        # Every row, not only the first ready one: a take picked on the fourth
+        # issue has to be read while the first is still waiting out its clock,
+        # and _stage() is what reads it.
         if (stage := _stage(got, timeout)) == "wait":
             continue
+        if stage == "render" and not got["pub_at"]:
+            _claim(got)
         # The caller renders, or makes the takes and renders on a later tick.
-        got["needs_takes"] = stage == "offer"
-        first = got
+        # Takes are not a publication and answer to no promise - they are the
+        # last question left before one can be made.
+        if first is None and (stage == "offer" or now >= got["pub_at"]):
+            got["needs_takes"] = stage == "offer"
+            first = got
     return first
 
 
@@ -427,11 +506,28 @@ def _judge(r: dict, timeout: bool) -> dict | None:
     render on it would start the clock in the wrong place.
     """
     model_title = r["written"][0][0]
+    # Read once and carried on the row: _stage() needs the same comments to
+    # find the take, and two fetches of one issue in one tick is one too many.
+    r["comments"] = comments = _comments(r["issue"])
+
+    # Both machines write this table and it reaches the other one by git, so a
+    # row here can be HOURS behind the issue it points at. The issue is the one
+    # copy they share: a story whose publish time has already been announced on
+    # it is settled, whatever this file still thinks. Drop the row rather than
+    # decide it a second time - deciding it twice is what put two contradictory
+    # times and two timeout notices on #136 (2026-08-26), four hours after the
+    # video had already gone out.
+    if not r["pub_at"] and _said(comments, "when"):
+        log.info("%s: #%d was settled elsewhere - dropping the stale row",
+                 r["post_id"], r["issue"])
+        rendered(r["post_id"])
+        return None
+
     if r["title"]:
         # Chosen already; a previous run just failed to render it.
         return _final(r, json.loads(r["body"]) if r["body"] else [])
 
-    title, bodies, fault, cid = _choose(_comments(r["issue"]), _owner(),
+    title, bodies, fault, cid = _choose(comments, _owner(),
                                         r["written"], r["answered"])
     if title is None:
         # Thrown away, and it does not come back: the post was marked used when
@@ -439,7 +535,6 @@ def _judge(r: dict, timeout: bool) -> dict | None:
         log.info("%s: dropped by the user, not rendering", r["post_id"])
         close(r["post_id"], "Снято, рендера не будет.")
         return None
-    settled = bool(cid and title)
     if cid:
         r["title"] = title
         with _db() as db:
@@ -448,15 +543,17 @@ def _judge(r: dict, timeout: bool) -> dict | None:
                        (cid, title, json.dumps(bodies, ensure_ascii=False),
                         r["post_id"], OUTPUT_LANG))
     if fault:
-        _gh("issue", "comment", str(r["issue"]), "--body",
-            f"Не приму: {fault}.\n\nНапиши ещё раз, или `+` — возьму вариант модели.")
+        _say(r["issue"],
+             f"Не приму: {fault}.\n\nНапиши ещё раз, или `+` — возьму вариант модели.",
+             "fault")
         log.info("%s: title refused (%s)", r["post_id"], fault)
         return None
     if not title:
         if not timeout or time.time() - r["ts"] < HOURS * 3600:
             return None
-        _gh("issue", "comment", str(r["issue"]),
-            "--body", f"{HOURS} ч без ответа — ушло название модели.")
+        if not _said(comments, "timeout"):
+            _say(r["issue"], f"{HOURS} ч без ответа — ушло название модели.",
+                 "timeout")
         log.info("%s: no answer in %dh, using the model's title", r["post_id"], HOURS)
         title = model_title
         # written down for the same reason an accepted one is: the timeout is
@@ -464,15 +561,11 @@ def _judge(r: dict, timeout: bool) -> dict | None:
         with _db() as db:
             db.execute("UPDATE review SET title=? WHERE post_id=? AND lang=?",
                        (title, r["post_id"], OUTPUT_LANG))
-        settled = True
 
     r["title"] = title
-    # Said once, in the run that settled it. "Accepted" on its own reads as
-    # "published", and with a day's stories accepted in one sitting three of
-    # them are hours away - so the answer to `+` is a time, not an
-    # acknowledgement.
-    if settled:
-        _say_when(r["issue"], r["ts"])
+    # No time is quoted here any more: the story is not finished being decided.
+    # _claim() says it once the LAST question about it has been answered - see
+    # the note there.
     return _final(r, bodies)
 
 
@@ -525,7 +618,7 @@ def offer_takes(r: dict, mp3s: list) -> None:
 
     numbers = ", ".join(f"`{i + 1}`" for i in range(len(urls)))
     links = "\n".join(f"{i + 1}. {u}" for i, u in enumerate(urls))
-    out = _gh("issue", "comment", str(r["issue"]), "--body", f"""\
+    out = _say(r["issue"], f"""\
 **Озвучка готова, дублей {len(urls)} — выбери.**
 
 {links}
@@ -534,7 +627,7 @@ def offer_takes(r: dict, mp3s: list) -> None:
 прочитанный по-разному.
 
 **Первой строкой — номер:** {numbers}.
-Молчание {TAKES_HOURS} ч — уйдёт первый.""")
+Молчание {TAKES_HOURS} ч — уйдёт первый.""", "takes")
     cid = int(out.rstrip("/").rsplit("-", 1)[-1]) if "-" in out else 0
     with _db() as db:
         db.execute("UPDATE review SET takes=? WHERE post_id=? AND lang=?",
@@ -550,8 +643,8 @@ def _pick(comments: list[dict], owner: str, after: int, n: int) -> int:
     the issue is public and already full of the title conversation, and a `1`
     written up there was about something else.
     """
-    for c in comments:
-        if c["user"]["login"] != owner or c["id"] <= after:
+    for c in _mine(comments, owner):
+        if c["id"] <= after:
             continue
         first = (c["body"] or "").strip().splitlines()
         if first and (d := first[0].strip().strip(".")).isdigit() and 1 <= int(d) <= n:
@@ -562,18 +655,17 @@ def _pick(comments: list[dict], owner: str, after: int, n: int) -> int:
 def _judge_take(r: dict, timeout: bool) -> bool:
     """True once the row has a take to render. Mirrors _judge()'s contract."""
     offer = json.loads(r["takes"])
-    got = _pick(_comments(r["issue"]), _owner(), offer["cid"], offer["n"])
+    got = _pick(r["comments"], _owner(), offer["cid"], offer["n"])
     if got < 0:
         if not timeout or time.time() - offer["ts"] < TAKES_HOURS * 3600:
             return False
-        _gh("issue", "comment", str(r["issue"]),
-            "--body", f"{TAKES_HOURS} ч без ответа — ушёл первый дубль.")
+        _say(r["issue"], f"{TAKES_HOURS} ч без ответа — ушёл первый дубль.",
+             "take")
         log.info("%s: no take picked in %dh, using the first",
                  r["post_id"], TAKES_HOURS)
         got = 0
     else:
-        _gh("issue", "comment", str(r["issue"]), "--body",
-            f"Принято, дубль {got + 1}.")
+        _say(r["issue"], f"Принято, дубль {got + 1}.", "take")
     r["take"] = got
     with _db() as db:
         db.execute("UPDATE review SET take=? WHERE post_id=? AND lang=?",
@@ -609,36 +701,63 @@ def _local(ts: float) -> str:
     return f"{day} в {d:%H:%M}"
 
 
-def _say_when(issue: int, ts: float) -> None:
-    """Comment the time this story actually publishes, queue position included.
+def _claim(r: dict) -> None:
+    """Promise the time this story publishes, and hold the row until then.
 
-    The position is the point. Four stories accepted in one sitting go out over
-    the whole day, spaced by the gap between sends, and the only thing that
-    tells them apart is how many settled stories were parked BEFORE this one -
-    which is exactly the order _poll() hands them to main.py in. Anything
-    already rendered and sitting in out/ counts too; on CI that is nothing,
-    because the runner takes out/ with it.
+    Said once the story is FULLY decided - the title chosen and, where readings
+    were offered, the take picked - and not a moment earlier. It used to be said
+    the instant a title was accepted, which was a time for a video that then
+    spent six more hours waiting for a voice to be chosen: #136 was quoted 19:07
+    while its readings had not been made yet.
 
-    Never fatal, and never retried: the video goes out whether or not GitHub
-    took the comment, and a second attempt next tick would post it twice.
+    publish.eta() answers the EARLIEST slot the gap between sends, the daily
+    count, the midnight-UTC reset and the cron grid all allow. What was wrong
+    was leaving it an estimate and counting the wrong thing into it: every
+    story counted the stories PARKED before it that had settled, so a story
+    answered late did not see the one answered early behind it. #140 and #141,
+    2026-08-27: #141 was answered on sight and #140 took three tries, and both
+    were told 22:07.
+
+    A claim is written down instead, and what counts as ahead is holding a
+    slot rather than being older. Every row still in this table is a video
+    still to come - rendered() is what removes one - so this takes the first
+    slot none of them has, and keeps it.
+
+    Anything already rendered and sitting in out/ counts too; on CI that is
+    nothing, because the runner takes out/ with it.
+
+    Never fatal: the promise is worth more than the run, and a story with no
+    time on it publishes on the next tick exactly as it did before this existed.
     """
+    at = time.time()
+    ahead = 0
     try:
         import publish
 
         with _db() as db:
-            rows = db.execute(
-                "SELECT written FROM review WHERE lang=? AND title!='' AND ts<?",
-                (OUTPUT_LANG, ts)).fetchall()
-        # Videos ahead, not stories ahead: a settled three-parter in front of
+            rows = db.execute("SELECT post_id, written FROM review "
+                              "WHERE lang=? AND pub_at>0", (OUTPUT_LANG,)).fetchall()
+        # Videos ahead, not stories ahead: a claimed three-parter in front of
         # this one is three sends before it, not one.
-        ahead = sum(len(json.loads(w)) for (w,) in rows) + len(publish.pending())
-        when = publish.eta(ahead)
-        note = ("Принято." if not when else
-                f"Принято, публикация {_local(when)}"
-                + (f" — в очереди впереди ещё {ahead}." if ahead else "."))
-        _gh("issue", "comment", str(issue), "--body", note)
+        ahead = sum(len(json.loads(w)) for pid, w in rows if pid != r["post_id"])
+        ahead += len(publish.pending())
+        at = publish.eta(ahead) or at
     except Exception:
-        log.exception("could not say when #%d publishes", issue)
+        log.exception("could not work out when %s publishes", r["post_id"])
+
+    r["pub_at"] = at
+    with _db() as db:
+        db.execute("UPDATE review SET pub_at=? WHERE post_id=? AND lang=?",
+                   (at, r["post_id"], OUTPUT_LANG))
+    # Once per issue, and the mark is what makes that true across both machines
+    # - see _said(). A second copy of this line is what #136 ended up with.
+    if _said(r["comments"], "when"):
+        return
+    try:
+        _say(r["issue"], f"Принято, публикация {_local(at)}"
+             + (f" — в очереди впереди ещё {ahead}." if ahead else "."), "when")
+    except Exception:
+        log.exception("could not say when #%d publishes", r["issue"])
 
 
 def _final(r: dict, bodies: list[str]) -> dict:
@@ -697,7 +816,8 @@ def close(post_id: str, note: str) -> None:
         db.execute("DELETE FROM review WHERE post_id=? AND lang=?",
                    (post_id, OUTPUT_LANG))
     if row:
-        _gh("issue", "close", str(row[0]), "--comment", note)
+        _gh("issue", "close", str(row[0]),
+            "--comment", f"{note}\n\n{MARK}:closed -->")
 
 
 if __name__ == "__main__":
@@ -757,8 +877,25 @@ if __name__ == "__main__":
     def c(i, login, body):
         return {"id": i, "user": {"login": login}, "body": body}
 
+    # The bot posts under the OWNER'S login whenever the pipeline runs on a
+    # desk rather than on a runner, so its own verdicts came back to it as the
+    # newest "answer" - a title, on a story that was already published. What
+    # tells them apart is the mark, and nothing else can.
+    def b(i, body, tag=""):
+        return c(i, OWNER, f"{body}\n\n{MARK}:{tag} -->")
+
+    assert _mine([b(1, "Принято, публикация сегодня в 17:07", "when")], OWNER) == []
+    assert _said([b(1, "6 ч без ответа", "timeout")], "timeout")
+    assert not _said([b(1, "6 ч без ответа", "timeout")], "when")
+    assert not _said([c(1, OWNER, "6 ч без ответа — ушло название модели.")],
+                     "timeout"), "the text is not the record, the mark is"
+
     # nobody has said anything
     assert _choose([], OWNER, ONE, 0) == ("", [], "", 0)
+    # ...and the bot talking to itself is still nobody
+    assert _choose([b(1, "Не приму: нет метки [emphasis]", "fault")],
+                   OWNER, ONE, 0) == ("", [], "", 0)
+    assert _pick([b(31, "2", "take")], OWNER, 29, 3) == -1, "not even a bare number"
     # a stranger cannot title a video on this channel, whatever they write
     assert _choose([c(1, "randomguy", "Мой [emphasis] заголовок про кота")],
                    OWNER, ONE, 0) == ("", [], "", 0)
@@ -884,7 +1021,7 @@ if __name__ == "__main__":
                  "ts REAL, gender TEXT, sub TEXT, score INT, written TEXT, "
                  "answered INT DEFAULT 0, title TEXT DEFAULT '', "
                  "body TEXT DEFAULT '', takes TEXT DEFAULT '', "
-                 "take INT DEFAULT -1)")
+                 "take INT DEFAULT -1, pub_at REAL DEFAULT 0)")
     _mem.executemany("INSERT INTO review(post_id, lang, issue, ts, gender, sub, "
                      "score, written, title) VALUES (?,?,?,?,'m','s',1,?,?)",
                      [(pid, OUTPUT_LANG, iss, ts, w, t)
@@ -929,6 +1066,52 @@ if __name__ == "__main__":
         assert _rows()[2]["written"] == THREE, "written comes back parsed"
         _mem.execute("DELETE FROM review WHERE post_id='c'")
         assert not split_parked() and parked() == 2 and queued() == 2
+
+        # Two stories decided in one sitting must not be promised the SAME
+        # slot. #140 and #141 were - both "сегодня в 22:07" - because each
+        # counted only the stories parked before it, and #141 was answered on
+        # sight while #140 took three tries. A claim counts every row already
+        # holding one, whatever order they were parked in.
+        _real_say, _real_publish = _say, sys.modules.get("publish")
+        try:
+            _say = lambda *a, **k: ""                          # noqa: E731
+            _fake = type(sys)("publish")
+            _fake.pending = lambda: []
+            _fake.eta = lambda ahead=0: 1000.0 + ahead * 3600.0
+            sys.modules["publish"] = _fake
+            for _pid in ("b", "a"):        # answered out of the order parked in
+                _claim({"post_id": _pid, "issue": 1, "comments": [],
+                        "written": ONE})
+            assert sorted(row[0] for row in _mem.execute(
+                "SELECT pub_at FROM review WHERE lang=?", (OUTPUT_LANG,))) \
+                == [1000.0, 4600.0], "one slot each, and never the same one"
+            # ...and the render order follows the promise, not the parking
+            assert [r["post_id"] for r in _rows()] == ["b", "a"]
+        finally:
+            _say = _real_say
+            sys.modules.pop("publish", None)
+            if _real_publish is not None:
+                sys.modules["publish"] = _real_publish
+            _mem.execute("UPDATE review SET pub_at=0")
+
+        # A settled story is handed to the renderer at the time its issue was
+        # promised and at no other. Before this it went the moment it settled,
+        # so the time on the issue was a guess the pipeline never read back.
+        _real_poll_bits = _judge, _stage, _claim
+        try:
+            _t = time.time()
+            _judge = lambda r, t: r                              # noqa: E731
+            _stage = lambda r, t: "render"                       # noqa: E731
+            _claim = lambda r: r.__setitem__("pub_at", _t + 3600)  # noqa: E731
+            assert _poll(False) is None, "a story waits for the time promised"
+            _mem.execute("UPDATE review SET pub_at=? WHERE post_id='b'", (_t - 60,))
+            assert _poll(False)["post_id"] == "b", "and goes when it arrives"
+            # ...and a story still owed a take is not waiting on a clock at
+            # all: the takes are the last question, asked before any promise.
+            _stage = lambda r, t: "offer"                        # noqa: E731
+            assert _poll(False)["needs_takes"], "takes answer to no promise"
+        finally:
+            _judge, _stage, _claim = _real_poll_bits
     finally:
         _db = _real_db
 
