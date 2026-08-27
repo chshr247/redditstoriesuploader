@@ -305,7 +305,7 @@ def _park_one(part: dict | None, may_split: bool) -> tuple[bool, int, int]:
     return False, skipped, failed
 
 
-def top_up(part: dict | None, budget: int) -> tuple[int, int, int]:
+def top_up(part: dict | None) -> tuple[int, int, int]:
     """Fill the day's batch of parked stories. (written, skipped, failed).
 
     The whole point of the batch: a day's questions arrive together and are
@@ -320,14 +320,24 @@ def top_up(part: dict | None, budget: int) -> tuple[int, int, int]:
     free here and the replacement is written immediately - by the review
     workflow within the minute of the `-`, or by the next tick at the latest.
 
-    `budget` caps what ONE run may write, because writing is the slow half. A
-    full batch is four LLM calls and the horror slot alone measured fifteen
-    minutes for two; a run that also rendered a video does not have that left
-    of its hour. So a run that rendered tops up by one and the empty morning
-    fills the batch outright, which converges inside an hour at two ticks.
+    _batch_room() is the ONLY thing that decides how many are written, and it
+    answers exactly one question: how many videos this day still owes. A run
+    that had also rendered used to be allowed one story and no more, on the
+    grounds that writing is the slow half and a run does not have fifteen
+    minutes of LLM left of its hour. What that bought was a day's questions
+    arriving in ones and twos across the afternoon - 08:16, 11:41 and 12:48 on
+    2026-08-26 - which is the batch not existing. The hour is not really the
+    constraint either: the workflow's concurrency group does not cancel a run
+    in progress, so a long morning delays the next tick rather than losing it,
+    and there are thirty-two ticks in a day for four videos.
     """
     wrote = skipped = failed = 0
-    while wrote < budget and _batch_room():
+    # One story per video the day still owes, at most: parking one always takes
+    # at least one video off _batch_room(), so this bound is never what ends the
+    # loop - it is here so a room that somehow fails to shrink cannot spin.
+    for _ in range(REVIEW_BATCH):
+        if not _batch_room():
+            break
         # One split story in flight at a time, and a parked batch counts:
         # source.multipart_today() reads the `parts` table, which is not
         # written until the RENDER, so on its own it would let every story in
@@ -487,10 +497,13 @@ def main(count: int = 1, force: bool = False) -> int:
     if why := review.ok():
         log.error("cannot reach GitHub to ask for a title (%s) - writing nothing", why)
     else:
-        # Topping up happens whether or not this run rendered, and that is the
-        # change: rendering SPENDS a parked story, so a run that made a video
-        # is exactly the run with a slot to refill.
-        wrote, skipped, more = top_up(part, budget=1 if done else REVIEW_BATCH)
+        # Topping up happens whether or not this run rendered, and to the FULL
+        # size of what the day still owes either way. Rendering spends a parked
+        # story, so a run that made a video is exactly the run with a slot to
+        # refill - and the first run after the midnight reset finds the whole
+        # day open and asks for the whole day, in one sitting, before any of it
+        # has published. See top_up().
+        wrote, skipped, more = top_up(part)
         failed += more
         if wrote:
             log.info("%d new stor%s with the user: %d issue(s), %d video(s), "
@@ -629,6 +642,18 @@ if __name__ == "__main__":
         globals()["make_reviewed"] = lambda r: rendered.append(r) or Path("stub.mp4")
         vids[0] = REVIEW_BATCH
         assert main(1) == 0 and len(rendered) == 1 and not written, (rendered, written)
+        # ...and a run that DID render fills the batch to the day's size just
+        # the same. It used to be allowed one story and no more, on the grounds
+        # that writing is the slow half - and that is how a day's questions
+        # came to arrive at 08:16, 11:41 and 12:48 (2026-08-26) rather than all
+        # of them at 08:16, which is the only thing the batch is for.
+        written.clear()
+        rendered.clear()
+        vids[0] = 0
+        globals()["write_and_park"] = lambda p, n=1: (
+            written.append(p["id"]), vids.__setitem__(0, vids[0] + n))
+        assert main(1) == 0 and len(rendered) == 1, rendered
+        assert len(written) == REVIEW_BATCH, written
         print("part gating and title review ok")
         sys.exit(0)
 
@@ -649,7 +674,7 @@ if __name__ == "__main__":
         if why := review.ok():
             log.error("cannot reach GitHub to ask for a title (%s)", why)
             sys.exit(1)
-        wrote, _, _ = top_up(source.next_part(), budget=REVIEW_BATCH)
+        wrote, _, _ = top_up(source.next_part())
         log.info("%d written, %d open with the user", wrote, review.parked())
         sys.exit(0)
 
