@@ -49,7 +49,8 @@ import time
 
 import script
 import source
-from config import OUTPUT_LANG, REVIEW_BATCH, REVIEW_TAKES, REVIEW_TZ_H
+from config import (OUTPUT_LANG, REVIEW_BATCH, REVIEW_TAKES, REVIEW_TZ_H,
+                    chan_file)
 
 log = logging.getLogger(__name__)
 
@@ -145,6 +146,23 @@ def _mine(comments: list[dict], owner: str) -> list[dict]:
             and MARK not in (c["body"] or "")]
 
 
+# The runner's login. No person can post under it, so a comment carrying it is
+# ours whether or not it carries a mark - which is the only reason the lines
+# below are safe. The desk posts as the OWNER, and an owner's comment is a
+# title whatever it happens to say, so nothing here may look at those.
+_BOT = "github-actions[bot]"
+
+# The openings this file wrote before MARK existed (2026-08-27). They are still
+# the newest word on issues that are still open, and _said() read them as never
+# said: #140 and #141 were promised a publish time in the morning, the mark went
+# in at midday, and both were promised a SECOND, different time in the afternoon.
+# Every tag whose verdict must be announced exactly once is listed.
+_LEGACY = {"when": "Принято, публикация",
+           "timeout": "ч без ответа — ушло название",
+           "take": "Принято, дубль",
+           "caption": "Черновик ушёл в инбокс"}
+
+
 def _said(comments: list[dict], tag: str) -> bool:
     """Has this verdict already been announced on this issue?
 
@@ -153,7 +171,12 @@ def _said(comments: list[dict], tag: str) -> bool:
     still sitting unanswered in the desk's copy at 21:18, and the desk then
     answers it again. The issue itself has one copy.
     """
-    return any(f"{MARK}:{tag} -->" in (c["body"] or "") for c in comments)
+    if any(f"{MARK}:{tag} -->" in (c["body"] or "") for c in comments):
+        return True
+    lead = _LEGACY.get(tag, "")
+    return bool(lead) and any(
+        c["user"]["login"].lower() == _BOT and lead in (c["body"] or "")
+        for c in comments)
 
 
 _owner_cache = ""
@@ -510,6 +533,19 @@ def _judge(r: dict, timeout: bool) -> dict | None:
     # find the take, and two fetches of one issue in one tick is one too many.
     r["comments"] = comments = _comments(r["issue"])
 
+    # ALREADY OUT, and the strongest thing either machine can know. publish.yml
+    # comments the caption into the issue the title was chosen on as each video
+    # is sent, so a caption there means the video is in the TikTok inbox - and
+    # a row still pointing at it is a row that would render and SEND that video
+    # a second time. Checked ahead of everything else, including a row that has
+    # its own title and publish time written on it: those say what this machine
+    # decided, and the caption says what actually happened.
+    if _said(comments, "caption"):
+        log.info("%s: #%d is already in the inbox - dropping the spent row",
+                 r["post_id"], r["issue"])
+        rendered(r["post_id"])
+        return None
+
     # Both machines write this table and it reaches the other one by git, so a
     # row here can be HOURS behind the issue it points at. The issue is the one
     # copy they share: a story whose publish time has already been announced on
@@ -583,7 +619,21 @@ TAKES_HOURS = 6
 
 
 def _asset(post_id: str, i: int) -> str:
-    return f"{post_id}_{OUTPUT_LANG}_take{i + 1}.mp3"
+    """What the take is CALLED on the release, which is its own file name.
+
+    `gh release upload file#label` sets a display label and nothing else: the
+    asset name is the basename of the file uploaded, and the download URL is
+    built from the name. So this has to spell the mp3 exactly as voice.takes()
+    wrote it, which is chan_file(post_id) - the bare post id on the default
+    channel, and post_id_en on the other one.
+
+    It used to splice in `_{lang}` unconditionally. On `en` that happens to be
+    what chan_file() says, so the stage worked there; on `ru` every link posted
+    was a 404, the picked take could not be fetched at the render and the story
+    was quietly narrated a fourth time, and drop_takes() deleted nothing.
+    #140 and #141, 2026-08-27.
+    """
+    return f"{chan_file(post_id)}_take{i + 1}.mp3"
 
 
 def _release() -> None:
@@ -610,11 +660,14 @@ def offer_takes(r: dict, mp3s: list) -> None:
     urls = []
     for i, mp3 in enumerate(mp3s):
         name = _asset(r["post_id"], i)
-        # clobber: a retry after a half-finished offer must not collide with
-        # the assets the failed attempt already pushed
-        _gh("release", "upload", TAKES_TAG, f"{mp3}#{name}", "--clobber")
+        if mp3.name != name:      # cannot happen; renames the asset if it does
+            log.error("take %s is named %s, the links say %s", i + 1, mp3.name, name)
+        # No `#label`: it renames nothing and reads as if it did. clobber, so
+        # a retry after a half-finished offer does not collide with the assets
+        # the failed attempt already pushed.
+        _gh("release", "upload", TAKES_TAG, str(mp3), "--clobber")
         urls.append(f"https://github.com/{_slug()}/releases/"
-                    f"download/{TAKES_TAG}/{name}")
+                    f"download/{TAKES_TAG}/{mp3.name}")
 
     numbers = ", ".join(f"`{i + 1}`" for i in range(len(urls)))
     links = "\n".join(f"{i + 1}. {u}" for i, u in enumerate(urls))
@@ -656,15 +709,21 @@ def _judge_take(r: dict, timeout: bool) -> bool:
     """True once the row has a take to render. Mirrors _judge()'s contract."""
     offer = json.loads(r["takes"])
     got = _pick(r["comments"], _owner(), offer["cid"], offer["n"])
+    # Answered on the issue already - by the other machine, off a row that has
+    # not reached this one yet. The pick itself is re-read above and needs no
+    # help; what must not happen twice is saying so out loud.
+    said = _said(r["comments"], "take")
     if got < 0:
-        if not timeout or time.time() - offer["ts"] < TAKES_HOURS * 3600:
+        if not said and (not timeout
+                         or time.time() - offer["ts"] < TAKES_HOURS * 3600):
             return False
-        _say(r["issue"], f"{TAKES_HOURS} ч без ответа — ушёл первый дубль.",
-             "take")
-        log.info("%s: no take picked in %dh, using the first",
-                 r["post_id"], TAKES_HOURS)
+        if not said:
+            _say(r["issue"], f"{TAKES_HOURS} ч без ответа — ушёл первый дубль.",
+                 "take")
+            log.info("%s: no take picked in %dh, using the first",
+                     r["post_id"], TAKES_HOURS)
         got = 0
-    else:
+    elif not said:
         _say(r["issue"], f"Принято, дубль {got + 1}.", "take")
     r["take"] = got
     with _db() as db:
@@ -729,19 +788,38 @@ def _claim(r: dict) -> None:
     Never fatal: the promise is worth more than the run, and a story with no
     time on it publishes on the next tick exactly as it did before this existed.
     """
+    # A promise is made once and never moved. _poll() only asks on a row with
+    # no time on it, and this says so here as well: a second call on a claimed
+    # row would recount a queue that has changed underneath it and hand back a
+    # different minute for a story the issue has already been told about.
+    if r.get("pub_at"):
+        return
+
     at = time.time()
     ahead = 0
     try:
         import publish
 
         with _db() as db:
-            rows = db.execute("SELECT post_id, written FROM review "
+            rows = db.execute("SELECT post_id, written, pub_at FROM review "
                               "WHERE lang=? AND pub_at>0", (OUTPUT_LANG,)).fetchall()
         # Videos ahead, not stories ahead: a claimed three-parter in front of
         # this one is three sends before it, not one.
-        ahead = sum(len(json.loads(w)) for pid, w in rows if pid != r["post_id"])
+        ahead = sum(len(json.loads(w)) for pid, w, _ in rows if pid != r["post_id"])
         ahead += len(publish.pending())
         at = publish.eta(ahead) or at
+        # ...and no two stories are promised the same minute. eta() answers the
+        # earliest slot with `ahead` videos in front, which is a count and not a
+        # reading of who holds what: a row that rendered since the story in
+        # front of it was promised takes its count out of the queue and hands
+        # the next story a minute already spoken for. Bounded by the rows that
+        # exist, so a publish.eta() that has stopped moving ends the walk.
+        held = {p for pid, _, p in rows if pid != r["post_id"]}
+        for _ in range(len(held)):
+            if at not in held:
+                break
+            ahead += 1
+            at = publish.eta(ahead) or at
     except Exception:
         log.exception("could not work out when %s publishes", r["post_id"])
 
@@ -889,6 +967,20 @@ if __name__ == "__main__":
     assert not _said([b(1, "6 ч без ответа", "timeout")], "when")
     assert not _said([c(1, OWNER, "6 ч без ответа — ушло название модели.")],
                      "timeout"), "the text is not the record, the mark is"
+    # ...unless the RUNNER wrote it, which no person can. Every issue still open
+    # carries verdicts from before the mark existed, and reading those as never
+    # said is what put a second, different publish time on #140 and #141.
+    assert _said([c(1, _BOT, "Принято, публикация сегодня в 22:07 — ...")], "when")
+    assert _said([c(1, _BOT, "Черновик ушёл в инбокс TikTok. Подпись:")], "caption")
+    assert not _said([c(1, _BOT, "Принято, публикация сегодня в 22:07")], "take")
+    # the take's own timeout is not the title's, and they open the same way
+    assert not _said([c(1, _BOT, "6 ч без ответа — ушёл первый дубль.")], "timeout")
+
+    # What the take is called on the release IS the file voice.takes() wrote:
+    # `gh release upload file#label` labels, it does not rename, and the URL is
+    # built from the name. Spelled any other way every link is a 404 - see
+    # _asset(). chan_file() is the one place that decides, for both of them.
+    assert _asset("abc", 1) == f"{chan_file('abc')}_take2.mp3"
 
     # nobody has said anything
     assert _choose([], OWNER, ONE, 0) == ("", [], "", 0)
@@ -1087,12 +1179,61 @@ if __name__ == "__main__":
                 == [1000.0, 4600.0], "one slot each, and never the same one"
             # ...and the render order follows the promise, not the parking
             assert [r["post_id"] for r in _rows()] == ["b", "a"]
+            # Asked a second time it says nothing and moves nothing. The minute
+            # written on the issue is the minute, not the current best guess -
+            # #141 was told 22:07 in the morning and 11:07 the next day in the
+            # afternoon, off the same story settling in two stages.
+            _fake.eta = lambda ahead=0: 9999.0                    # noqa: E731
+            _claim({"post_id": "b", "issue": 1, "comments": [], "written": ONE,
+                    "pub_at": 1000.0})
+            assert sorted(row[0] for row in _mem.execute(
+                "SELECT pub_at FROM review WHERE lang=?",
+                (OUTPUT_LANG,))) == [1000.0, 4600.0], "a promise is not re-derived"
+            # A slot another story already holds is stepped over. eta() counts
+            # videos in front rather than reading who holds what, so a story
+            # that rendered since the one ahead of it was promised takes its
+            # count out of the queue and frees a minute already spoken for.
+            _fake.eta = lambda ahead=0: 1000.0 + ahead * 3600.0   # noqa: E731
+            _mem.execute("DELETE FROM review WHERE post_id='b'")  # b has gone out
+            _mem.execute("INSERT INTO review(post_id, lang, issue, ts, gender, "
+                         "sub, score, written) VALUES ('d',?,4,400.0,'m','s',1,?)",
+                         (OUTPUT_LANG, json.dumps(ONE)))
+            _claim({"post_id": "d", "issue": 4, "comments": [], "written": ONE})
+            assert _mem.execute("SELECT pub_at FROM review WHERE post_id='d'"
+                                ).fetchone()[0] == 8200.0, "4600 was taken"
+            _mem.execute("DELETE FROM review WHERE post_id='d'")
+            _mem.execute("INSERT INTO review(post_id, lang, issue, ts, gender, "
+                         "sub, score, written, title) "
+                         "VALUES ('b',?,2,200.0,'m','s',1,?,'T')",
+                         (OUTPUT_LANG, json.dumps(ONE)))
         finally:
             _say = _real_say
             sys.modules.pop("publish", None)
             if _real_publish is not None:
                 sys.modules["publish"] = _real_publish
             _mem.execute("UPDATE review SET pub_at=0")
+
+        # A story whose video is already in the TikTok inbox is never decided
+        # again, whatever this table still holds. The desk's copy of it is
+        # hours behind CI's - it crosses by git - so #136 was re-decided at
+        # 21:18 on a video CI had sent at 16:17, and the only thing standing
+        # between that and a second copy of the same video in the inbox is the
+        # caption publish.yml leaves on the issue.
+        _real_comments = _comments
+        try:
+            _mem.execute("INSERT INTO review(post_id, lang, issue, ts, gender, "
+                         "sub, score, written, title, pub_at) VALUES "
+                         "('d',?,4,400.0,'m','s',1,?,'T',1.0)",
+                         (OUTPUT_LANG, json.dumps(ONE)))
+            _row_d = [r for r in _rows() if r["post_id"] == "d"][0]
+            # unmarked, exactly as the workflow wrote it before 2026-08-27
+            _comments = lambda n: [c(1, _BOT, "Черновик ушёл в инбокс TikTok. "
+                                              "Подпись: вот она")]  # noqa: E731
+            assert _judge(dict(_row_d), False) is None, "it is already out"
+            assert not [r for r in _rows() if r["post_id"] == "d"], (
+                "the spent row goes, so nothing renders it a second time")
+        finally:
+            _comments = _real_comments
 
         # A settled story is handed to the renderer at the time its issue was
         # promised and at no other. Before this it went the moment it settled,
