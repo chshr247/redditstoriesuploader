@@ -134,9 +134,15 @@ def offer_takes(r: dict) -> None:
     """
     name = chan_file(r["post_id"])
     story, _ = script.split_cta(r["written"][0][1])
-    mp3s = voice.takes(story, name, REVIEW_TAKES,
-                       voice.pick_voice(r["gender"], r["sub"]))
-    review.offer_takes(r, mp3s)
+    # Drawn ONCE, here, and written onto the row by offer_takes(). pick_voice()
+    # picks at random out of the channel's pool, and the take that wins is the
+    # body of the video only - make_reviewed() synthesizes the title and the
+    # closing question at the render, off the same row. Drawing there as well
+    # is one video in two voices: latent while a pool holds one narrator, live
+    # the moment it holds two, and the English pool already holds two.
+    fish_voice = voice.pick_voice(r["gender"], r["sub"])
+    mp3s = voice.takes(story, name, REVIEW_TAKES, fish_voice)
+    review.offer_takes(r, mp3s, fish_voice)
 
 
 def _chosen(r: dict) -> "Path | None":
@@ -167,15 +173,22 @@ def make_reviewed(r: dict) -> Path:
     The chosen title replaces the model's on EVERY part. A split story has one
     title by construction - it is narrated and lit at the head of each part -
     and all of the parts were written against it in a single call.
+
+    The narrator comes off the row where the readings put it, and is drawn here
+    only for a story that was never read aloud - a split one, or a channel with
+    the stage turned off. pick_voice() draws at random, and the take the user
+    chose is the BODY of the video: the title and the closing question are
+    synthesized below. Drawing again here reads them in a second voice, and the
+    chosen take then sits in the middle of a video by somebody else.
     """
     post = {"id": r["post_id"], "sub": r["sub"], "score": r["score"]}
+    fish_voice = r.get("voice") or voice.pick_voice(r["gender"], r["sub"])
     # Already final: review.py has folded the chosen title and any narration
     # rewritten by hand into it, and a rewrite may have merged three parts into
     # two - so the count comes from here and not from what the model wrote.
     written = r["written"]
     if len(written) > 1:
-        source.queue_parts(post, written, r["gender"],
-                           voice.pick_voice(r["gender"], r["sub"]),
+        source.queue_parts(post, written, r["gender"], fish_voice,
                            issue=r["issue"])
         out = make_part(source.next_part())
     else:
@@ -184,7 +197,7 @@ def make_reviewed(r: dict) -> Path:
         # rendered mp4. The issue travels the same way and for the same reason:
         # publish.py puts the caption back into the issue the title came from.
         out = _render(written[0][0], written[0][1], r["gender"], post["id"],
-                      post["sub"], body_mp3=_chosen(r),
+                      post["sub"], fish_voice=fish_voice, body_mp3=_chosen(r),
                       meta={"score": post["score"], "issue": r["issue"]})
         review.drop_takes(post["id"], REVIEW_TAKES)
     # Last, so a render that dies leaves the answer on the row for a retry.
@@ -538,6 +551,26 @@ if __name__ == "__main__":
         render.render = lambda *a, **k: OUT_DIR / "_selftest_voice.mp4"
         _render("t", "b", "male", "_selftest_voice", "s")
         assert heard == ["picked", "picked"], heard
+
+        # ...and the narrator the READINGS were made in is the one the render
+        # uses. The take that wins is the body and nothing else, so a fresh
+        # draw here reads the title and the closing question in a second voice
+        # and leaves the chosen take in the middle of somebody else's video.
+        heard.clear()
+        dur = iter([70.0])
+        globals()["_chosen"] = lambda r: None
+        review.drop_takes = lambda *a: None
+        review.rendered = lambda *a: None
+        _row = {"post_id": "_selftest_voice", "sub": "s", "score": 1, "issue": 1,
+                "gender": "male", "title": "T", "voice": "the one they heard",
+                "written": [("T", "b")]}
+        make_reviewed(_row)
+        assert heard == ["the one they heard"], heard
+        # ...and a story that was never read aloud draws one, as it always did
+        heard.clear()
+        dur = iter([70.0])
+        make_reviewed({**_row, "voice": ""})
+        assert heard == ["picked"], heard
 
         # The part is rendered in the run that can send it, and in no other:
         # nothing else clears it, and a run spent on a part publishes nothing

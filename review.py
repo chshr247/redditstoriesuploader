@@ -67,7 +67,7 @@ ACCEPT = {"+", "да", "ок", "ok", "ага", "yes"}
 REJECT = {"-", "нет", "скип", "skip", "no", "мимо", "хуйня"}
 
 _COLS = ("post_id", "issue", "ts", "gender", "sub", "score", "written",
-         "answered", "title", "body", "takes", "take", "pub_at")
+         "answered", "title", "body", "takes", "take", "pub_at", "voice")
 
 
 def _db():
@@ -85,7 +85,7 @@ def _db():
                "sub TEXT, score INT, written TEXT, answered INT DEFAULT 0, "
                "title TEXT DEFAULT '', body TEXT DEFAULT '', "
                "takes TEXT DEFAULT '', take INT DEFAULT -1, "
-               "pub_at REAL DEFAULT 0, "
+               "pub_at REAL DEFAULT 0, voice TEXT DEFAULT '', "
                "PRIMARY KEY(post_id, lang))")
     # `body` arrived after `title`; a row written before it keeps '' and the
     # story is narrated as the model wrote it, which is what '' means anyway.
@@ -106,6 +106,15 @@ def _db():
     # row written before this reads as - it gets a time on the next tick.
     if "pub_at" not in have:
         db.execute("ALTER TABLE review ADD COLUMN pub_at REAL DEFAULT 0")
+    # `voice` is the narrator the story was READ ALOUD in, written down when
+    # the takes were made so the render does not draw a second one.
+    # voice.pick_voice() picks at random out of the channel's pool, and the
+    # take the user chooses is the body of the video only - the title and the
+    # closing question are synthesized at the render. Two draws there means one
+    # video in two voices. Empty is what every row written before this reads
+    # as, and empty means "draw one", which is what the render always did.
+    if "voice" not in have:
+        db.execute("ALTER TABLE review ADD COLUMN voice TEXT DEFAULT ''")
     return db
 
 
@@ -649,12 +658,19 @@ def _release() -> None:
         "--title", "voice review", "--prerelease")
 
 
-def offer_takes(r: dict, mp3s: list) -> None:
+def offer_takes(r: dict, mp3s: list, fish_voice: str = "") -> None:
     """Upload the takes and ask which one goes out.
 
-    Called from the render slot rather than from review.yml, so it runs where
-    the TTS key and the time already are, and needs no new workflow. The story
-    does not render on this tick - it renders on the one after the answer.
+    Called from review.yml on the comment that settles the title, so the two
+    questions arrive on the same fast path; the render slot keeps the same call
+    as its fallback. The story does not render on this tick - it renders on the
+    one after the answer.
+
+    `fish_voice` is the narrator these takes were read in, and it is written
+    onto the row rather than left to be drawn again. The take that wins is the
+    BODY of the video and nothing else - the title and the closing question are
+    synthesized at the render - so a second draw there puts two narrators in
+    one video. See the `voice` column in _db().
     """
     _release()
     urls = []
@@ -682,11 +698,13 @@ def offer_takes(r: dict, mp3s: list) -> None:
 **Первой строкой — номер:** {numbers}.
 Молчание {TAKES_HOURS} ч — уйдёт первый.""", "takes")
     cid = int(out.rstrip("/").rsplit("-", 1)[-1]) if "-" in out else 0
+    r["voice"] = fish_voice
     with _db() as db:
-        db.execute("UPDATE review SET takes=? WHERE post_id=? AND lang=?",
+        db.execute("UPDATE review SET takes=?, voice=? WHERE post_id=? AND lang=?",
                    (json.dumps({"n": len(urls), "cid": cid, "ts": time.time()}),
-                    r["post_id"], OUTPUT_LANG))
-    log.info("%s: %d takes offered on issue #%d", r["post_id"], len(urls), r["issue"])
+                    fish_voice, r["post_id"], OUTPUT_LANG))
+    log.info("%s: %d takes offered on issue #%d, read by %s", r["post_id"],
+             len(urls), r["issue"], fish_voice[:8] or "the engine's default")
 
 
 def _pick(comments: list[dict], owner: str, after: int, n: int) -> int:
@@ -1152,7 +1170,8 @@ if __name__ == "__main__":
                  "ts REAL, gender TEXT, sub TEXT, score INT, written TEXT, "
                  "answered INT DEFAULT 0, title TEXT DEFAULT '', "
                  "body TEXT DEFAULT '', takes TEXT DEFAULT '', "
-                 "take INT DEFAULT -1, pub_at REAL DEFAULT 0)")
+                 "take INT DEFAULT -1, pub_at REAL DEFAULT 0, "
+                 "voice TEXT DEFAULT '')")
     _mem.executemany("INSERT INTO review(post_id, lang, issue, ts, gender, sub, "
                      "score, written, title) VALUES (?,?,?,?,'m','s',1,?,?)",
                      [(pid, OUTPUT_LANG, iss, ts, w, t)
@@ -1212,6 +1231,12 @@ if __name__ == "__main__":
             assert owed_takes() == [], "a split story is never read aloud"
             _mem.execute("UPDATE review SET written=? WHERE post_id='b'",
                          (json.dumps(ONE),))
+            # The narrator the takes were read in rides the row from here to
+            # the render, which is the only thing that stops main.py drawing a
+            # second one for the title and the closing question.
+            _mem.execute("UPDATE review SET voice='heard' WHERE post_id='b'")
+            assert owed_takes()[0]["voice"] == "heard", owed_takes()
+            _mem.execute("UPDATE review SET voice='' WHERE post_id='b'")
 
         # Two stories decided in one sitting must not be promised the SAME
         # slot. #140 and #141 were - both "сегодня в 22:07" - because each
