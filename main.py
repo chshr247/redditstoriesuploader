@@ -431,6 +431,12 @@ def _room() -> int:
     sizing a split against the raw allowance would let a three-parter be
     written on top of three questions already asked, six videos against four.
 
+    A video this run has already rendered comes off it for the same reason -
+    see _batch_room(), which is where that one was actually costing a slot.
+    Only reachable here with REVIEW_BATCH set above TIKTOK_PER_DAY: at the
+    default the two are equal, _batch_room() subtracts strictly more, and the
+    min below always lands on it. Cheap enough to be right in both.
+
     The tau backend used to be refused here outright, on the grounds that only
     a send clears a part and on tau the sender is a desk whose seen.db never
     travels - so CI would re-render part 1 for ever. That stopped being true
@@ -447,7 +453,8 @@ def _room() -> int:
     """
     if publish.due():
         return 0
-    return min(max(0, TIKTOK_PER_DAY - publish.sent_today() - review.queued()),
+    return min(max(0, TIKTOK_PER_DAY - publish.sent_today()
+                   - len(publish.pending()) - review.queued()),
                _batch_room())
 
 
@@ -674,6 +681,9 @@ if __name__ == "__main__":
             publish.due, publish.sent_today = (lambda: ""), (lambda: 0)
             review.queued = lambda: 0
             assert _room() == min(TIKTOK_PER_DAY, REVIEW_BATCH), _room()
+            publish.pending = lambda: [Path("stub.mp4")]
+            assert _room() == min(TIKTOK_PER_DAY, REVIEW_BATCH) - 1, _room()
+            publish.pending = lambda: []
             review.queued = lambda: REVIEW_BATCH - 1
             assert _room() == 1, "one slot left means no split fits"
             review.queued = lambda: REVIEW_BATCH
