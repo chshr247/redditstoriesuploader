@@ -156,7 +156,7 @@ FISH_CHUNK = int(os.getenv("FISH_CHUNK", 0))
 # Measured in PLAIN characters, so cues do not count toward the length. Roughly
 # 400 is three or four takes for a ru body; 0 turns the split off and restores
 # the single call. Raise it if the joins are audible, lower it if it is flat.
-# ponytail: default OFF because it was measured and bought nothing. Tried
+# NOTE: default OFF because it was measured and bought nothing. Tried
 # 2026-08-26 against a single call on the same voice and text: no audible
 # difference in liveliness, and a split can only ADD seams. Kept as a knob
 # rather than deleted because it costs nothing switched off and is the first

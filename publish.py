@@ -835,7 +835,7 @@ INBOX_CAP = (int(os.getenv("TIKTOK_INBOX_CAP", 5))
 def shares_24h() -> int:
     """Inbox shares this channel started in the last rolling 24 hours.
 
-    ponytail: counts every share, not only the ones still unpublished, because
+    NOTE: counts every share, not only the ones still unpublished, because
     "pending" would cost a status call per row on a gate that runs twice an hour
     per channel. That errs toward sending less, never more. Ask TikTok properly
     if the ceiling ever starts refusing videos there was really room for.
@@ -890,7 +890,7 @@ def eta(ahead: int = 0) -> float:
     `ahead` is a count of VIDEOS, so callers behind a split story pass its part
     count and not one.
 
-    ponytail: those parts are then spaced at the ordinary gap, where the real
+    NOTE: those parts are then spaced at the ordinary gap, where the real
     thing spaces them at PART_GAP_HOURS and lets them past the daily count -
     so an estimate standing behind a split story runs LATE, by up to two gaps.
     Late is the safe direction for a promise. Take a list of part counts here
@@ -1332,7 +1332,7 @@ if __name__ == "__main__":
     # there is. A green run with no TikTok in it for eight hours a day
     # (2026-08-24, ru, run 32787877284). A self-check must not depend on the
     # minute it is read at; morning is simply a time all of these hold.
-    # ponytail: the stdlib clock itself, restored below - the whole module is
+    # NOTE: the stdlib clock itself, restored below - the whole module is
     # single-threaded here and nothing else runs inside the block. Give eta() a
     # `now=` argument instead if anything ever reads the clock alongside it.
     _real_clock = time.time

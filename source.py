@@ -304,7 +304,7 @@ CONTESTED = re.compile(
 # What one comment per this many upvotes is worth, i.e. where the ratio signal
 # saturates. Measured over a fetch of the current subs: an ordinary post sits
 # near 1 comment per 40 upvotes, a fight near 1 in 10.
-# ponytail: a flat constant, not a per-sub baseline. Subs whose normal ratio is
+# NOTE: a flat constant, not a per-sub baseline. Subs whose normal ratio is
 # far off this one would need their own; add that when a sub's stories start
 # crowding out everything else.
 ARGUMENTATIVE = 10
@@ -774,7 +774,7 @@ def next_daily() -> dict | None:
         return None
     # The one-a-day gate. Anything from the list already used today - published,
     # or split and now mid-flight - means the reserve has had its slot.
-    # ponytail: a reserve pick the model SKIPs is mark_used'd like any dud and so
+    # NOTE: a reserve pick the model SKIPs is mark_used'd like any dud and so
     # counts as today's slot, forfeiting it for the day. Rare on hand-picked
     # contested stories; if it bites, track published apart from burned.
     today = _seen_today()

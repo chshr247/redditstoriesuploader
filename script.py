@@ -425,7 +425,7 @@ MAX_TITLE_WORDS = 12
 
 # Numbers spelled out in the title: "восемьсот долларов" where "800 долларов"
 # belongs. Full words only - a stem like "пят" would fire on "пятница".
-# ponytail: tens and up only. Numerals below twenty share stems with ordinary
+# NOTE: tens and up only. Numerals below twenty share stems with ordinary
 # words and are short enough to read fine either way, so they are left alone;
 # extend the list if "пять тысяч" style titles start slipping through as prose.
 SPELLED_NUMBER = {
@@ -477,7 +477,7 @@ CURRENCY = {
 # Words the voice engine has to guess at, and guesses from context the title
 # does not have: a six-word line gives it nothing to go on, so a wrong guess is
 # heard as a different word in the first three seconds of the video.
-# ponytail: a hand-picked list, not a dictionary. These are the ones whose other
+# NOTE: a hand-picked list, not a dictionary. These are the ones whose other
 # reading is a plausible word in a story title; the pairs that only collide in
 # rare grammar (руки, окна, дома / "present", "record") are left out because
 # they would fire on everything. Add to it when a video actually comes back
@@ -509,7 +509,7 @@ HOMOGRAPH = {
 # in-law words are all current, so SYSTEM_EN has no such rule, and an English
 # half here would be a regex that can never fire pretending to be a check.
 #
-# ponytail: stems, like tags.py, but two of them are written the long way round
+# NOTE: stems, like tags.py, but two of them are written the long way round
 # because a short one would eat a word that is allowed. "свекр" matches
 # свекровь, hence the lookahead; "кум" matches кумир and кумовство, hence the
 # spelled-out endings.

@@ -389,7 +389,7 @@ def _batch_room() -> int:
     run spent on a part publishes nothing to YouTube, which is never offered
     one.
 
-    ponytail: sent_today() is TikTok's count. On a channel with TikTok off it
+    NOTE: sent_today() is TikTok's count. On a channel with TikTok off it
     is always zero and YouTube's slower allowance governs, so the batch there
     is one or two questions too generous - set REVIEW_BATCH for that channel.
     """

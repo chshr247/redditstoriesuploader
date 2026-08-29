@@ -103,7 +103,7 @@ TOPICS_RU = [
     # also ordinary Russian - a family row is жуткий and a drunk husband comes
     # home ночью - so a bucket built on them would tag half the feed as
     # mysticism. What is left names nothing but the genre.
-    # ponytail: the two generic tags that ride along still come from the drama
+    # NOTE: the two generic tags that ride along still come from the drama
     # list, so a scary story can go out carrying #ктоправ. Thread the genre
     # into pick() if that shows up in the analytics as a wrong-audience tag.
     (r"призрак|привидени|полтергейст|паранормальн|мистик|потусторонн"

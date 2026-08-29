@@ -580,7 +580,7 @@ jobs:
           # the 24h inbox ceiling and the pause are untouched - this hands over
           # a video that already exists rather than buying an extra one.
           #
-          # ponytail: two drafts can now land inside the gap, and a draft is
+          # NOTE: two drafts can now land inside the gap, and a draft is
           # published by hand anyway. If they start arriving too close in the
           # feed, put a smaller gap here rather than none.
           TIKTOK_MIN_GAP_HOURS: ${{ steps.gate.outputs.tt == 'false' && '0' || vars.TIKTOK_MIN_GAP_HOURS || '3' }}

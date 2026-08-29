@@ -35,7 +35,7 @@ from config import (FISH_API_KEY, FISH_BODY_CUE, FISH_CHUNK, FISH_CTA_CUE,
 TICKS_PER_SEC = 10_000_000
 FISH_URL = "https://api.fish.audio/v1/tts"
 
-# ponytail: pacing knob for edge. Fish has its own, FISH_SPEED.
+# NOTE: pacing knob for edge. Fish has its own, FISH_SPEED.
 RATE = "+0%"
 
 log = logging.getLogger(__name__)

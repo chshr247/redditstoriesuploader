@@ -155,7 +155,7 @@ def upload(mp4, title: str, private: bool = True, body: str = "") -> str:
     if not session:
         raise RuntimeError("no resumable session URL in the response headers")
 
-    # ponytail: one PUT for the whole file. Our videos are well under 100 MB;
+    # NOTE: one PUT for the whole file. Our videos are well under 100 MB;
     # if a upload ever dies mid-flight, the session URL supports byte-range resume.
     put = urllib.request.Request(
         session, data=mp4.read_bytes(), method="PUT",
