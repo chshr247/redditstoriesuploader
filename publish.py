@@ -88,6 +88,33 @@ TITLE_MAX = 2200          # UTF-16 runes, per the direct-post reference
 # a hung browser, and a real send on a slow line is not it.
 TAU_TIMEOUT = int(os.getenv("TIKTOK_TAU_TIMEOUT", 1800))
 
+# How many times that whole send is attempted. See _tau_retryable below for
+# what is being retried and why one attempt is not enough.
+TAU_TRIES = int(os.getenv("TIKTOK_TAU_TRIES", 3))
+
+
+def _tau_retryable(out: str) -> bool:
+    """Whether a failed fork run is the transient rejection, not a real fault.
+
+    The fork's final call - POST /tiktok/web/project/post/v1/ - answers 200
+    with {"status_code":5,"status_msg":"Invalid parameters"} on roughly half of
+    otherwise identical attempts. Measured 2026-08-29 on the Russian channel:
+    six sends, three rejected and three accepted, with the same account,
+    caption, hashtags, visibility and user agent, through both cli.py and a
+    direct call. The signer is not the cause - it returned a well-formed
+    signature on every run, including the rejected ones.
+
+    The rejection is the server refusing to create the item, so nothing exists
+    when it comes back and a retry cannot double-post. That is the whole reason
+    this is safe to retry and an upload timeout is not.
+
+    Scoped to this one answer on purpose: a dead cookie, a refused login or a
+    broken checkout must still fail on the first attempt instead of three
+    times slower.
+    """
+    return '"status_code":5' in out or "Invalid parameters" in out
+
+
 log = logging.getLogger(__name__)
 
 
@@ -466,16 +493,27 @@ def _upload_tau(mp4, title: str, private: bool = True, body: str = "") -> str:
         env["PLAYWRIGHT_BROWSERS_PATH"] = TIKTOK_TAU_BROWSERS
     log.info("tau: posting %s as %s%s", Path(mp4).name, TIKTOK_TAU_USER,
              " (private)" if private else " (PUBLIC)")
-    try:
-        r = subprocess.run(cmd, cwd=TIKTOK_TAU_DIR, env=env, capture_output=True,
-                           text=True, encoding="utf-8", errors="replace",
-                           timeout=TAU_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(
-            f"tau upload timed out after {TAU_TIMEOUT}s. The video may or may "
-            f"not have posted - check the account before running again, "
-            f"nothing was written to the queue.") from None
-    out = ((r.stdout or "") + (r.stderr or "")).strip()
+    # Each attempt re-uploads the file, which is also the backoff: a send is a
+    # minute of video bytes, so there is nothing to sleep for between tries.
+    for attempt in range(1, TAU_TRIES + 1):
+        try:
+            r = subprocess.run(cmd, cwd=TIKTOK_TAU_DIR, env=env,
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=TAU_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            # NOT retried, unlike the rejection below: a timeout is the one
+            # outcome where the post may already exist, and trying again is how
+            # one video becomes two.
+            raise RuntimeError(
+                f"tau upload timed out after {TAU_TIMEOUT}s. The video may or "
+                f"may not have posted - check the account before running "
+                f"again, nothing was written to the queue.") from None
+        out = ((r.stdout or "") + (r.stderr or "")).strip()
+        if r.returncode == 0 or not _tau_retryable(out):
+            break
+        log.warning("tau: post rejected as 'Invalid parameters' "
+                    "(attempt %d of %d), re-signing and sending again",
+                    attempt, TAU_TRIES)
     if r.returncode != 0:
         raise RuntimeError(f"tau upload failed (exit {r.returncode}):\n{out[-1500:]}")
     if not (m := _CREATION_ID.search(out)):
@@ -1457,6 +1495,11 @@ if __name__ == "__main__":
             "a part must not slip past a stop")
     finally:
         STOPPED = _real_stopped
+
+    # The retry predicate: the transient is retried, a real fault is not.
+    assert _tau_retryable('{"status_code":5,"status_msg":"Invalid parameters"}')
+    assert not _tau_retryable("NOT logged in: Login expired")
+    assert not _tau_retryable("[-] Failed to parse signature data")
 
     print("chunking, caption, allowance and status logic ok", file=sys.stderr)
 
