@@ -390,6 +390,7 @@ def _body_fault(bodies: list[str], title: str, parts: int) -> str:
     for i, body in enumerate(bodies, 1):
         label = f"часть {i}: " if len(bodies) > 1 else ""
         if fault := (script._kin_fault(body)
+                     or (script._open_fault(body) if i == 1 else "")
                      or script._ending_fault(body, final=i == len(bodies))):
             return label + fault
         total = script._words(title) + script._words(body)
@@ -1003,8 +1004,10 @@ if __name__ == "__main__":
     def _filler(line: str, parts: int = 1) -> str:
         return line * (script._target_words() // len(line.split()) // parts + 2)
 
-    ONE = [[MODEL, _filler("Модель нашла коробку. ") + MODEL_CTA]]
-    FILLER = _filler("Модель нашла эту коробку сама. ")
+    ONE = [[MODEL, _filler("Модель нашла коробку. "
+                            "«Не трогай её», сказала сменщица. ") + MODEL_CTA]]
+    FILLER = _filler("Модель нашла эту коробку сама. "
+                     "«Не трогай её», сказала сменщица. ")
     THREE = [[MODEL, FILLER + "И тут всё оборвалось."],
              [MODEL, FILLER + "И тут оборвалось снова."],
              [MODEL, FILLER + MODEL_CTA]]
@@ -1075,7 +1078,8 @@ if __name__ == "__main__":
 
     # A narration of one's own, under the blank line. Long enough to pass the
     # budget and closed with a question, which is what the format is built on.
-    story = (_filler("Я работал в ночную смену и однажды нашёл в подсобке коробку. ")
+    story = (_filler("Я работал в ночную смену и однажды нашёл в подсобке коробку. "
+                     "«Не открывай её», сказал сменщик. ")
              + "[doubtful] А вы бы [emphasis] открыли эту коробку?")
     got, bodies, fault, cid = _choose([c(8, OWNER, f"{mine}\n\n{story}")],
                                       OWNER, ONE, 0)
@@ -1089,7 +1093,8 @@ if __name__ == "__main__":
     assert _choose([c(10, OWNER, mine)], OWNER, ONE, 0)[1] == []
     # A rewrite that just ends, with no question at all, borrows the model's -
     # the markup it needs is a nuisance to type and the model already typed it.
-    plain_story = _filler("Я работал в ночную смену и нашёл в подсобке коробку. ")
+    plain_story = _filler("Я работал в ночную смену и нашёл в подсобке коробку. "
+                          "«Не открывай её», сказал сменщик. ")
     got, bodies, fault, _ = _choose([c(11, OWNER, f"{mine}\n\n{plain_story}")],
                                     OWNER, ONE, 0)
     assert (got, fault) == (mine, ""), (got, fault)
@@ -1105,7 +1110,7 @@ if __name__ == "__main__":
     assert fault == "" and len(bodies) == 2, (fault, len(bodies))
     assert bodies[1].endswith(MODEL_CTA) and not bodies[0].endswith(MODEL_CTA)
     # ...nor is one that would make a video of the wrong length
-    short = "Коротко про коробку. [doubtful] А вы бы [emphasis] вернули эту коробку?"
+    short = "Коротко про коробку. «Верни её», сказал сменщик. [doubtful] А вы бы [emphasis] вернули эту коробку?"
     _, _, fault, _ = _choose([c(12, OWNER, f"{mine}\n\n{short}")], OWNER, ONE, 0)
     assert "слов" in fault, fault
     # One question and nothing else swaps only the closing question: the model's
@@ -1129,7 +1134,8 @@ if __name__ == "__main__":
 
     # A split story rewritten by hand: parts split on the model's own separator,
     # and only the last one closes on the question to the viewer.
-    mid = _filler("Я работал в ночную смену и однажды нашёл в подсобке коробку. ")
+    mid = _filler("Я работал в ночную смену и однажды нашёл в подсобке коробку. "
+                  "«Не открывай её», сказал сменщик. ")
     three = f"{mid}\n---\n{mid}\n---\n{story}"
     got, bodies, fault, _ = _choose([c(13, OWNER, f"{mine}\n\n{three}")],
                                     OWNER, THREE, 0)

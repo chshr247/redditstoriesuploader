@@ -569,6 +569,31 @@ def _kin_fault(text: str, lang: str = "") -> str:
     return ""
 
 
+# Measured over the ru channel's first month. Narrations where nobody speaks
+# in the first hundred words sat at the base push - median 1378 views, 1.8% of
+# them liked; the ones with a line of speech before that ran 2-5k at 4.5%. The
+# prompt asks for forty, which is where the breakouts actually landed. This is
+# the looser bound on purpose: at forty the check refuses the best video the
+# channel has had, which opens on a moment and quotes nobody until word 45.
+OPENING_WORDS = 100
+
+
+def _open_fault(body: str) -> str:
+    """Empty unless the story is in front of its first moment, not inside it.
+
+    A quoted line is the proxy: the opening the prompt asks for is a person
+    doing or saying something on a particular day, and the cheapest evidence
+    that it was written is somebody speaking. Part 1 only - a later part opens
+    on its recap line, which is a summary on purpose.
+    """
+    said = plain(body).find("«")
+    if said >= 0 and _words(plain(body)[:said]) < OPENING_WORDS:
+        return ""
+    return (f"nobody speaks in the first {OPENING_WORDS} words - it opens on a "
+            "standing fact instead of a moment. Put the line the conflict "
+            "starts with there, in «angle quotes»")
+
+
 # How the model is told to keep a title to one sentence, which is the one
 # complaint that has to name a conjunction to be actionable.
 _TURN_WORDS = {"ru": '"а" or "но"', "en": '"and" or "but"'}
@@ -950,6 +975,7 @@ def _parse_write(raw: str, post: dict, parts: int, target: int,
         faults += [label + f for f in
                    (_kin_fault(body, lang),
                     _flat_fault(body, lang),
+                    _open_fault(body) if i == 1 else "",
                     _ending_fault(body, final=i == len(chunks), markup=False,
                                   lang=lang))
                    if f]
@@ -999,6 +1025,7 @@ def _parse_polish(raw: str, written: list[str], parts: int, post: dict,
             faults += [label + f for f in [_drift_fault(body, written[i - 1])] if f]
         faults += [label + f for f in
                    (_ending_fault(body, final=i == len(chunks), lang=lang),
+                    _open_fault(body) if i == 1 else "",
                     _emphasis_fault(body))
                    if f]
         out.append(body)
@@ -1351,6 +1378,14 @@ if __name__ == "__main__":
     assert not ru("Он оставил пятно на платье, а виноватой стала я")
     assert not SPELLED_NUMBER["ru"].search("Ремонт стоит дороже"), '"сто" must not fire on "стоит"'
 
+    # Part 1 opens inside a moment, and a quoted line is what proves it.
+    assert not _open_fault("Мы только сели ужинать, когда она положила руки на "
+                           "стол. «Или кот, или я».")
+    assert _open_fault("Мы с парнем вместе десять месяцев. Он живёт с "
+                       "родителями и каждый вечер проводит у меня.")
+    assert _open_fault("слово " * (OPENING_WORDS + 5) + "«поздно».")
+    assert not _open_fault("слово " * (OPENING_WORDS - 5) + "«вовремя».")
+
     # in-law words nobody says any more, in the title and in the narration
     assert _kin_fault("Золовка забрала кольцо бабушки", "ru")
     assert _kin_fault("Я отдала ключи золовке и пожалела", "ru")
@@ -1525,7 +1560,8 @@ if __name__ == "__main__":
     # top holding for every part, a cliffhanger in the half that is not the
     # last, and not one square bracket anywhere - the markup is the next pass.
     RAW2 = ("NARRATOR: female\n\n"
-            "Соседка забрала мои ключи. И тут я услышала её шаги на лестнице.\n"
+            "Соседка забрала мои ключи. «Отдам, когда захочу». И тут я "
+            "услышала её шаги на лестнице.\n"
             "---\n"
             "Ключи она вернула через неделю. А вы бы простили соседке эти ключи?")
     POST = {"title": "", "text": ""}
@@ -1567,11 +1603,13 @@ if __name__ == "__main__":
     assert len(p5) == 1 and any("parts" in f for f in f5), f5
 
     # STAGE TWO takes those words back and may add nothing but brackets.
-    WRITTEN = ["Соседка забрала мои ключи. И тут я услышала её шаги на лестнице.",
+    WRITTEN = ["Соседка забрала мои ключи. «Отдам, когда захочу». И тут я "
+               "услышала её шаги на лестнице.",
                "Ключи она вернула через неделю. А вы бы простили соседке эти ключи?"]
     RAW_P = ("TITLE: Соседка [emphasis] забрала мои ключи и вернула их через "
              "неделю\n\n"
-             "Соседка [emphasis] забрала мои ключи. И тут я услышала её "
+             "Соседка [emphasis] забрала мои ключи. [neighbour, angry] "
+             "«Отдам, когда [emphasis] захочу». И тут я услышала её "
              "[emphasis] шаги на лестнице.\n"
              "---\n"
              "Ключи она [emphasis] вернула через неделю. [doubtful] А вы бы "
