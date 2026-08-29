@@ -377,10 +377,19 @@ def _batch_room() -> int:
     takes the ceiling to zero, nothing is written overnight, and the first run
     after the midnight reset asks for the whole day at once.
 
-    Three things come off it and the third is the one that is easy to miss.
-    A story that has started publishing is NOT in `review` any more - its row
-    goes the moment part 1 renders - so without source.parts_left() the day
+    Four things come off it and the last two are the ones that are easy to
+    miss. A story that has started publishing is NOT in `review` any more - its
+    row goes the moment part 1 renders - so without source.parts_left() the day
     after a split story began would look two videos emptier than it is.
+
+    And a video rendered by THIS run is in none of the three: its row is gone,
+    it is not a part, and it does not reach sent_today() until publish.py sends
+    it minutes later. The morning run is exactly that run - it renders the
+    story left over from yesterday and then tops the batch up - so without
+    publish.pending() the day is asked for a full four on top of the video
+    already in out/, owes five, and slides the last one into tomorrow. That is
+    the batch parked 08:23 with a story still promised 18:07 that never went
+    out (2026-08-29). review._claim() counts the same list for the same reason.
 
     Counting those parts is deliberately stricter than TikTok is: a part is
     exempt from the daily count once it exists, so the platform would take
@@ -393,8 +402,8 @@ def _batch_room() -> int:
     is always zero and YouTube's slower allowance governs, so the batch there
     is one or two questions too generous - set REVIEW_BATCH for that channel.
     """
-    return max(0, REVIEW_BATCH - publish.sent_today() - review.queued()
-               - source.parts_left())
+    return max(0, REVIEW_BATCH - publish.sent_today() - len(publish.pending())
+               - review.queued() - source.parts_left())
 
 
 def _room() -> int:
@@ -613,6 +622,9 @@ if __name__ == "__main__":
                                     "title": "t", "text": "x" * 500}]
         globals()["write_and_park"] = lambda p, n=1: written.append(p["id"])
         publish.sent_today = lambda: 0
+        # read off the live out/ otherwise, so the batch tests below would pass
+        # or fail on whatever mp4 happens to be lying around
+        publish.pending = lambda: []
         source.parts_left = lambda: 0
         review.queued = lambda: REVIEW_BATCH
         assert main(1) == 1 and not written, "a full batch must block the pool"
@@ -627,6 +639,12 @@ if __name__ == "__main__":
         source.parts_left = lambda: REVIEW_BATCH
         assert main(1) == 1 and not written, "a queued split must block it too"
         source.parts_left = lambda: 0
+        # ...and so does a video rendered this run and not yet sent, which is in
+        # neither of those either: its review row went at the render and
+        # sent_today() does not see it until publish.py runs.
+        publish.pending = lambda: [Path("stub.mp4")] * REVIEW_BATCH
+        assert main(1) == 1 and not written, "an unsent render must block it too"
+        publish.pending = lambda: []
         # ...and a batch with room fills to REVIEW_BATCH in one run, which is
         # the whole feature: a day's questions asked together, not one an hour.
         vids = [0]
