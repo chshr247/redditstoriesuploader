@@ -1039,6 +1039,29 @@ def _parse_polish(raw: str, written: list[str], parts: int, post: dict,
     return (title, out), faults
 
 
+# Faults that mean the answer is unusable rather than imperfect, and so the one
+# thing _ask() below will not accept on its last attempt.
+#
+# An empty narration is not a short one: it renders a title card over silence.
+# Drift is stage two rewriting the words it was handed to mark up, and
+# _drift_fault calls itself "the whole safety of splitting the call in two" -
+# accepted, it voids every check stage one made against the source post, and
+# does it invisibly, because what ships is then not what was checked.
+#
+# Measured 2026-08-29 on 1834tvx, the story that made this necessary: stage one
+# shipped a part 1 of zero words and was accepted; stage two, handed that
+# emptiness, returned one 304-word text in BOTH slots, complained about drift on
+# both, and was accepted too. Part 2 published as a verbatim repeat of part 1.
+#
+# Matched on wording, because wording is what check() hands back - so the
+# assertions in __main__ hold it against the functions that produce it. A
+# reworded complaint would disarm this silently, which is the failure it exists
+# to stop.
+_FATAL = ("the narration is missing",
+          "the narration was changed at word",
+          "the narration came back ")
+
+
 def _ask(client, system: str, user: str, check, keep: str,
          skippable: bool = False):
     """One model call, checked, with one rewrite if the answer has faults.
@@ -1084,6 +1107,12 @@ def _ask(client, system: str, user: str, check, keep: str,
                  {"role": "user", "content":
                   "Rewrite it. Problems: " + "; ".join(faults) + ". " + keep}]
 
+    # Burning the story costs a slot; accepting one of these costs a published
+    # video nobody checked. Unsuitable is what the blocklist above raises and
+    # what main._park_one() already handles - the post is marked used and the
+    # run moves on to the next one.
+    if fatal := [f for f in faults if any(m in f for m in _FATAL)]:
+        raise Unsuitable("; ".join(fatal)[:200])
     log.warning("accepting as is (%s)", "; ".join(faults))
     return result
 
@@ -1172,6 +1201,14 @@ def write_script(post: dict, parts: int = 1) -> tuple[str, list[tuple[str, str]]
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+    # The fatal set is matched on wording, so it is checked against the
+    # functions that write that wording rather than against a copy of it.
+    assert any(m in _ending_fault("") for m in _FATAL)
+    assert any(m in _drift_fault("a b c", "a b d") for m in _FATAL)
+    assert any(m in _drift_fault("a b", "a b c") for m in _FATAL)
+    assert not any(m in "it is 12 words, rewrite to about 300 - expand it"
+                   for m in _FATAL)
 
     assert _clean('**Well**, I  *did*\n\nit.') == "Well, I did it."
     assert _clean('"in quotes"') == "in quotes"
