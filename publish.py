@@ -35,6 +35,7 @@ else, the text is typed in the app at publish time. So on the api backend
 exists. The tau backend sends the caption with the video and prints nothing,
 because there the print would read as a job still to do.
 """
+import csv
 import datetime
 import hashlib
 import json
@@ -105,6 +106,28 @@ def whoami() -> dict:
             return json.load(r).get("data", {})
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"user/info -> {e.code}: {e.read().decode()[:400]}") from None
+
+
+def videos(fields: str = "id,title,create_time,view_count,like_count,"
+                         "comment_count,share_count") -> list:
+    """Every video on the account, newest first, with its counters.
+
+    Needs video.list in TIKTOK_SCOPES. The portal grants it beside
+    user.info.basic without an audit, for the app's own account - the only
+    account this client ever touches. Studio's own CSV export is capped at a
+    handful of top posts; this is not.
+    """
+    out, cursor = [], None
+    while True:
+        body = {"max_count": 20}
+        if cursor:
+            body["cursor"] = cursor
+        data = _post(f"{API}/video/list/?fields={fields}", body,
+                     access_token()).get("data", {})
+        out += data.get("videos", [])
+        cursor = data.get("cursor")
+        if not data.get("has_more") or not cursor:
+            return out
 
 
 def _post(url: str, body: dict, token: str = "", form: bool = False) -> dict:
@@ -1442,6 +1465,20 @@ if __name__ == "__main__":
             authorize()
         elif "--whoami" in sys.argv:
             print(whoami())
+        elif "--stats" in sys.argv:
+            # captions carry emoji; the console pipe is cp1251 here
+            sys.stdout.reconfigure(encoding="utf-8-sig", newline="")
+            w = csv.writer(sys.stdout, lineterminator="\n")
+            w.writerow(["id", "posted", "views", "likes", "comments",
+                        "shares", "title"])
+            for v in videos():
+                w.writerow([
+                    v.get("id"),
+                    datetime.datetime.fromtimestamp(
+                        v.get("create_time", 0)).isoformat(" ", "seconds"),
+                    v.get("view_count"), v.get("like_count"),
+                    v.get("comment_count"), v.get("share_count"),
+                    (v.get("title") or "").replace("\n", " ")])
         elif "--due" in sys.argv:
             # exit code is the point: the workflow gate asks before it spends
             reason = due()
@@ -1535,7 +1572,8 @@ if __name__ == "__main__":
             print(pid, "(posted; the API has no status for a tau id)"
                   if pid.startswith("tau:") else status(pid))
         else:
-            print("usage: python publish.py --auth | --whoami | --status | "
+            print("usage: python publish.py --auth | --whoami | --stats | "
+                  "--status | "
                   "--due | --enabled | --next | --stale [hours] | "
                   "--since-last | --handoff | "
                   "out/<id>.mp4 [--direct] [--public]")
