@@ -44,6 +44,7 @@ import os
 import random
 import re
 import secrets
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -573,11 +574,34 @@ def _upload_tau(mp4, title: str, private: bool = True, body: str = "") -> str:
     # Each attempt re-uploads the file, which is also the backoff: a send is a
     # minute of video bytes, so there is nothing to sleep for between tries.
     for attempt in range(1, TAU_TRIES + 1):
+        # Popen and not subprocess.run, and the difference is the whole point of
+        # the timeout. cli.py spawns NODE to compute the signature, so the thing
+        # that hangs is a grandchild. run(timeout=) kills the direct child, then
+        # goes back to draining pipes the grandchild still holds open - and
+        # waits there with no deadline at all. Measured 2026-08-30: the 11:15
+        # run sat in exactly that wait until 13:35, two hours past its own
+        # thirty-minute limit, and Task Scheduler's one-hour limit did not end
+        # it either, for the same reason. Worse than the lost video is what the
+        # wait takes with it - post.ps1 runs its watchdog after this returns, so
+        # a hang here is the one failure nobody is ever told about, and the
+        # channel went fourteen hours unnoticed.
+        proc = subprocess.Popen(
+            cmd, cwd=TIKTOK_TAU_DIR, env=env, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, encoding="utf-8",
+            errors="replace",
+            # POSIX needs the group to exist before there is anything to kill;
+            # on Windows taskkill /T walks the parent chain and needs nothing.
+            start_new_session=os.name != "nt")
         try:
-            r = subprocess.run(cmd, cwd=TIKTOK_TAU_DIR, env=env,
-                               capture_output=True, text=True, encoding="utf-8",
-                               errors="replace", timeout=TAU_TIMEOUT)
+            stdout, stderr = proc.communicate(timeout=TAU_TIMEOUT)
         except subprocess.TimeoutExpired:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                               capture_output=True)
+            else:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            # With the tree gone the pipes close and this returns at once.
+            proc.communicate()
             # NOT retried, unlike the rejection below: a timeout is the one
             # outcome where the post may already exist, and trying again is how
             # one video becomes two.
@@ -585,14 +609,15 @@ def _upload_tau(mp4, title: str, private: bool = True, body: str = "") -> str:
                 f"tau upload timed out after {TAU_TIMEOUT}s. The video may or "
                 f"may not have posted - check the account before running "
                 f"again, nothing was written to the queue.") from None
-        out = ((r.stdout or "") + (r.stderr or "")).strip()
-        if r.returncode == 0 or not _tau_retryable(out):
+        out = ((stdout or "") + (stderr or "")).strip()
+        code = proc.returncode
+        if code == 0 or not _tau_retryable(out):
             break
         log.warning("tau: post rejected as 'Invalid parameters' "
                     "(attempt %d of %d), re-signing and sending again",
                     attempt, TAU_TRIES)
-    if r.returncode != 0:
-        raise RuntimeError(f"tau upload failed (exit {r.returncode}):\n{out[-1500:]}")
+    if code != 0:
+        raise RuntimeError(f"tau upload failed (exit {code}):\n{out[-1500:]}")
     if not (m := _CREATION_ID.search(out)):
         # Upstream exits 0 on paths that posted nothing, which is exactly what
         # the patch's creation_id line exists to tell apart. No line, no post:
