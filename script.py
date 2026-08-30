@@ -27,11 +27,12 @@ import sys
 # deploy key, by hand for local work. Nothing else is over there, and putting
 # the directory on the path rather than copying the file out of it keeps one
 # copy to edit instead of two to keep in step.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".private"))
+PRIVATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".private")
+sys.path.insert(0, PRIVATE)
 
 
 def _prompts():
-    """(WRITE, POLISH, MULTI, GENRE), imported on use rather than at import time.
+    """(WRITE, POLISH, MULTI, GENRE, CRITIC), imported on use, not at import.
 
     Both this and the OpenAI SDK belong to write_script() and to nothing else,
     and CI checks the private repo out only for a run that is going to call the
@@ -46,12 +47,14 @@ def _prompts():
             "prompts.py not found - clone the private repo into .private/ "
             "(git clone https://github.com/chshr247/reddit-prompts.git .private)"
         ) from None
-    return prompts.WRITE, prompts.POLISH, prompts.MULTI, prompts.GENRE
+    return (prompts.WRITE, prompts.POLISH, prompts.MULTI, prompts.GENRE,
+            prompts.CRITIC)
 
 import safety
-from config import (LLM_BASE_URL, LLM_MAX_TOKENS, LLM_MODEL, LLM_REASONING,
-                    OPENAI_API_KEY, OUTPUT_LANG,
-                    HORROR_SEC, SUBREDDITS_HORROR, TARGET_SEC, VOICE_SPEEDUP)
+from config import (CRITIC_MIN, LLM_BASE_URL, LLM_MAX_TOKENS, LLM_MODEL,
+                    LLM_REASONING, OPENAI_API_KEY, OUTPUT_LANG,
+                    HORROR_SEC, SUBREDDITS_HORROR, TARGET_SEC, VOICE_SPEEDUP,
+                    chan_file)
 
 
 class Unsuitable(Exception):
@@ -1117,8 +1120,93 @@ def _ask(client, system: str, user: str, check, keep: str,
     return result
 
 
-def write_script(post: dict, parts: int = 1) -> tuple[str, list[tuple[str, str]]]:
-    """(gender, [(title, narration), ...]) - one entry per video, each TARGET_SEC.
+def _hits() -> str:
+    """The channel's published titles and their views, or "" if never measured.
+
+    Written by `publish.py --hits` into the prompt set's directory, so CI is
+    handed it by the checkout that already carries the prompts and no workflow
+    learns anything new. Absent is not an error - a fresh channel, or a week
+    nobody ran the refresh - and it is the whole switch: with no evidence there
+    is nothing to judge against, judge() does not run, and the story reaches the
+    user exactly as it did before any of this existed.
+    """
+    path = os.path.join(PRIVATE, chan_file("hits") + ".md")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        log.warning("%s is not there - no critic this run", path)
+        return ""
+
+
+# The three labelled lines the critic answers in. Anchored per line rather than
+# parsed as a whole: a model that opens with a stray sentence is still read.
+JUDGE_LINE = re.compile(r"^\s*[*`]*(SCORE|TITLE|NOTE)[*`]*\s*:\s*(.*)$",
+                        re.IGNORECASE | re.MULTILINE)
+
+
+def _parse_judge(raw: str, ours: str) -> tuple[tuple, list]:
+    """((score, title, note), complaints) - the shape _ask() checks against."""
+    got = {k.upper(): v.strip() for k, v in JUDGE_LINE.findall(raw)}
+    faults = []
+    m = re.search(r"\d+", got.get("SCORE", ""))
+    score = int(m.group()) if m else 0
+    if not 1 <= score <= 10:
+        faults.append("the SCORE line is missing or is not a number 1 to 10")
+    title = got.get("TITLE", "").strip("`* ")
+    if title.upper().startswith("KEEP"):
+        title = ""
+    elif title:
+        # The replacement goes through the same gate the model's title does,
+        # and a fault here is worth a rewrite: the critic is being asked for
+        # one line and has the whole answer's budget to get it right.
+        if fault := _title_fault(title):
+            faults.append(fault)
+        elif plain(title) == plain(ours):
+            title = ""      # "better" and identical - keep ours, say nothing
+    note = " ".join(got.get("NOTE", "").split())
+    if not note:
+        faults.append("the NOTE line is missing")
+    return (score, title, note), faults
+
+
+def judge(client, written: list[tuple[str, str]]) -> tuple[int, str, str]:
+    """(score, better title or "", note) - a second reading of the title.
+
+    The one thing this call has that neither writing stage did: the view counts
+    of what this channel already published. Everything about what makes a good
+    title in the abstract is in POLISH already, and asking the same model the
+    same question twice buys nothing - so the critic is given evidence instead
+    of rules, and judges against it.
+
+    A score of 0 means it did not run, which is what an unmeasured channel gets.
+    Only write_script() acts on any of it; nothing here refuses anything.
+    """
+    hits = _hits()
+    if not hits:
+        return 0, "", ""
+    CRITIC = _prompts()[4]
+    ours = written[0][0]
+    system = CRITIC.format(lang=LANG_NAME[OUTPUT_LANG], hits=hits,
+                           n=len(re.findall(r"^- *\d", hits, re.MULTILINE)))
+    ask = (f"TITLE: {ours}\n\nNARRATION:\n"
+           + "\n---\n".join(b for _, b in written))
+    score, better, note = _ask(
+        client, system, ask, lambda raw: _parse_judge(raw, ours),
+        "Answer in the three labelled lines and nothing else.")
+    # _ask() hands back the last answer even when it still has faults - right
+    # for a narration, wrong for this: a title that failed the gate three times
+    # is not going on a card when there is already a checked one in hand.
+    if better and (fault := _title_fault(better)):
+        log.warning("critic's title refused, keeping ours: %s", fault)
+        better = ""
+    log.info("critic: %d/10 - %s", score, note)
+    return score, better, note
+
+
+def write_script(post: dict, parts: int = 1
+                 ) -> tuple[str, list[tuple[str, str]], str]:
+    """(gender, [(title, narration), ...], critic's note) - one entry per video.
 
     Two calls, not one. The first writes words and only words; the second writes
     the title and adds the delivery markup to those words without touching them.
@@ -1146,7 +1234,7 @@ def write_script(post: dict, parts: int = 1) -> tuple[str, list[tuple[str, str]]
 
     from openai import OpenAI
 
-    WRITE, POLISH, MULTI, GENRE = _prompts()
+    WRITE, POLISH, MULTI, GENRE, _ = _prompts()
     client = OpenAI(api_key=OPENAI_API_KEY, base_url=LLM_BASE_URL or None)
     sec = target_sec(post)
     target = _target_words(sec)
@@ -1194,9 +1282,20 @@ def write_script(post: dict, parts: int = 1) -> tuple[str, list[tuple[str, str]]
                     len(tagged), len(written))
         tagged += written[len(tagged):]
 
+    # Third call, and the only one that has ever been shown how a title did
+    # after it went out. It refuses nothing on its own: CRITIC_MIN decides
+    # that, and its default of 0 leaves the critic advisory.
+    score, better, note = judge(client, [(title, b) for b in tagged])
+    if score and score < CRITIC_MIN:
+        raise Unsuitable(f"the critic gave the title {score}/10 - {note}")
+    if better:
+        log.info("title rewritten by the critic:\n  was: %s\n  now: %s",
+                 title, better)
+        title = better
+
     log.info("%d words across %d part(s)",
              sum(_words(title) + _words(b) for b in tagged), len(tagged))
-    return gender, [(title, b) for b in tagged]
+    return gender, [(title, b) for b in tagged], note
 
 
 if __name__ == "__main__":
@@ -1699,6 +1798,25 @@ if __name__ == "__main__":
     # dies deep inside write_script() with a KeyError instead of here
     assert OUTPUT_LANG in _prompts()[0] and OUTPUT_LANG in WEAK_TITLE, OUTPUT_LANG
 
+    # The critic's answer is three labelled lines, and everything downstream of
+    # it - a story dropped, a title replaced - hangs off reading them right.
+    _good = ("SCORE: 8\nTITLE: Соседка [emphasis] прислала счёт на 80000 за "
+             "свой потоп\nNOTE: своё название общее")
+    (_s, _t, _n), _f = _parse_judge(_good, "Соседка прислала счёт")
+    assert (_s, _f) == (8, []), (_s, _f)
+    assert _t.startswith("Соседка [emphasis]") and _n == "своё название общее"
+    # KEEP is the common answer and must not arrive as a title to render
+    (_s, _t, _n), _f = _parse_judge("SCORE: 9\nTITLE: KEEP\nNOTE: и так хорошо",
+                                    "Соседка прислала счёт")
+    assert (_s, _t, _f) == (9, "", []), (_s, _t, _f)
+    # a replacement that fails the title gate is a rewrite, not something to
+    # quietly accept - the model gets told exactly what _title_fault() says
+    (_, _, _), _f = _parse_judge("SCORE: 5\nTITLE: Соседка прислала счёт на "
+                                 "80000\nNOTE: x", "Соседка прислала счёт")
+    assert _f == [_title_fault("Соседка прислала счёт на 80000")], _f
+    (_, _, _), _f = _parse_judge("нет ответа", "x")
+    assert len(_f) == 2, _f
+
     print(f"logic ok: {OUTPUT_LANG}, engine {_wpm()} wpm"
           + (f" x{VOICE_SPEEDUP} = {_heard_wpm():.0f} heard"
              if VOICE_SPEEDUP != 1.0 else "")
@@ -1708,7 +1826,9 @@ if __name__ == "__main__":
         import source
         post = source.fetch(1)[0]
         n = part_count(post)
-        gender, written = write_script(post, parts=n)
+        gender, written, note = write_script(post, parts=n)
+        if note:
+            print(f"\nCRITIC: {note}")
         print(f"\n--- r/{post['sub']} [{post['score']}] {len(post['text'])}ch "
               f"-> {len(written)} part(s)\n{post['title']}\n")
         print(f"NARRATOR: {gender}")

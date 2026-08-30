@@ -121,6 +121,13 @@ jobs:
       # reads as absent and falls back to the code default.
       REVIEW_TAKES: ${{ vars.REVIEW_TAKES }}
       REVIEW_TAKES_EN: ${{ vars.REVIEW_TAKES_EN }}
+      # Out of ten, the score script.judge() must give a title for the story to
+      # be worth asking about at all. Unset is 0, which leaves the critic
+      # advisory: it still rewrites a title it can beat and still says why, but
+      # refuses nothing. A repo variable for the same reason REVIEW_TAKES is
+      # one - raising the bar is a taste decision, not a push.
+      CRITIC_MIN: ${{ vars.CRITIC_MIN }}
+      CRITIC_MIN_EN: ${{ vars.CRITIC_MIN_EN }}
       YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
       YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
       YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}

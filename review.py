@@ -225,7 +225,7 @@ def ok() -> str:
 
 # --------------------------------------------------------------------- parking
 
-def _body(post: dict, written: list) -> str:
+def _body(post: dict, written: list, note: str = "") -> str:
     title = written[0][0]
     parts = "\n\n".join(
         (f"**Часть {i}.** " if len(written) > 1 else "") + body
@@ -233,7 +233,11 @@ def _body(post: dict, written: list) -> str:
     return (
         f"r/{post['sub']} · {post['score']} · https://redd.it/{post['id']}\n\n"
         f"**Название от модели:**\n\n`{title}`\n\n"
-        f"{parts}\n\n---\n"
+        # The critic's one line, under the title it is about. Advice and
+        # nothing else: whatever it said, the title above is the one that
+        # renders unless the answer below replaces it.
+        + (f"> {note}\n\n" if note else "")
+        + f"{parts}\n\n---\n"
         f"**Первая строка комментария:**\n"
         f"`+` — пойдёт название модели.\n"
         f"`-` — история снимается совсем, рендера не будет — "
@@ -261,7 +265,8 @@ def _body(post: dict, written: list) -> str:
         + f"Молчание {HOURS} ч — уходит вариант модели.")
 
 
-def park(post: dict, gender: str, written: list[tuple[str, str]]) -> int:
+def park(post: dict, gender: str, written: list[tuple[str, str]],
+         note: str = "") -> int:
     """Open the issue, store the script, return the issue number."""
     # Assigned, not just opened: a notification for one's own repository depends
     # on the watch setting, an assignment does not - the same reason publish.py's
@@ -269,7 +274,7 @@ def park(post: dict, gender: str, written: list[tuple[str, str]]) -> int:
     url = _gh("issue", "create",
               "--title", f"[{OUTPUT_LANG}] {script.plain(written[0][0])[:70]}",
               "--assignee", _owner(),
-              "--body-file", "-", stdin=_body(post, written))
+              "--body-file", "-", stdin=_body(post, written, note))
     issue = int(url.rstrip("/").rsplit("/", 1)[1])
     with _db() as db:
         db.execute("INSERT OR REPLACE INTO review(post_id, lang, issue, ts, "

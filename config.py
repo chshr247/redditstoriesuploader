@@ -394,6 +394,15 @@ TIKTOK_PER_DAY = int(os.getenv("TIKTOK_PER_DAY", 4))
 # cannot go out today whatever the answer is, so writing it only pays the LLM
 # early for a question that keeps until tomorrow.
 REVIEW_BATCH = int(os.getenv("REVIEW_BATCH", TIKTOK_PER_DAY))
+# The score a story has to earn from script.judge() to reach an issue at all,
+# out of ten. Zero is the setting to start on and the reason the default is
+# zero: the critic still reads every story, still rewrites the title when it
+# can beat the model's, and still says why - it just throws nothing away. Watch
+# what it scores for a week against what you would have answered yourself, and
+# raise it to six or seven once the two agree. A story refused here costs
+# nothing but its own LLM call: --park writes the next one in its place, and
+# the question that reaches the phone is the replacement.
+CRITIC_MIN = int(chan_env("CRITIC_MIN", "0"))
 # Hours from UTC for the times quoted back on an issue. Everything internal
 # runs on UTC and stays there; this is display only, and it exists because
 # "публикация сегодня в 14:07" is read on a phone by someone who is not going

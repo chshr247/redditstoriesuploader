@@ -216,6 +216,10 @@ jobs:
           TIKTOK_PER_DAY: ${{ vars.TIKTOK_PER_DAY || '4' }}
           TIKTOK_MIN_GAP_HOURS: ${{ vars.TIKTOK_MIN_GAP_HOURS || '3' }}
           REVIEW_BATCH: ${{ vars.REVIEW_BATCH }}
+          # The critic's bar, out of ten. Unset is 0 - it advises and refuses
+          # nothing. See the longer note in publish.yml.
+          CRITIC_MIN: ${{ vars.CRITIC_MIN }}
+          CRITIC_MIN_EN: ${{ vars.CRITIC_MIN_EN }}
         run: python main.py --park
 
       # The same reason publish.yml keeps it: the run records which comment it
