@@ -449,6 +449,10 @@ TIKTOK_PUBLIC = chan_env("TIKTOK_PUBLIC", "0").strip().lower() in (
 # credential; the account and the exit IP below are what must never be.
 TIKTOK_TAU_DIR = chan_env("TIKTOK_TAU_DIR", shared=True)
 # Interpreter of that checkout's own venv. Empty means "guess it from the dir".
+# Path to uipost.js. Set, it takes the UI route and the fork is not used
+# at all; unset, publishing goes through the fork as before. Shared
+# because the script is one file for every channel, like the checkout.
+TIKTOK_TAU_UI = chan_env("TIKTOK_TAU_UI", shared=True)
 TIKTOK_TAU_PYTHON = chan_env("TIKTOK_TAU_PYTHON", shared=True)
 # The name the fork's cookie was saved under (`cli.py login -n <name>`), which
 # is to say: the account. Per channel by the same rule as the refresh token - a

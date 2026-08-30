@@ -46,6 +46,7 @@ import re
 import secrets
 import signal
 import sqlite3
+import tempfile
 import subprocess
 import sys
 import time
@@ -66,7 +67,7 @@ from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL,
                     TIKTOK_ENABLED, TIKTOK_MIN_GAP_HOURS, TIKTOK_PER_DAY,
                     TIKTOK_PROXY, TIKTOK_PUBLIC, TIKTOK_REFRESH_KEY,
                     TIKTOK_REFRESH_TOKEN, TIKTOK_TAU_BROWSERS, TIKTOK_TAU_DIR,
-                    TIKTOK_TAU_PYTHON, TIKTOK_TAU_UA, TIKTOK_TAU_USER,
+                    TIKTOK_TAU_PYTHON, TIKTOK_TAU_UA, TIKTOK_TAU_UI, TIKTOK_TAU_USER,
                     chan_file, chan_key, save_env)
 
 API = "https://open.tiktokapis.com/v2"
@@ -594,6 +595,76 @@ def _warm_signer(env) -> None:
         f"PLAYWRIGHT_BROWSERS_PATH, not the account.")
 
 
+def _upload_ui(mp4, text: str, env: dict) -> str:
+    """Post by DRIVING the upload page, not by replaying its requests.
+
+    The fork's way died on 2026-08-30: TikTok replaced the `_signature`
+    parameter on /tiktok/web/project/post/v1/ with `X-Gnarly`, and the fork's
+    signer is a frozen copy of TikTok's SDK that can only produce `_signature`
+    and `X-Bogus`. Every publish came back {"status_code":5,"status_msg":
+    "Invalid parameters"} - nineteen in a row - while the upload half kept
+    working, the cookie stayed valid and posting the same file by hand from the
+    browser went through at once. Nobody upstream has patched it and no issue
+    anywhere mentions X-Gnarly.
+
+    Here there is no signature to get wrong: the page is TikTok's own, running
+    TikTok's own current JavaScript, so it signs itself. The cost is minutes
+    instead of seconds and a selector that can move - which is ten minutes of
+    work, against reverse-engineering an anti-bot bundle every time it rotates.
+
+    Everything around this is unchanged: same cookie from login.py, same queue,
+    same seen_local_<channel>.db, same watchdog in post.ps1.
+    """
+    # The cookie is a pickle the fork reads; Playwright wants JSON, and the
+    # sameSite spellings differ between the two worlds.
+    import pickle
+    cookie = Path(TIKTOK_TAU_DIR) / "CookiesDir" / f"tiktok_session-{TIKTOK_TAU_USER}.cookie"
+    if not cookie.exists():
+        raise RuntimeError(f"no cookie at {cookie} - run login.py for "
+                           f"{TIKTOK_TAU_USER} first")
+    same = {"no_restriction": "None", "lax": "Lax", "strict": "Strict"}
+    jar = []
+    for c in pickle.loads(cookie.read_bytes()):
+        if not c.get("name") or c.get("value") is None:
+            continue
+        row = {"name": c["name"], "value": c["value"],
+               "domain": c.get("domain") or ".tiktok.com",
+               "path": c.get("path") or "/",
+               "httpOnly": bool(c.get("httpOnly")),
+               "secure": bool(c.get("secure")),
+               "sameSite": same.get(str(c.get("sameSite")).lower(), "Lax")}
+        if c.get("expirationDate"):
+            row["expires"] = int(c["expirationDate"])
+        jar.append(row)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        jar_file = Path(tmp) / "cookies.json"
+        cap_file = Path(tmp) / "caption.txt"
+        jar_file.write_text(json.dumps(jar), encoding="utf-8")
+        # A file and not an argument: the caption is multi-line and full of
+        # emoji, and a command line is the wrong place for either.
+        cap_file.write_text(text, encoding="utf-8")
+        cmd = ["node", TIKTOK_TAU_UI, str(jar_file), TIKTOK_TAU_UA,
+               str(Path(mp4).resolve()), str(cap_file),
+               "public" if TIKTOK_PUBLIC else "private"]
+        env = {**env, "TIKTOK_TAU_DIR": TIKTOK_TAU_DIR}
+        try:
+            code, out = _run_capped(cmd, TIKTOK_TAU_DIR, env, TAU_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                f"the UI upload timed out after {TAU_TIMEOUT}s. The video may "
+                f"or may not have posted - check the account before running "
+                f"again, nothing was written to the queue.") from None
+    if code != 0:
+        raise RuntimeError(f"UI upload failed (exit {code}):\n{out[-1500:]}")
+    if not (m := _CREATION_ID.search(out)):
+        raise RuntimeError(
+            f"the UI uploader exited 0 but printed no creation_id, so there is "
+            f"no telling whether it posted:\n{out[-1500:]}")
+    log.info("ui: posted %s as %s", Path(mp4).name, m.group(1))
+    return f"ui:{m.group(1)}"
+
+
 def _upload_tau(mp4, title: str, private: bool = True, body: str = "") -> str:
     """Post for real through the patched fork. Returns "tau:<creation_id>".
 
@@ -662,6 +733,12 @@ def _upload_tau(mp4, title: str, private: bool = True, body: str = "") -> str:
         env["PLAYWRIGHT_BROWSERS_PATH"] = TIKTOK_TAU_BROWSERS
     log.info("tau: posting %s as %s%s", Path(mp4).name, TIKTOK_TAU_USER,
              " (private)" if private else " (PUBLIC)")
+    # The fork replays requests and needs a signature TikTok stopped accepting;
+    # the UI path drives the page and needs none. Point TIKTOK_TAU_UI at
+    # uipost.js to take it. Checked here rather than at the top so everything
+    # above - the config, the proxy and UA warnings, the caption - is shared.
+    if TIKTOK_TAU_UI:
+        return _upload_ui(mp4, text, env)
     # Each attempt re-uploads the file, which is also the backoff: a send is a
     # minute of video bytes, so there is nothing to sleep for between tries.
     _warm_signer(env)
@@ -751,7 +828,7 @@ def status(publish_id: str) -> dict:
     endpoints, which hand back a creation id that /status/fetch/ has never
     heard of. Saying so beats a 400 that reads like a broken token.
     """
-    if publish_id.startswith("tau:"):
+    if publish_id.startswith(("tau:", "ui:")):
         raise RuntimeError(
             f"{publish_id} was posted through the tau backend; the Content "
             "Posting API knows nothing about it. Look at the account.")
