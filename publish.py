@@ -178,23 +178,28 @@ def _headline(caption_text: str) -> str:
     return _MARKER.sub("", t.replace("​", "")).strip()
 
 
-def hits(n: int = 12, fresh_days: int = 2) -> str:
+def hits(n: int = 12, fresh_hours: int = 12) -> str:
     """This channel's best and worst titles by views - the critic's examples.
 
     Read out of the --stats export rather than off the API: it is the file the
-    weekly refresh writes, it can be read by eye, and it keeps videos that have
-    since been taken down. The encoding is sniffed because PowerShell's `>`
-    writes UTF-16 and every other shell writes UTF-8.
+    refresh writes every third day, it can be read by eye, and it keeps videos
+    that have since been taken down. The encoding is sniffed because
+    PowerShell's `>` writes UTF-16 and every other shell writes UTF-8.
 
     A title counts once, at its best showing. A story split over three videos
     is one title, and the later parts riding on the first one's audience are
-    not three separate verdicts on how it was written. The last `fresh_days`
-    are dropped whole: a video posted yesterday has not been seen yet and would
-    land in the bottom list on its age alone.
+    not three separate verdicts on how it was written. The last `fresh_hours`
+    are dropped whole: a video an hour old has not been seen by anybody yet and
+    would land in the bottom list on its age alone. It is a guard against
+    counting nothing at all, not a wait for the number to settle - views keep
+    climbing for days, and "Сосед потребовал сменить кличку собаки" read 70
+    forty minutes after it went out. The refresh re-reads the whole export
+    every time, so a video that was still young at one run is counted properly
+    at the next.
     """
     raw = Path(chan_file("tiktok") + ".csv").read_bytes()
     enc = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig"
-    cutoff = time.time() - fresh_days * 86400
+    cutoff = time.time() - fresh_hours * 3600
     best: dict[str, int] = {}
     for r in csv.DictReader(raw.decode(enc).splitlines()):
         if datetime.datetime.fromisoformat(r["posted"]).timestamp() > cutoff:
