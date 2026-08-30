@@ -503,6 +503,97 @@ def _tau_python() -> str:
 _CREATION_ID = re.compile(r"^creation_id=(\S+)", re.M)
 
 
+# The signer's own endpoint, asked with a throwaway msToken: the answer is
+# thrown away too, and only "did node and its headless Chromium come up" is
+# read off it.
+_SIGNER_PROBE = ("https://www.tiktok.com/api/v1/web/project/post/"
+                 "?app_name=tiktok_web&channel=tiktok_web&device_platform=web"
+                 "&aid=1988&msToken=warmup")
+SIGNATURE_MARK = chr(34) + "signature" + chr(34)
+SIGNER_TRIES = int(os.getenv("TIKTOK_TAU_SIGNER_TRIES", 4))
+SIGNER_TIMEOUT = int(os.getenv("TIKTOK_TAU_SIGNER_TIMEOUT", 45))
+
+
+def _run_capped(cmd, cwd, env, timeout) -> tuple[int, str]:
+    """Run cmd under a timeout that actually ends it. (returncode, output).
+
+    Popen and not subprocess.run, and the difference is the whole point of the
+    timeout. Both callers spawn NODE, so the thing that hangs is a grandchild.
+    run(timeout=) kills the direct child, then goes back to draining pipes the
+    grandchild still holds open - and waits there with no deadline at all.
+    Measured 2026-08-30: the 11:15 run sat in exactly that wait until 13:35, two
+    hours past its own thirty-minute limit, and Task Scheduler's one-hour limit
+    did not end it either, for the same reason. Worse than the lost video is
+    what the wait takes with it - post.ps1 runs its watchdog only after
+    publish.py returns, so a hang here is the one failure nobody is ever told
+    about, and the channel went fourteen hours unnoticed.
+
+    Raises TimeoutExpired, but not before the tree is gone.
+    """
+    proc = subprocess.Popen(
+        cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace",
+        # POSIX needs the group to exist before there is anything to kill; on
+        # Windows taskkill /T walks the parent chain and needs nothing.
+        start_new_session=os.name != "nt")
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                           capture_output=True)
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        # With the tree gone the pipes close and this returns at once.
+        proc.communicate()
+        raise
+    return proc.returncode, ((stdout or "") + (stderr or "")).strip()
+
+
+def _warm_signer(env) -> None:
+    """Bring the fork's node signer up BEFORE the video is uploaded.
+
+    The signer is a headless Chromium, and after the machine has been asleep it
+    sometimes does not come up at all. Measured 2026-08-30 on one probe: 1.7s
+    awake and unlocked, 2.0s awake and LOCKED, 4.3s after a two-minute sleep -
+    then past 180s after fifteen minutes of sleep, and past two hours after the
+    seven the channel lost a day to. So the lock screen is innocent and the
+    resume is not; whether the rest is settling time or plain flakiness was left
+    unsettled on purpose, because retrying covers both and measuring it would
+    have cost an afternoon of sleep cycles.
+
+    What this buys is WHEN the failure lands. A signer that hangs inside the
+    real send hangs after the video is already uploaded - the one outcome
+    nothing can clean up, because the post may or may not exist by then.
+    Failing here costs nothing: the file has not been touched and goes out on
+    the next run.
+    """
+    ua = TIKTOK_TAU_UA or ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/120.0.0.0 Safari/537.36")
+    cwd = str(Path(TIKTOK_TAU_DIR) / "tiktok_uploader" / "tiktok-signature")
+    for n in range(1, SIGNER_TRIES + 1):
+        try:
+            code, out = _run_capped(["node", "browser.js", _SIGNER_PROBE, ua],
+                                    cwd, env, SIGNER_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            log.warning("tau: signer did not come up in %ds (try %d of %d), "
+                        "killed it and asking again", SIGNER_TIMEOUT, n,
+                        SIGNER_TRIES)
+            continue
+        if SIGNATURE_MARK in out:
+            if n > 1:
+                log.info("tau: signer up on try %d", n)
+            return
+        log.warning("tau: signer exited %d without a signature (try %d of %d)",
+                    code, n, SIGNER_TRIES)
+    raise RuntimeError(
+        f"the tau signer did not come up in {SIGNER_TRIES} tries - nothing was "
+        f"uploaded and nothing was written to the queue, so the video goes out "
+        f"on the next run. If this repeats it is node or "
+        f"PLAYWRIGHT_BROWSERS_PATH, not the account.")
+
+
 def _upload_tau(mp4, title: str, private: bool = True, body: str = "") -> str:
     """Post for real through the patched fork. Returns "tau:<creation_id>".
 
@@ -573,35 +664,11 @@ def _upload_tau(mp4, title: str, private: bool = True, body: str = "") -> str:
              " (private)" if private else " (PUBLIC)")
     # Each attempt re-uploads the file, which is also the backoff: a send is a
     # minute of video bytes, so there is nothing to sleep for between tries.
+    _warm_signer(env)
     for attempt in range(1, TAU_TRIES + 1):
-        # Popen and not subprocess.run, and the difference is the whole point of
-        # the timeout. cli.py spawns NODE to compute the signature, so the thing
-        # that hangs is a grandchild. run(timeout=) kills the direct child, then
-        # goes back to draining pipes the grandchild still holds open - and
-        # waits there with no deadline at all. Measured 2026-08-30: the 11:15
-        # run sat in exactly that wait until 13:35, two hours past its own
-        # thirty-minute limit, and Task Scheduler's one-hour limit did not end
-        # it either, for the same reason. Worse than the lost video is what the
-        # wait takes with it - post.ps1 runs its watchdog after this returns, so
-        # a hang here is the one failure nobody is ever told about, and the
-        # channel went fourteen hours unnoticed.
-        proc = subprocess.Popen(
-            cmd, cwd=TIKTOK_TAU_DIR, env=env, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, encoding="utf-8",
-            errors="replace",
-            # POSIX needs the group to exist before there is anything to kill;
-            # on Windows taskkill /T walks the parent chain and needs nothing.
-            start_new_session=os.name != "nt")
         try:
-            stdout, stderr = proc.communicate(timeout=TAU_TIMEOUT)
+            code, out = _run_capped(cmd, TIKTOK_TAU_DIR, env, TAU_TIMEOUT)
         except subprocess.TimeoutExpired:
-            if os.name == "nt":
-                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                               capture_output=True)
-            else:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            # With the tree gone the pipes close and this returns at once.
-            proc.communicate()
             # NOT retried, unlike the rejection below: a timeout is the one
             # outcome where the post may already exist, and trying again is how
             # one video becomes two.
@@ -609,8 +676,6 @@ def _upload_tau(mp4, title: str, private: bool = True, body: str = "") -> str:
                 f"tau upload timed out after {TAU_TIMEOUT}s. The video may or "
                 f"may not have posted - check the account before running "
                 f"again, nothing was written to the queue.") from None
-        out = ((stdout or "") + (stderr or "")).strip()
-        code = proc.returncode
         if code == 0 or not _tau_retryable(out):
             break
         log.warning("tau: post rejected as 'Invalid parameters' "
@@ -1606,6 +1671,26 @@ if __name__ == "__main__":
     assert _headline("Часть 1/2. Три факта 👇 Сосед сменил кличку #дом") == (
         "Сосед сменил кличку")
     assert _headline("Отец подал в суд #семья") == "Отец подал в суд"
+
+    # The runner today's two-hour hang turned on. The child here spawns a
+    # grandchild and both outlive the timeout, which is the shape that broke it:
+    # killing only the child leaves the grandchild holding the pipes, and the
+    # wait that follows has no deadline. Only on tau, because that is the only
+    # backend that runs it, and it costs a second there.
+    if TIKTOK_BACKEND == "tau":
+        _hang = ("import subprocess, sys, time; "
+                 "subprocess.Popen([sys.executable, '-c', "
+                 "'import time; time.sleep(30)']); time.sleep(30)")
+        _t0 = time.time()
+        try:
+            _run_capped([sys.executable, "-c", _hang], None,
+                        dict(os.environ), 1)
+            raise AssertionError("_run_capped returned instead of timing out")
+        except subprocess.TimeoutExpired:
+            pass
+        assert time.time() - _t0 < 15, (
+            "_run_capped waited past its own timeout - it is draining pipes a "
+            "grandchild still holds, which is the 2026-08-30 hang")
 
     # The retry predicate: the transient is retried, a real fault is not.
     assert _tau_retryable('{"status_code":5,"status_msg":"Invalid parameters"}')
