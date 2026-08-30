@@ -1176,6 +1176,18 @@ def _parse_judge(raw: str, ours: str) -> tuple[tuple, list]:
         elif not 1 <= mine <= 10:
             faults.append("the MINE line is missing - score your own title on "
                           "the same scale, or answer KEEP and score it 0")
+        elif mine <= score:
+            # A line it rates no higher than the one it was handed is a line
+            # nobody will be shown, so the attempt is spent rather than thrown
+            # away: it is told to beat it or to stand down. Not fatal - _ask()
+            # accepts the third answer whatever it says, and KEEP is always a
+            # legal answer, which is the ceiling on this. The alternative is
+            # demanding one every time, and both numbers are its own: told it
+            # MUST come back higher, it comes back higher by writing 9.
+            faults.append(f"your own title scores {mine} against the {score} "
+                          f"you gave the one you were handed, so nobody will "
+                          f"ever see it - write one that genuinely beats {score}"
+                          f", or answer KEEP and stop spending the attempt")
     note = " ".join(got.get("NOTE", "").split())
     if not note:
         faults.append("the NOTE line is missing")
@@ -1841,6 +1853,15 @@ if __name__ == "__main__":
     (_, _, _, _), _f = _parse_judge(_good.replace("MINE: 8", "MINE: -"),
                                     "Соседка прислала счёт")
     assert len(_f) == 1 and "MINE" in _f[0], _f
+    # ...and a line it rates no higher than ours is sent back for another go
+    # rather than parsed and then silently dropped by judge()
+    (_, _, _, _), _f = _parse_judge(_good.replace("MINE: 8", "MINE: 4"),
+                                    "Соседка прислала счёт")
+    assert len(_f) == 1 and "beats 4" in _f[0], _f
+    # KEEP is not a failed rewrite and must never be sent back
+    (_, _, _, _), _f = _parse_judge("SCORE: 9\nTITLE: KEEP\nMINE: 0\nNOTE: x",
+                                    "Соседка")
+    assert _f == [], _f
     (_, _, _, _), _f = _parse_judge("нет ответа", "x")
     assert len(_f) == 2, _f
 
