@@ -66,7 +66,7 @@ from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL,
                     TIKTOK_PROXY, TIKTOK_PUBLIC, TIKTOK_REFRESH_KEY,
                     TIKTOK_REFRESH_TOKEN, TIKTOK_TAU_BROWSERS, TIKTOK_TAU_DIR,
                     TIKTOK_TAU_PYTHON, TIKTOK_TAU_UA, TIKTOK_TAU_USER,
-                    chan_key, save_env)
+                    chan_file, chan_key, save_env)
 
 API = "https://open.tiktokapis.com/v2"
 AUTH_URL = "https://www.tiktok.com/v2/auth/authorize/"
@@ -155,6 +155,66 @@ def videos(fields: str = "id,title,create_time,view_count,like_count,"
         cursor = data.get("cursor")
         if not data.get("has_more") or not cursor:
             return out
+
+
+# "Часть 1/2 - " and "Часть 1/2. ", the two shapes the part marker has led a
+# published caption in. Looser than _PART below, which matches what
+# part_prefix() glued onto a title; this one reads the caption back off TikTok.
+_MARKER = re.compile(r"^\W*(?:%s)\s*\d+\s*/\s*\d+\s*[-.—]*\s*"
+                     % "|".join(map(re.escape, set(PART_WORD.values()))), re.I)
+
+
+def _headline(caption_text: str) -> str:
+    """The story's own title, back out of the caption that carried it.
+
+    Both caption shapes are in the export and neither is written down anywhere
+    else with a view count beside it: the old one was the title and its
+    hashtags, the new one leads with the facts block and leaves the title after
+    the last 👇. The review table keeps the title too - with its [emphasis]
+    markup, and without ever learning how the video did.
+    """
+    t = caption_text.split("\U0001f447")[-1]
+    t = re.split(r"\s+#", t)[0]
+    return _MARKER.sub("", t.replace("​", "")).strip()
+
+
+def hits(n: int = 12, fresh_days: int = 2) -> str:
+    """This channel's best and worst titles by views - the critic's examples.
+
+    Read out of the --stats export rather than off the API: it is the file the
+    weekly refresh writes, it can be read by eye, and it keeps videos that have
+    since been taken down. The encoding is sniffed because PowerShell's `>`
+    writes UTF-16 and every other shell writes UTF-8.
+
+    A title counts once, at its best showing. A story split over three videos
+    is one title, and the later parts riding on the first one's audience are
+    not three separate verdicts on how it was written. The last `fresh_days`
+    are dropped whole: a video posted yesterday has not been seen yet and would
+    land in the bottom list on its age alone.
+    """
+    raw = Path(chan_file("tiktok") + ".csv").read_bytes()
+    enc = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig"
+    cutoff = time.time() - fresh_days * 86400
+    best: dict[str, int] = {}
+    for r in csv.DictReader(raw.decode(enc).splitlines()):
+        if datetime.datetime.fromisoformat(r["posted"]).timestamp() > cutoff:
+            continue
+        if title := _headline(r["title"]):
+            best[title] = max(int(r["views"] or 0), best.get(title, 0))
+    ranked = sorted(best.items(), key=lambda kv: -kv[1])
+    if len(ranked) < 2 * n:
+        log.warning("%d titles is thin for %d examples a side", len(ranked), n)
+        n = len(ranked) // 2
+    if not n:
+        raise SystemExit("no titles in the export - run --stats first")
+    def rows(part: list) -> str:
+        return "\n".join(f"- {v} — {t}" for t, v in part)
+
+    return "\n".join([
+        "# How titles have done on this channel", "",
+        f"{len(ranked)} stories, views counted {datetime.date.today()}.", "",
+        "## Landed", "", rows(ranked[:n]), "",
+        "## Died", "", rows(ranked[-n:][::-1]), ""])
 
 
 def _post(url: str, body: dict, token: str = "", form: bool = False) -> dict:
@@ -1496,6 +1556,15 @@ if __name__ == "__main__":
     finally:
         STOPPED = _real_stopped
 
+    # Both caption shapes give the title back, marker and hashtags off. The
+    # export is the only place a view count sits next to a title, so a shape
+    # this misses is a story missing from what the critic is shown.
+    assert _headline("Часть 1/2 - Друг выложил видео #семья #истории") == (
+        "Друг выложил видео"), _headline("Часть 1/2 - Друг выложил видео #семья")
+    assert _headline("Часть 1/2. Три факта 👇 Сосед сменил кличку #дом") == (
+        "Сосед сменил кличку")
+    assert _headline("Отец подал в суд #семья") == "Отец подал в суд"
+
     # The retry predicate: the transient is retried, a real fault is not.
     assert _tau_retryable('{"status_code":5,"status_msg":"Invalid parameters"}')
     assert not _tau_retryable("NOT logged in: Login expired")
@@ -1508,6 +1577,14 @@ if __name__ == "__main__":
             authorize()
         elif "--whoami" in sys.argv:
             print(whoami())
+        elif "--hits" in sys.argv:
+            # Beside the prompt set rather than in this repo: it is one
+            # channel's view counts, and this repo is public.
+            out = Path(".private") / (chan_file("hits") + ".md")
+            if not out.parent.is_dir():
+                raise SystemExit("no .private/ - clone the prompt set first")
+            out.write_text(hits(), encoding="utf-8")
+            print(out)
         elif "--stats" in sys.argv:
             # captions carry emoji; the console pipe is cp1251 here
             sys.stdout.reconfigure(encoding="utf-8-sig", newline="")

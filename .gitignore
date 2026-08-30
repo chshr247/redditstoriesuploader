@@ -29,6 +29,10 @@ assets/music/**/*.wav
 # until the next pull - and a lost "this went out" row means it goes out
 # again. Nothing here needs to travel; one machine writes it and reads it.
 seen_local_*.db
+# The --stats export, and the input refresh_hits.cmd rebuilds the critic's
+# examples from. It is one channel's view counts and this repository is
+# public; the ranked file it becomes lives in the private prompt set.
+tiktok*.csv
 # The tau checkout, if it ever gets cloned into this directory instead of
 # beside it. It is somebody else's repo with its own git, and the cookie jar
 # under it is a live session - neither belongs in a public repository.
