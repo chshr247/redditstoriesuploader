@@ -186,6 +186,18 @@ def hits(n: int = 12, fresh_hours: int = 12) -> str:
     that have since been taken down. The encoding is sniffed because
     PowerShell's `>` writes UTF-16 and every other shell writes UTF-8.
 
+    `n` a side is the cap, and it is what keeps this from growing into the
+    prompt: the file holds 2n lines whether the channel has fifty titles or
+    five hundred, and every critic call carries all of them. The middle of the
+    ranking is dropped on purpose - it is the top and the bottom that differ
+    from each other, and a title sitting at the median teaches nothing.
+
+    Twelve, and it was tried at twenty. On 86 stories that reached 1186 views
+    at the bottom of the losing list against a median of 1841 - half the
+    channel, with the two lists closing on the middle and the contrast the
+    critic learns from going with it. Twelve keeps them apart. Raise it again
+    only after the channel has enough titles that 2n is a small share of them.
+
     A title counts once, at its best showing. A story split over three videos
     is one title, and the later parts riding on the first one's audience are
     not three separate verdicts on how it was written. The last `fresh_hours`
