@@ -116,11 +116,11 @@ def write_and_park(post: dict, n: int = 1) -> None:
     story is loose in the pool, where the next run would write it a second time
     while the first is still waiting for an answer.
     """
-    gender, written, note = script.write_script(post, parts=n)
+    gender, written, critic = script.write_script(post, parts=n)
     if n > 1 and len(written) < 2:
         log.info("model returned one part, %s will publish as a single video",
                  post["id"])
-    review.park(post, gender, written, note)
+    review.park(post, gender, written, critic)
     source.mark_used(post["id"], post["score"], post["sub"])
 
 

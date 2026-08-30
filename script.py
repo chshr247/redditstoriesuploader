@@ -1139,14 +1139,21 @@ def _hits() -> str:
         return ""
 
 
-# The three labelled lines the critic answers in. Anchored per line rather than
+# The four labelled lines the critic answers in. Anchored per line rather than
 # parsed as a whole: a model that opens with a stray sentence is still read.
-JUDGE_LINE = re.compile(r"^\s*[*`]*(SCORE|TITLE|NOTE)[*`]*\s*:\s*(.*)$",
+JUDGE_LINE = re.compile(r"^\s*[*`]*(SCORE|TITLE|MINE|NOTE)[*`]*\s*:\s*(.*)$",
                         re.IGNORECASE | re.MULTILINE)
+
+# What the critic's own line has to score before anybody is shown it, on top of
+# having to beat the title it is offered against. Its rewrites were measured
+# over 24 published titles and the good ones were worth reading, so the weak
+# ones are simply not printed rather than the whole stage being turned off -
+# and the number is its own verdict on its own line, not this file's opinion.
+OFFER_MIN = 6
 
 
 def _parse_judge(raw: str, ours: str) -> tuple[tuple, list]:
-    """((score, title, note), complaints) - the shape _ask() checks against."""
+    """((score, title, mine, note), complaints) - the shape _ask() checks."""
     got = {k.upper(): v.strip() for k, v in JUDGE_LINE.findall(raw)}
     faults = []
     m = re.search(r"\d+", got.get("SCORE", ""))
@@ -1154,8 +1161,10 @@ def _parse_judge(raw: str, ours: str) -> tuple[tuple, list]:
     if not 1 <= score <= 10:
         faults.append("the SCORE line is missing or is not a number 1 to 10")
     title = got.get("TITLE", "").strip("`* ")
+    m = re.search(r"\d+", got.get("MINE", ""))
+    mine = int(m.group()) if m else 0
     if title.upper().startswith("KEEP"):
-        title = ""
+        title, mine = "", 0
     elif title:
         # The replacement goes through the same gate the model's title does,
         # and a fault here is worth a rewrite: the critic is being asked for
@@ -1163,15 +1172,18 @@ def _parse_judge(raw: str, ours: str) -> tuple[tuple, list]:
         if fault := _title_fault(title):
             faults.append(fault)
         elif plain(title) == plain(ours):
-            title = ""      # "better" and identical - keep ours, say nothing
+            title, mine = "", 0    # "better" and identical - say nothing
+        elif not 1 <= mine <= 10:
+            faults.append("the MINE line is missing - score your own title on "
+                          "the same scale, or answer KEEP and score it 0")
     note = " ".join(got.get("NOTE", "").split())
     if not note:
         faults.append("the NOTE line is missing")
-    return (score, title, note), faults
+    return (score, title, mine, note), faults
 
 
-def judge(client, written: list[tuple[str, str]]) -> tuple[int, str, str]:
-    """(score, better title or "", note) - a second reading of the title.
+def judge(client, written: list[tuple[str, str]]) -> tuple:
+    """(score, offered title or "", its own score, note) - a second reading.
 
     The one thing this call has that neither writing stage did: the view counts
     of what this channel already published. Everything about what makes a good
@@ -1179,34 +1191,47 @@ def judge(client, written: list[tuple[str, str]]) -> tuple[int, str, str]:
     same question twice buys nothing - so the critic is given evidence instead
     of rules, and judges against it.
 
+    Nothing it says is applied. The title it is given is the title that renders
+    - measured against 24 published stories, its score does not predict how a
+    video does (Spearman 0.13) and its rewrites sometimes drop the very word
+    the title worked on. So the second line is an offer, printed on the issue
+    beside the first, and a person picks between them.
+
     A score of 0 means it did not run, which is what an unmeasured channel gets.
-    Only write_script() acts on any of it; nothing here refuses anything.
     """
     hits = _hits()
     if not hits:
-        return 0, "", ""
+        return 0, "", 0, ""
     CRITIC = _prompts()[4]
     ours = written[0][0]
     system = CRITIC.format(lang=LANG_NAME[OUTPUT_LANG], hits=hits,
                            n=len(re.findall(r"^- *\d", hits, re.MULTILINE)))
     ask = (f"TITLE: {ours}\n\nNARRATION:\n"
            + "\n---\n".join(b for _, b in written))
-    score, better, note = _ask(
+    score, better, mine, note = _ask(
         client, system, ask, lambda raw: _parse_judge(raw, ours),
-        "Answer in the three labelled lines and nothing else.")
+        "Answer in the four labelled lines and nothing else.")
     # _ask() hands back the last answer even when it still has faults - right
-    # for a narration, wrong for this: a title that failed the gate three times
-    # is not going on a card when there is already a checked one in hand.
+    # for a narration, wrong for this: a line that failed the gate three times
+    # is not worth putting in front of somebody as an improvement.
     if better and (fault := _title_fault(better)):
-        log.warning("critic's title refused, keeping ours: %s", fault)
-        better = ""
-    log.info("critic: %d/10 - %s", score, note)
-    return score, better, note
+        log.warning("critic's title refused, not offering it: %s", fault)
+        better, mine = "", 0
+    # Its own number decides twice: the line has to be good enough to read at
+    # all, and it has to beat the one already in hand. The second half is what
+    # a live run walked straight into - a 6 offered against a 7, an improvement
+    # by the critic's own account nobody asked for.
+    if better and (mine < OFFER_MIN or mine <= score):
+        log.info("critic scored its own title %d/10 against %d - not offering",
+                 mine, score)
+        better, mine = "", 0
+    log.info("critic: %d/10%s - %s", score,
+             f", offers {mine}/10" if better else "", note)
+    return score, better, mine, note
 
 
-def write_script(post: dict, parts: int = 1
-                 ) -> tuple[str, list[tuple[str, str]], str]:
-    """(gender, [(title, narration), ...], critic's note) - one entry per video.
+def write_script(post: dict, parts: int = 1) -> tuple:
+    """(gender, [(title, narration), ...], critic) - one entry per video.
 
     Two calls, not one. The first writes words and only words; the second writes
     the title and adds the delivery markup to those words without touching them.
@@ -1283,19 +1308,16 @@ def write_script(post: dict, parts: int = 1
         tagged += written[len(tagged):]
 
     # Third call, and the only one that has ever been shown how a title did
-    # after it went out. It refuses nothing on its own: CRITIC_MIN decides
-    # that, and its default of 0 leaves the critic advisory.
-    score, better, note = judge(client, [(title, b) for b in tagged])
-    if score and score < CRITIC_MIN:
-        raise Unsuitable(f"the critic gave the title {score}/10 - {note}")
-    if better:
-        log.info("title rewritten by the critic:\n  was: %s\n  now: %s",
-                 title, better)
-        title = better
+    # after it went out. It changes nothing: the title above is the one that
+    # renders, and everything the critic says is printed on the issue for a
+    # person to act on. CRITIC_MIN is the one exception and defaults to 0.
+    critic = judge(client, [(title, b) for b in tagged])
+    if critic[0] and critic[0] < CRITIC_MIN:
+        raise Unsuitable(f"the critic gave the title {critic[0]}/10 - {critic[3]}")
 
     log.info("%d words across %d part(s)",
              sum(_words(title) + _words(b) for b in tagged), len(tagged))
-    return gender, [(title, b) for b in tagged], note
+    return gender, [(title, b) for b in tagged], critic
 
 
 if __name__ == "__main__":
@@ -1800,21 +1822,26 @@ if __name__ == "__main__":
 
     # The critic's answer is three labelled lines, and everything downstream of
     # it - a story dropped, a title replaced - hangs off reading them right.
-    _good = ("SCORE: 8\nTITLE: Соседка [emphasis] прислала счёт на 80000 за "
-             "свой потоп\nNOTE: своё название общее")
-    (_s, _t, _n), _f = _parse_judge(_good, "Соседка прислала счёт")
-    assert (_s, _f) == (8, []), (_s, _f)
+    _good = ("SCORE: 4\nTITLE: Соседка [emphasis] прислала счёт на 80000 за "
+             "свой потоп\nMINE: 8\nNOTE: своё название общее")
+    (_s, _t, _m, _n), _f = _parse_judge(_good, "Соседка прислала счёт")
+    assert (_s, _m, _f) == (4, 8, []), (_s, _m, _f)
     assert _t.startswith("Соседка [emphasis]") and _n == "своё название общее"
-    # KEEP is the common answer and must not arrive as a title to render
-    (_s, _t, _n), _f = _parse_judge("SCORE: 9\nTITLE: KEEP\nNOTE: и так хорошо",
-                                    "Соседка прислала счёт")
-    assert (_s, _t, _f) == (9, "", []), (_s, _t, _f)
+    # KEEP is the common answer and must not arrive as a title to offer
+    (_s, _t, _m, _n), _f = _parse_judge(
+        "SCORE: 9\nTITLE: KEEP\nMINE: 0\nNOTE: и так хорошо", "Соседка")
+    assert (_s, _t, _m, _f) == (9, "", 0, []), (_s, _t, _m, _f)
     # a replacement that fails the title gate is a rewrite, not something to
     # quietly accept - the model gets told exactly what _title_fault() says
-    (_, _, _), _f = _parse_judge("SCORE: 5\nTITLE: Соседка прислала счёт на "
-                                 "80000\nNOTE: x", "Соседка прислала счёт")
+    (_, _, _, _), _f = _parse_judge("SCORE: 5\nTITLE: Соседка прислала счёт на "
+                                    "80000\nMINE: 7\nNOTE: x", "Соседка")
     assert _f == [_title_fault("Соседка прислала счёт на 80000")], _f
-    (_, _, _), _f = _parse_judge("нет ответа", "x")
+    # ...and a title offered without a score of its own cannot be shown next to
+    # one, so it is asked for again rather than printed bare
+    (_, _, _, _), _f = _parse_judge(_good.replace("MINE: 8", "MINE: -"),
+                                    "Соседка прислала счёт")
+    assert len(_f) == 1 and "MINE" in _f[0], _f
+    (_, _, _, _), _f = _parse_judge("нет ответа", "x")
     assert len(_f) == 2, _f
 
     print(f"logic ok: {OUTPUT_LANG}, engine {_wpm()} wpm"
@@ -1826,9 +1853,11 @@ if __name__ == "__main__":
         import source
         post = source.fetch(1)[0]
         n = part_count(post)
-        gender, written, note = write_script(post, parts=n)
-        if note:
-            print(f"\nCRITIC: {note}")
+        gender, written, (cscore, cbetter, cmine, cnote) = write_script(
+            post, parts=n)
+        if cnote:
+            print(f"\nCRITIC {cscore}/10: {cnote}"
+                  + (f"\n  offers ({cmine}/10): {cbetter}" if cbetter else ""))
         print(f"\n--- r/{post['sub']} [{post['score']}] {len(post['text'])}ch "
               f"-> {len(written)} part(s)\n{post['title']}\n")
         print(f"NARRATOR: {gender}")

@@ -225,7 +225,25 @@ def ok() -> str:
 
 # --------------------------------------------------------------------- parking
 
-def _body(post: dict, written: list, note: str = "") -> str:
+def _critic(critic) -> str:
+    """The critic's block for the issue: its verdict, and its own line if any.
+
+    (score, title, its score, note), the tuple script.judge() returns. Advice
+    and nothing else - the title above it renders unless the answer below
+    replaces it, and its own line is offered only when it scored itself at
+    least script.OFFER_MIN. Backticks so it can be copied into a comment as it
+    stands: that comment is exactly what the first line of a reply must be.
+    """
+    if not critic or not critic[3]:
+        return ""
+    score, better, mine, note = critic
+    out = f"> **{score}/10** — {note}\n"
+    if better:
+        out += f">\n> **Вариант критика ({mine}/10):**\n> `{better}`\n"
+    return out + "\n"
+
+
+def _body(post: dict, written: list, critic=None) -> str:
     title = written[0][0]
     parts = "\n\n".join(
         (f"**Часть {i}.** " if len(written) > 1 else "") + body
@@ -233,10 +251,7 @@ def _body(post: dict, written: list, note: str = "") -> str:
     return (
         f"r/{post['sub']} · {post['score']} · https://redd.it/{post['id']}\n\n"
         f"**Название от модели:**\n\n`{title}`\n\n"
-        # The critic's one line, under the title it is about. Advice and
-        # nothing else: whatever it said, the title above is the one that
-        # renders unless the answer below replaces it.
-        + (f"> {note}\n\n" if note else "")
+        + _critic(critic)
         + f"{parts}\n\n---\n"
         f"**Первая строка комментария:**\n"
         f"`+` — пойдёт название модели.\n"
@@ -266,7 +281,7 @@ def _body(post: dict, written: list, note: str = "") -> str:
 
 
 def park(post: dict, gender: str, written: list[tuple[str, str]],
-         note: str = "") -> int:
+         critic=None) -> int:
     """Open the issue, store the script, return the issue number."""
     # Assigned, not just opened: a notification for one's own repository depends
     # on the watch setting, an assignment does not - the same reason publish.py's
@@ -274,7 +289,7 @@ def park(post: dict, gender: str, written: list[tuple[str, str]],
     url = _gh("issue", "create",
               "--title", f"[{OUTPUT_LANG}] {script.plain(written[0][0])[:70]}",
               "--assignee", _owner(),
-              "--body-file", "-", stdin=_body(post, written, note))
+              "--body-file", "-", stdin=_body(post, written, critic))
     issue = int(url.rstrip("/").rsplit("/", 1)[1])
     with _db() as db:
         db.execute("INSERT OR REPLACE INTO review(post_id, lang, issue, ts, "
