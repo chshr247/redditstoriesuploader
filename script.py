@@ -32,7 +32,7 @@ sys.path.insert(0, PRIVATE)
 
 
 def _prompts():
-    """(WRITE, POLISH, MULTI, GENRE, CRITIC), imported on use, not at import.
+    """(WRITE, POLISH, MULTI, GENRE, CRITIC, CRITIC_WRITE), imported on use.
 
     Both this and the OpenAI SDK belong to write_script() and to nothing else,
     and CI checks the private repo out only for a run that is going to call the
@@ -48,7 +48,7 @@ def _prompts():
             "(git clone https://github.com/chshr247/reddit-prompts.git .private)"
         ) from None
     return (prompts.WRITE, prompts.POLISH, prompts.MULTI, prompts.GENRE,
-            prompts.CRITIC)
+            prompts.CRITIC, prompts.CRITIC_WRITE)
 
 import safety
 from config import (CRITIC_MIN, LLM_BASE_URL, LLM_MAX_TOKENS, LLM_MODEL,
@@ -1066,12 +1066,18 @@ _FATAL = ("the narration is missing",
 
 
 def _ask(client, system: str, user: str, check, keep: str,
-         skippable: bool = False):
+         skippable: bool = False, temperature: float | None = None):
     """One model call, checked, with one rewrite if the answer has faults.
 
     `check(raw)` returns (result, complaints). The last answer is returned even
     when complaints remain: a narration four percent short beats no narration,
     and that is the call this has always made.
+
+    `temperature` is left unset for everything that writes - the sampling that
+    makes two runs of the same post different stories is the point there. It is
+    passed as 0 by the one caller that measures rather than writes: the same
+    title scored 6, 7 and 2 on three runs of an unchanged prompt, and a judge
+    rolling a die is not a judge.
     """
     msgs = [{"role": "system", "content": system},
             {"role": "user", "content": user}]
@@ -1086,7 +1092,8 @@ def _ask(client, system: str, user: str, check, keep: str,
     for attempt in range(3):
         resp = client.chat.completions.create(
             model=LLM_MODEL, messages=msgs, max_tokens=LLM_MAX_TOKENS,
-            reasoning_effort=LLM_REASONING)
+            reasoning_effort=LLM_REASONING,
+            **({} if temperature is None else {"temperature": temperature}))
         # DeepSeek caches the constant prefix automatically - the system prompt
         # stays first so it hits every call. These counters are how you confirm
         # it, and after the split there are two prefixes to watch instead of one.
@@ -1139,104 +1146,132 @@ def _hits() -> str:
         return ""
 
 
-# The four labelled lines the critic answers in. Anchored per line rather than
-# parsed as a whole: a model that opens with a stray sentence is still read.
-JUDGE_LINE = re.compile(r"^\s*[*`]*(SCORE|TITLE|MINE|NOTE)[*`]*\s*:\s*(.*)$",
+# The labelled lines the two critic calls answer in. Anchored per line rather
+# than parsed whole: a model that opens with a stray sentence is still read.
+JUDGE_LINE = re.compile(r"^\s*[*`]*(SCORE|TITLE|NOTE)[*`]*\s*:\s*(.*)$",
                         re.IGNORECASE | re.MULTILINE)
 
 # What the critic's own line has to score before anybody is shown it, on top of
 # having to beat the title it is offered against. Its rewrites were measured
 # over 24 published titles and the good ones were worth reading, so the weak
-# ones are simply not printed rather than the whole stage being turned off -
-# and the number is its own verdict on its own line, not this file's opinion.
+# ones are simply not printed rather than the whole stage being turned off.
 OFFER_MIN = 6
 
+# How many lines it may write before the story goes out with the title it
+# already had. Each one costs a rewrite call and the score call that checks it,
+# and a model that cannot beat a title in two goes is telling you something.
+OFFER_TRIES = 2
 
-def _parse_judge(raw: str, ours: str) -> tuple[tuple, list]:
-    """((score, title, mine, note), complaints) - the shape _ask() checks."""
+
+def _parse_score(raw: str) -> tuple[tuple, list]:
+    """((score, note), complaints) - the scoring call's two lines."""
     got = {k.upper(): v.strip() for k, v in JUDGE_LINE.findall(raw)}
     faults = []
     m = re.search(r"\d+", got.get("SCORE", ""))
     score = int(m.group()) if m else 0
     if not 1 <= score <= 10:
         faults.append("the SCORE line is missing or is not a number 1 to 10")
-    title = got.get("TITLE", "").strip("`* ")
-    m = re.search(r"\d+", got.get("MINE", ""))
-    mine = int(m.group()) if m else 0
-    if title.upper().startswith("KEEP"):
-        title, mine = "", 0
-    elif title:
-        # The replacement goes through the same gate the model's title does,
-        # and a fault here is worth a rewrite: the critic is being asked for
-        # one line and has the whole answer's budget to get it right.
-        if fault := _title_fault(title):
-            faults.append(fault)
-        elif plain(title) == plain(ours):
-            title, mine = "", 0    # "better" and identical - say nothing
-        elif not 1 <= mine <= 10:
-            faults.append("the MINE line is missing - score your own title on "
-                          "the same scale, or answer KEEP and score it 0")
-        elif mine <= score:
-            # A line it rates no higher than the one it was handed is a line
-            # nobody will be shown, so the attempt is spent rather than thrown
-            # away: it is told to beat it or to stand down. Not fatal - _ask()
-            # accepts the third answer whatever it says, and KEEP is always a
-            # legal answer, which is the ceiling on this. The alternative is
-            # demanding one every time, and both numbers are its own: told it
-            # MUST come back higher, it comes back higher by writing 9.
-            faults.append(f"your own title scores {mine} against the {score} "
-                          f"you gave the one you were handed, so nobody will "
-                          f"ever see it - write one that genuinely beats {score}"
-                          f", or answer KEEP and stop spending the attempt")
+    if got.get("TITLE"):
+        faults.append("you were not asked for a title - score the one you were "
+                      "given, in the two lines and nothing else")
     note = " ".join(got.get("NOTE", "").split())
     if not note:
         faults.append("the NOTE line is missing")
-    return (score, title, mine, note), faults
+    return (score, note), faults
+
+
+def _parse_rewrite(raw: str, ours: str) -> tuple[str, list]:
+    """(title or "", complaints) - the rewriting call's single line.
+
+    "" is KEEP, which is a complete answer and never a fault: a rewrite that
+    only trades one flaw for another is worth less than the line already in
+    hand, and the prompt says so.
+    """
+    got = {k.upper(): v.strip() for k, v in JUDGE_LINE.findall(raw)}
+    title = got.get("TITLE", "").strip("`* ")
+    if not title:
+        return "", ["the TITLE line is missing - write one line, or KEEP"]
+    if title.upper().startswith("KEEP"):
+        return "", []
+    # The offer goes through the same gate the model's own title does.
+    if fault := _title_fault(title):
+        return "", [fault]
+    if plain(title) == plain(ours):
+        return "", []       # "better" and identical - say nothing
+    return title, []
+
+
+# What both critic calls are given, and deliberately the same text for each:
+# the scorer must not be able to tell a line it is scoring for the second time
+# from the one the story arrived with.
+_ASK = "TITLE: {title}\n\nNARRATION:\n{story}"
+
+
+def _score_title(client, system: str, title: str, story: str) -> tuple[int, str]:
+    """(score, note) for one title, from a call that sees no other title.
+
+    The rewrite is scored by this same function against this same prompt, and
+    it is not told which of the two lines it is looking at. That is the whole
+    point of scoring apart from writing: asked for both at once, the model
+    marked the given title down to make its own look like a gain.
+    """
+    return _ask(client, system, _ASK.format(title=title, story=story),
+                _parse_score, "Answer in the two labelled lines and nothing "
+                "else.", temperature=0)
 
 
 def judge(client, written: list[tuple[str, str]]) -> tuple:
     """(score, offered title or "", its own score, note) - a second reading.
 
-    The one thing this call has that neither writing stage did: the view counts
-    of what this channel already published. Everything about what makes a good
-    title in the abstract is in POLISH already, and asking the same model the
-    same question twice buys nothing - so the critic is given evidence instead
-    of rules, and judges against it.
+    The one thing these calls have that neither writing stage did: the view
+    counts of what this channel already published. Everything about what makes
+    a good title in the abstract is in POLISH already, and asking the same
+    model the same question twice buys nothing - so the critic is given
+    evidence instead of rules, and judges against it.
+
+    Three calls, not one, and the split is what makes the number mean anything:
+    score the title, ask a second reader for a better line, then score THAT
+    line with the same prompt and no idea where it came from. Both scores are
+    taken at temperature 0.
 
     Nothing it says is applied. The title it is given is the title that renders
     - measured against 24 published stories, its score does not predict how a
     video does (Spearman 0.13) and its rewrites sometimes drop the very word
-    the title worked on. So the second line is an offer, printed on the issue
-    beside the first, and a person picks between them.
+    the title worked on. So the offer is printed on the issue beside the
+    original, and a person picks between them.
 
     A score of 0 means it did not run, which is what an unmeasured channel gets.
     """
     hits = _hits()
     if not hits:
         return 0, "", 0, ""
-    CRITIC = _prompts()[4]
-    ours = written[0][0]
-    system = CRITIC.format(lang=LANG_NAME[OUTPUT_LANG], hits=hits,
-                           n=len(re.findall(r"^- *\d", hits, re.MULTILINE)))
-    ask = (f"TITLE: {ours}\n\nNARRATION:\n"
-           + "\n---\n".join(b for _, b in written))
-    score, better, mine, note = _ask(
-        client, system, ask, lambda raw: _parse_judge(raw, ours),
-        "Answer in the four labelled lines and nothing else.")
-    # _ask() hands back the last answer even when it still has faults - right
-    # for a narration, wrong for this: a line that failed the gate three times
-    # is not worth putting in front of somebody as an improvement.
-    if better and (fault := _title_fault(better)):
-        log.warning("critic's title refused, not offering it: %s", fault)
-        better, mine = "", 0
-    # Its own number decides twice: the line has to be good enough to read at
-    # all, and it has to beat the one already in hand. The second half is what
-    # a live run walked straight into - a 6 offered against a 7, an improvement
-    # by the critic's own account nobody asked for.
-    if better and (mine < OFFER_MIN or mine <= score):
-        log.info("critic scored its own title %d/10 against %d - not offering",
-                 mine, score)
-        better, mine = "", 0
+    CRITIC, CRITIC_WRITE = _prompts()[4], _prompts()[5]
+    n = len(re.findall(r"^- *\d", hits, re.MULTILINE))
+    ours, story = written[0][0], "\n---\n".join(b for _, b in written)
+    scorer = CRITIC.format(lang=LANG_NAME[OUTPUT_LANG], hits=hits, n=n)
+    score, note = _score_title(client, scorer, ours, story)
+
+    writer = CRITIC_WRITE.format(hits=hits, n=n)
+    ask = _ASK.format(title=ours, story=story)
+    better, mine = "", 0
+    for attempt in range(OFFER_TRIES):
+        line = _ask(client, writer, ask, lambda raw: _parse_rewrite(raw, ours),
+                    "Answer with the one TITLE line, or KEEP.")
+        if not line:
+            break                       # KEEP, or nothing usable in two goes
+        got, _ = _score_title(client, scorer, line, story)
+        log.info("critic's line %d scored %d against %d: %s",
+                 attempt + 1, got, score, plain(line))
+        if got > max(score, OFFER_MIN - 1):
+            better, mine = line, got
+            break
+        # It gets told what its line scored and against what, which is the only
+        # thing it did not already know - the prompt states the bar and it is
+        # writing blind to whether it cleared it.
+        ask = (_ASK.format(title=ours, story=story)
+               + f"\n\nYou already offered \"{plain(line)}\" and it scored "
+                 f"{got} against {score}, so it would be shown to nobody. "
+                 f"Write one that genuinely beats {score}, or answer KEEP.")
     log.info("critic: %d/10%s - %s", score,
              f", offers {mine}/10" if better else "", note)
     return score, better, mine, note
@@ -1271,7 +1306,7 @@ def write_script(post: dict, parts: int = 1) -> tuple:
 
     from openai import OpenAI
 
-    WRITE, POLISH, MULTI, GENRE, _ = _prompts()
+    WRITE, POLISH, MULTI, GENRE = _prompts()[:4]
     client = OpenAI(api_key=OPENAI_API_KEY, base_url=LLM_BASE_URL or None)
     sec = target_sec(post)
     target = _target_words(sec)
@@ -1832,38 +1867,28 @@ if __name__ == "__main__":
     # dies deep inside write_script() with a KeyError instead of here
     assert OUTPUT_LANG in _prompts()[0] and OUTPUT_LANG in WEAK_TITLE, OUTPUT_LANG
 
-    # The critic's answer is three labelled lines, and everything downstream of
-    # it - a story dropped, a title replaced - hangs off reading them right.
-    _good = ("SCORE: 4\nTITLE: Соседка [emphasis] прислала счёт на 80000 за "
-             "свой потоп\nMINE: 8\nNOTE: своё название общее")
-    (_s, _t, _m, _n), _f = _parse_judge(_good, "Соседка прислала счёт")
-    assert (_s, _m, _f) == (4, 8, []), (_s, _m, _f)
-    assert _t.startswith("Соседка [emphasis]") and _n == "своё название общее"
-    # KEEP is the common answer and must not arrive as a title to offer
-    (_s, _t, _m, _n), _f = _parse_judge(
-        "SCORE: 9\nTITLE: KEEP\nMINE: 0\nNOTE: и так хорошо", "Соседка")
-    assert (_s, _t, _m, _f) == (9, "", 0, []), (_s, _t, _m, _f)
-    # a replacement that fails the title gate is a rewrite, not something to
-    # quietly accept - the model gets told exactly what _title_fault() says
-    (_, _, _, _), _f = _parse_judge("SCORE: 5\nTITLE: Соседка прислала счёт на "
-                                    "80000\nMINE: 7\nNOTE: x", "Соседка")
-    assert _f == [_title_fault("Соседка прислала счёт на 80000")], _f
-    # ...and a title offered without a score of its own cannot be shown next to
-    # one, so it is asked for again rather than printed bare
-    (_, _, _, _), _f = _parse_judge(_good.replace("MINE: 8", "MINE: -"),
-                                    "Соседка прислала счёт")
-    assert len(_f) == 1 and "MINE" in _f[0], _f
-    # ...and a line it rates no higher than ours is sent back for another go
-    # rather than parsed and then silently dropped by judge()
-    (_, _, _, _), _f = _parse_judge(_good.replace("MINE: 8", "MINE: 4"),
-                                    "Соседка прислала счёт")
-    assert len(_f) == 1 and "beats 4" in _f[0], _f
-    # KEEP is not a failed rewrite and must never be sent back
-    (_, _, _, _), _f = _parse_judge("SCORE: 9\nTITLE: KEEP\nMINE: 0\nNOTE: x",
-                                    "Соседка")
-    assert _f == [], _f
-    (_, _, _, _), _f = _parse_judge("нет ответа", "x")
+    # The critic answers in two calls now, and everything downstream - a story
+    # dropped, an offer printed - hangs off reading each of them right.
+    (_s, _n), _f = _parse_score("SCORE: 4\nNOTE: название общее")
+    assert (_s, _n, _f) == (4, "название общее", []), (_s, _n, _f)
+    # the scorer is not allowed to answer with a title of its own
+    (_, _), _f = _parse_score("SCORE: 4\nTITLE: Соседка [emphasis] прислала "
+                              "счёт на 80000\nNOTE: x")
+    assert len(_f) == 1 and "not asked for a title" in _f[0], _f
+    (_, _), _f = _parse_score("нет ответа")
     assert len(_f) == 2, _f
+
+    _line = "Соседка [emphasis] прислала счёт на 80000 за свой потоп"
+    _t, _f = _parse_rewrite(f"TITLE: {_line}", "Соседка прислала счёт")
+    assert (_t, _f) == (_line, []), (_t, _f)
+    # KEEP is a complete answer and never a fault - the story keeps its title
+    _t, _f = _parse_rewrite("TITLE: KEEP", "Соседка прислала счёт")
+    assert (_t, _f) == ("", []), (_t, _f)
+    # ...and a line that fails the title gate is sent back with that fault
+    _t, _f = _parse_rewrite("TITLE: Соседка прислала счёт на 80000", "Соседка")
+    assert _f == [_title_fault("Соседка прислала счёт на 80000")], _f
+    _t, _f = _parse_rewrite("нет ответа", "x")
+    assert _t == "" and len(_f) == 1, (_t, _f)
 
     print(f"logic ok: {OUTPUT_LANG}, engine {_wpm()} wpm"
           + (f" x{VOICE_SPEEDUP} = {_heard_wpm():.0f} heard"
