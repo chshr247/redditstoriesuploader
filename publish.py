@@ -85,9 +85,12 @@ SCOPES = os.getenv("TIKTOK_SCOPES", "video.upload")
 REDIRECT = os.getenv("TIKTOK_REDIRECT", "http://localhost:8080/callback")
 CHUNK = 10_000_000        # the size TikTok's own docs use in their example
 TITLE_MAX = 2200          # UTF-16 runes, per the direct-post reference
-# The tau backend uploads the file, then waits on a headless Chromium to
-# compute a signature. Generous on purpose: the failure this guards against is
-# a hung browser, and a real send on a slow line is not it.
+# Wall-clock cap on the whole node subprocess, both tau paths: the fork, which
+# uploads and then waits on a Chromium to compute a signature, and the UI path,
+# where it bounds the entire browser session end to end. Generous on purpose -
+# what this guards against is a HUNG browser, and a real send on a slow line is
+# not that. uipost.js keeps the finer limits itself (STEP_MS per step,
+# TAU_UI_UPLOAD_WAIT for the bytes); this is only the outer envelope.
 TAU_TIMEOUT = int(os.getenv("TIKTOK_TAU_TIMEOUT", 1800))
 
 # How many times that whole send is attempted. See _tau_retryable below for
@@ -646,8 +649,19 @@ def _upload_ui(mp4, text: str, env: dict) -> str:
         cap_file.write_text(text, encoding="utf-8")
         cmd = ["node", TIKTOK_TAU_UI, str(jar_file), TIKTOK_TAU_UA,
                str(Path(mp4).resolve()), str(cap_file),
+               # uipost.js implements a "dry" rehearsal - it really
+               # uploads, really types the caption and really reads it
+               # back, then discards instead of clicking Post. It was
+               # unreachable from here, which made the one safe way to
+               # check a fingerprint change cost a real post.
+               "dry" if os.getenv("TAU_UI_DRY") == "1" else
                "public" if TIKTOK_PUBLIC else "private"]
-        env = {**env, "TIKTOK_TAU_DIR": TIKTOK_TAU_DIR}
+        # Per account, beside the cookie it belongs to. A profile shared
+        # between channels would hand both accounts the same device.
+        profile = (Path(TIKTOK_TAU_DIR) / "CookiesDir" /
+                   f"ui-profile-{TIKTOK_TAU_USER}")
+        env = {**env, "TIKTOK_TAU_DIR": TIKTOK_TAU_DIR,
+               "TAU_UI_PROFILE": str(profile)}
         try:
             code, out = _run_capped(cmd, TIKTOK_TAU_DIR, env, TAU_TIMEOUT)
         except subprocess.TimeoutExpired:
@@ -661,6 +675,16 @@ def _upload_ui(mp4, text: str, env: dict) -> str:
         raise RuntimeError(
             f"the UI uploader exited 0 but printed no creation_id, so there is "
             f"no telling whether it posted:\n{out[-1500:]}")
+    if m.group(1) == "dry-run":
+        # A rehearsal must not cost a video. Everything downstream of a
+        # return here records the post as sent, so this leaves by the
+        # one door that writes nothing to the queue.
+        # node's stderr is only surfaced on a non-zero exit, and a rehearsal
+        # exits zero - so the fingerprint it measured, which is the entire
+        # reason for running one, was being thrown away here.
+        raise RuntimeError(
+            "TAU_UI_DRY=1: rehearsal only, nothing was published and "
+            "nothing was recorded.\n\n" + out.strip())
     log.info("ui: posted %s as %s", Path(mp4).name, m.group(1))
     return f"ui:{m.group(1)}"
 
