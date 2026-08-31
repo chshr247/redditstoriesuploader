@@ -1082,7 +1082,8 @@ if __name__ == "__main__":
     # ...and the animal term, which is a bet on the audience rather than on the
     # thread: the same story with a dog in it goes first.
     assert (contested("AITA for rehoming my sister's dog", 200, 1500, 0.99)
-            > contested("AITA for rehoming my sister's piano", 200, 1500, 0.99)),         "an animal in the title has to count for something"
+            > contested("AITA for rehoming my sister's piano", 200, 1500, 0.99)), \
+        "an animal in the title has to count for something"
 
     # The pool: what a run chooses from. Rows are planted rather than harvested,
     # since what is being tested is the reading - a story already spent in THIS
