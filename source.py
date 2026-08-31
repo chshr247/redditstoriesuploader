@@ -309,6 +309,17 @@ CONTESTED = re.compile(
 # crowding out everything else.
 ARGUMENTATIVE = 10
 
+# The fifth signal, and the only one measured on the videos rather than on
+# Reddit: of 107 TikToks published to 2026-08-31, the 8 whose story had an
+# animal in it took a median 16920 views against 1967 for the other 99, and
+# four of the top eight were animal stories. n=8, so it is worth one point -
+# the same as an explicit AITA - and not more. Title only, like CONTESTED:
+# the pool stores no body, and a dog that only turns up in paragraph four is
+# not what the thumbnail promises anyway.
+CREATURE = re.compile(
+    r"\b(?:dogs?|cats?|puppy|puppies|kittens?|pets?|vet|kitty|"
+    r"horses?|rabbits?|hamsters?|parrots?)\b", re.I)
+
 # The third signal, and the only one that is a measurement rather than a guess:
 # upvote_ratio is the share of votes that were up, i.e. how much of the sub
 # disagreed with the post itself. It rides along in every archive response and
@@ -332,7 +343,7 @@ def _disputed(ratio: float | None) -> float:
 
 def contested(title: str, comments: int, score: int,
               ratio: float | None = None) -> float:
-    """0..4, higher when a post looks worth telling.
+    """0..5, higher when a post looks worth telling.
 
     The fourth term is the one that used to be a separate fetch path and a
     daily slot. It has to exist in some form: the second term divides comments
@@ -345,7 +356,8 @@ def contested(title: str, comments: int, score: int,
     return (bool(CONTESTED.search(title))
             + min(comments * ARGUMENTATIVE / max(score, 1), 1.0)
             + _disputed(ratio)
-            + min(score / LOUD_AT, 1.0))
+            + min(score / LOUD_AT, 1.0)
+            + bool(CREATURE.search(title)))
 
 
 # How thin the choice may get before a run pays to widen it, and how many
@@ -1067,6 +1079,10 @@ if __name__ == "__main__":
     assert _loud > contested("A quiet story", 200, 1500, 0.99), \
         "a loud story must not sort below a bland one"
     assert _loud < _fight, "but it must not simply outrank a real fight either"
+    # ...and the animal term, which is a bet on the audience rather than on the
+    # thread: the same story with a dog in it goes first.
+    assert (contested("AITA for rehoming my sister's dog", 200, 1500, 0.99)
+            > contested("AITA for rehoming my sister's piano", 200, 1500, 0.99)),         "an animal in the title has to count for something"
 
     # The pool: what a run chooses from. Rows are planted rather than harvested,
     # since what is being tested is the reading - a story already spent in THIS
