@@ -393,7 +393,10 @@ TIKTOK_PER_DAY = int(os.getenv("TIKTOK_PER_DAY", 4))
 # The publishing allowance and not a number of its own: a video parked past it
 # cannot go out today whatever the answer is, so writing it only pays the LLM
 # early for a question that keeps until tomorrow.
-REVIEW_BATCH = int(os.getenv("REVIEW_BATCH", TIKTOK_PER_DAY))
+# `or`, not a getenv default: review.yml exports REVIEW_BATCH from a repo
+# variable that is not set, and an unset variable arrives as "" rather than
+# absent - int("") killed every fast-path replacement on 2026-08-31.
+REVIEW_BATCH = int(os.getenv("REVIEW_BATCH") or TIKTOK_PER_DAY)
 # The score a story has to earn from script.judge() to reach an issue at all,
 # out of ten. Zero is the setting to start on and the reason the default is
 # zero: the critic still reads every story, still rewrites the title when it
