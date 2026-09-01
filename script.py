@@ -580,15 +580,28 @@ ARCHAIC_KIN = {
 
 
 # Two or three per two hundred words is what the prompt asks for. Only the
-# FLOOR is enforced, and only at zero: a story with no loud line at all is the
-# failure we actually measured - 43 sentences and not one mark - while a story
-# with four is merely at the top of its budget, and refusing that would cost a
-# rewrite for something no listener would notice.
+# FLOOR is enforced: a story with no loud line at all is the failure we actually
+# measured - 43 sentences and not one mark - while a story at the top of its
+# budget is merely at the top of it, and refusing that would cost a rewrite for
+# something no listener would notice.
+#
+# The floor SCALES with the text, and it has to since parts run to PART_SEC.
+# One mark was the whole requirement while a narration was 332 words; on a
+# 700-word part one mark in eleven minutes of reading is a flat text that
+# happens to shout once. Worse, the message this used to send back said "two or
+# three times in the whole text" - a number written for a 200-word script, and
+# on a long one it asked for LESS density than the prompt does, so the model was
+# being corrected towards the fault.
 EXCLAIM_PER = 200
 
 
+def _exclaims_wanted(words: int) -> int:
+    """The floor for `!` in a narration this long. At least one, always."""
+    return max(1, words // EXCLAIM_PER)
+
+
 def _flat_fault(body: str, lang: str = "") -> str:
-    """Empty unless the narration is punctuated entirely on full stops.
+    """Empty unless the narration is punctuated too flat for its length.
 
     A rule in the prompt was not enough on its own, which is the same thing
     every other check in this file exists to say. The engine takes its contour
@@ -599,12 +612,15 @@ def _flat_fault(body: str, lang: str = "") -> str:
     """
     t = plain(body)
     n = len(t.split())
-    if n < EXCLAIM_PER or "!" in t:
+    if n < EXCLAIM_PER:
         return ""
-    return ("the narration is punctuated entirely on full stops and will be "
-            "read on one note - find the line where somebody actually raised "
-            "their voice and end it on `!`, two or three times in the whole "
-            "text and nowhere else")
+    want, got = _exclaims_wanted(n), t.count("!")
+    if got >= want:
+        return ""
+    return (f"the narration carries {got} `!` in {n} words and will be read "
+            f"almost on one note - it needs at least {want}: find the lines "
+            "where somebody actually raised their voice and end those on `!`, "
+            "nowhere else")
 
 
 def _kin_fault(text: str, lang: str = "") -> str:
@@ -870,20 +886,42 @@ def _ending_fault(body: str, final: bool = True, markup: bool = True,
     return _cta_fault(cta) if markup else ""
 
 
+# One [emphasis] per this many WORDS is the floor. Counted in words rather than
+# in sentences, which is the fix a five-minute part forced.
+#
+# It was two thirds of all sentences, and that is a fine number for the twenty
+# sentences a Short holds. A PART_SEC part holds eighty, and two thirds of those
+# is fifty-three marks the model does not place: measured on 1vjwjrx, stage two
+# came back with 9 of 79 and then 1 of 62 after three attempts each, and the
+# pipeline fell through to "accepting as is" on both. A rule nothing can satisfy
+# is not enforced, it is just three wasted calls and a warning nobody reads.
+#
+# It is also the wrong ASK. The file already argues this about `!` - "an
+# exclamation mark on an ordinary sentence is worse than none, because it spends
+# the one thing that makes the loud line sound loud" - and a mark on every one
+# of eighty sentences is that same mistake: stress everywhere is stress nowhere.
+#
+# 100 words keeps what the check was for. Against the three counts its docstring
+# was written from - 20, 1 and 19 marks on a 332-word script - the floor is 3,
+# so the flat one is still caught and the other two still pass. Against the two
+# that provoked this, 9 of 652 words passes and 1 of 557 does not, which is the
+# right verdict on both: one is stressed sparsely, the other is not stressed.
+EMPHASIS_PER = 100
+
+
 def _emphasis_fault(body: str) -> str:
-    """Empty when the narration is stressed sentence by sentence.
+    """Empty when the narration carries enough [emphasis] for its length.
 
-    One [emphasis] per sentence, never two - a rule the prompt has always stated
-    and nothing has ever checked. The title's mark is checked, the closing
-    question's is checked, and the two hundred words between them were not: a
-    narration can arrive with a single mark in the whole text, read flat by the
-    voice engine, and pass every other gate on its way to the render. Measured
-    on one story told three times over, the count came back 20, 1 and 19, so the
-    drift is not a rare miss - it is a coin flip.
+    Never two in one sentence - a rule the prompt has always stated and nothing
+    checked until this existed. The title's mark is checked, the closing
+    question's is checked, and everything between them was not: a narration can
+    arrive with a single mark in the whole text, read flat by the voice engine,
+    and pass every other gate on its way to the render. Measured on one story
+    told three times over, the count came back 20, 1 and 19, so the drift is not
+    a rare miss - it is a coin flip.
 
-    Two thirds rather than all of them. The point is to catch a narration that
-    is not marked up at all, not to send one back over a short sentence somebody
-    left bare.
+    The point is to catch a narration that is not marked up at all, not to send
+    one back over a sentence somebody left bare.
     """
     sentences = [s for s in SENTENCE.split(body.strip()) if plain(s).strip()]
     if not sentences:
@@ -895,10 +933,12 @@ def _emphasis_fault(body: str) -> str:
             return (f"one sentence carries {n} [emphasis] - it takes exactly "
                     "one, in front of the word that sentence exists to deliver")
         marked += n
-    if marked * 3 < len(sentences) * 2:
-        return (f"only {marked} of the {len(sentences)} sentences carry an "
-                "[emphasis] - every sentence takes one, in front of the word it "
-                "exists to deliver")
+    words = _words(body)
+    want = max(1, words // EMPHASIS_PER)
+    if marked < want:
+        return (f"the narration carries {marked} [emphasis] in {words} words "
+                f"and needs at least {want} - put one in front of the word a "
+                "sentence exists to deliver, on the sentences that turn on one")
     return ""
 
 
@@ -1436,18 +1476,29 @@ if __name__ == "__main__":
     assert guess_gender({"title": "TIFU by ignoring my (28F) sister"}) == "female"
     assert guess_gender({"title": "TIFU by losing my keys"}) == "male"
 
-    # One [emphasis] a sentence in the narration - the rule the prompt states
-    # and nothing checked until a real answer came back with one mark in 189
-    # words and passed every other gate on its way to the render.
+    # [emphasis] is counted against the LENGTH of the narration, not against its
+    # sentence count - the fix a five-minute part forced, see EMPHASIS_PER.
     _one = "Я [emphasis] пришла домой. Он [emphasis] молчал. Свет [emphasis] горел."
     assert _emphasis_fault(_one) == "", _emphasis_fault(_one)
     assert _emphasis_fault("") == ""
-    _bare = "Я пришла домой. Он молчал. Свет [emphasis] горел. Дверь была открыта."
-    assert "1 of the 4" in _emphasis_fault(_bare), _emphasis_fault(_bare)
+    # nothing marked at all is the failure this exists for, at any length
+    _bare = "Я пришла домой. Он молчал. Свет горел. Дверь была открыта."
+    assert "0 [emphasis]" in _emphasis_fault(_bare), _emphasis_fault(_bare)
     # one bare sentence in a marked-up text is not worth a rewrite
     assert _emphasis_fault(
         "Я [emphasis] пришла. Он [emphasis] молчал. Свет горел.") == ""
     assert "carries 2" in _emphasis_fault("Я [emphasis] пришла [emphasis] домой.")
+    # The two counts stage two actually returned on 1vjwjrx, at PART_SEC length.
+    # Sparse is not the same failure as unmarked, and only one of them is one.
+    _long = lambda marks, words: (
+        "Он [emphasis] раз. " * marks + "Он два. " * (words // 2 - marks))
+    assert _emphasis_fault(_long(9, 652)) == "", "9 marks in 652 words is sparse"
+    assert _emphasis_fault(_long(1, 557)), "1 mark in 557 words is not marked up"
+    # ...and the historical trio the rule was first measured on: 20, 1 and 19
+    # marks in a 332-word script. The flat one is caught, the other two are not.
+    assert _emphasis_fault(_long(20, 332)) == ""
+    assert _emphasis_fault(_long(19, 332)) == ""
+    assert _emphasis_fault(_long(1, 332))
     # a cue in front of a sentence must not hide it from the count
     _cued = ("[nervous] Я [emphasis] открыла дверь. [me, calm] «Ты [emphasis] дома?» "
              "[sighing] Он [emphasis] не ответил.")
@@ -1631,6 +1682,15 @@ if __name__ == "__main__":
         "a chunk too short to judge is left alone"
     # the mark counts wherever it is, including inside a quoted line
     assert not _flat_fault(_flat + "[мать] «Это не твои деньги!»", "ru")
+    # ...and the floor rises with the text, which is what a PART_SEC part needs:
+    # one raised voice in eleven minutes of reading is a flat narration that
+    # happens to shout once. The old message even told the model so, asking for
+    # "two or three in the whole text" whatever the length.
+    _long_flat = "Она положила чек на стол и ушла. " * 95      # ~665 words
+    assert _exclaims_wanted(_words(_long_flat)) == 3, _exclaims_wanted(_words(_long_flat))
+    assert _flat_fault(_long_flat + "Я не поверил своим глазам!", "ru"), \
+        "one mark is no longer the whole budget of a five-minute part"
+    assert not _flat_fault(_long_flat + "Раз! Два! Три!", "ru")
 
     # a title has to show a moment, not describe a stance
     assert ru("Не используйте меня для воспитания детей"), "the plea shape must be caught"
