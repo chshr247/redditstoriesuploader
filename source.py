@@ -35,9 +35,12 @@ import urllib.parse
 import urllib.request
 
 import safety
-from config import (DAILY_FILE, DB_PATH, DEFAULT_CHANNEL, LOUD_AT, MIN_COMMENTS,
-                    MIN_SCORE, OUTPUT_LANG, PLAN_FILE, REDDITAPIS_KEY, SUBREDDITS,
-                    SUBREDDITS_HORROR, TIKTOK_ENABLED)
+# script for the length arithmetic alone - see BORU_CHARS. It imports config and
+# safety and nothing of this module, so there is no cycle here.
+import script
+from config import (BORU, PART_SEC, DAILY_FILE, DB_PATH, DEFAULT_CHANNEL, LOUD_AT,
+                    MIN_COMMENTS, MIN_SCORE, OUTPUT_LANG, PLAN_FILE, REDDITAPIS_KEY,
+                    SUBREDDITS, SUBREDDITS_HORROR, TIKTOK_ENABLED)
 
 REDDITAPIS = "https://api.redditapis.com"
 API = "https://api.pullpush.io/reddit/search/submission/"
@@ -56,6 +59,22 @@ MIN_CHARS, MAX_CHARS = 400, 4000   # ~40 sec .. ~4 min of narration
 # has to be compressed more than two to one, and compression is what takes the
 # detail the genre lives on.
 HORROR_CHARS = 9000
+# r/BestofRedditorUpdates is a repost sub: one post carries the original AND
+# every update, so it weighs several times a feed post - 4000 to 31000
+# characters against 400 to 4000, median 9300 over the 111 posts above
+# MIN_SCORE sampled from four windows across 2022-2025.
+#
+# Derived rather than picked, and it has to be: this is the length the SPLIT can
+# hold, so a number chosen on its own would either starve the pipeline or hand
+# the model more story than three parts fit and let it squeeze the difference.
+# script.MAX_PARTS parts of config.PART_SEC each, converted by script itself so
+# the rate lives in one place: 3 * 300 seconds comes out at 12825 characters.
+# Move either knob and this moves with them.
+#
+# Measured on the same sample: 100 of the 143 candidates fit, against 72 at the
+# 9000 this replaced. The 43 above it run to 19 minutes told in full and are
+# not feed material at any split.
+BORU_CHARS = script.source_chars(script.MAX_PARTS * PART_SEC)
 # How many horror candidates one day's slot may try before giving up. Four,
 # which is what the pool path already asks for, and the ceiling matters only on
 # the days every one of them is refused - a SKIP costs one short LLM call.
@@ -237,8 +256,10 @@ CONTEXT_BOUND = re.compile(r"^\s*[\[(]?\s*(update|meta|part\s*\d|final\s+update)
 
 
 def _cap(sub: str) -> int:
-    """The length ceiling for a post from `sub`. See HORROR_CHARS."""
-    return HORROR_CHARS if sub in SUBREDDITS_HORROR else MAX_CHARS
+    """The length ceiling for a post from `sub`. See HORROR_CHARS, BORU_CHARS."""
+    if sub in SUBREDDITS_HORROR:
+        return HORROR_CHARS
+    return BORU_CHARS if sub.lower() == BORU else MAX_CHARS
 
 
 def _linked(p: dict) -> bool:
@@ -264,22 +285,117 @@ def _linked(p: dict) -> bool:
             or bool(p.get("is_gallery")) or bool(p.get("is_video")))
 
 
+# Everything r/BestofRedditorUpdates wraps a story in. Being a repost sub, each
+# post opens with who the OOP is, which sub it came from first, who suggested
+# the repost, the trigger and mood warnings and the sub's own rule-7 notice, and
+# closes with that notice again. None of it is the story, all of it reaches the
+# narration if it survives, and it is 70 to 840 characters of the length gate.
+#
+# Read by LINE and only near the two ENDS of the post, which is the whole reason
+# a keyword list is safe here: "I am not OOP" is scaffolding at the top and
+# "I am not going to lie" is the story anywhere else. The header format drifted
+# over the sub's life - a marker matching the 2024 layout finds nothing in 32 of
+# the 111 sampled posts, most of them from 2023 - so this cuts what it
+# recognises instead of trying to find where the story begins. What it does not
+# recognise stays, which costs a sentence of preamble and not a story.
+#
+# The updates and the quoted comments between the two ends are untouched: they
+# ARE the story on this sub, and the model is what decides which of them to use.
+BORU_HEAD, BORU_TAIL = 1200, 600
+BORU_LINE = re.compile(r"""
+      \bi'?\s*a?m\s+not\s+(?:the\s+)?(?:original\s+)?(?:o?op\b|poster\b)
+    | \bthe\s+o?op\s+is\b
+    | \boriginally\s+posted\b | \bposted\s+(?:to|in)\s+r/
+    | \bre-?post\b
+    | \bthank(?:s|\s+you)\b[^\n]{0,60}?(?:\bu/|\bboru\b|for\s+the\s+(?:rec|suggestion))
+    | ^\W{0,4}(?:tw|cw)\W*:
+    | \b(?:trigger|content|mood|meme)\s+(?:warning|spoiler)
+    | \beditor.?s\s+note
+    | \bdo\s+not\s+comment | \brule\s*\#?\s*7\b
+    | \bprevious\s+boru\b | \breveddit\b
+    | ^[\s*_\\>\#-]*$                                  # rules and bare markup
+    | ^[\s*_\\>\#]*\[[^\]]{0,140}\]\(https?://[^)]*\)[^\n]{0,60}$   # a link line
+""", re.I | re.X)
+# A line that is nothing but a URL, and this one is read over the WHOLE post:
+# the sub links the original everywhere, not only in the header, and a bare
+# link is not a sentence anybody can narrate wherever it turns up.
+BORU_URL = re.compile(r"^[\s*_>\#(\[]*<?https?://\S+>?[\s*_>\#)\]]*$")
+# The foot is read on a SHORTER list than the head, and deliberately: all that
+# is down there is the sub's rule-7 notice, while the link lines and bare rules
+# the header rule also cuts are, at the bottom of a post, the last update's own
+# date line. Cut that and the story loses its ending rather than its furniture.
+BORU_FOOT = re.compile(
+    r"\bdo\s+not\s+comment|\bre-?post\b|\brule\s*\#?\s*7\b"
+    r"|\bi'?\s*a?m\s+not\s+(?:the\s+)?(?:original\s+)?(?:o?op\b|poster\b)", re.I)
+# The sub hides its warnings behind reddit's spoiler markup, and a caret that
+# survives into the subtitles is read as a typo rather than as a spoiler.
+SPOILER = re.compile(r">!|!<")
+# The URL out of a markdown link, keeping what it was called. Read over the
+# WHOLE post rather than at the ends like the rules above, because this sub
+# links the original in front of every update, mid-story, and a reveddit
+# address with its share parameters is a hundred characters of noise sitting
+# where the story turns. The label is left in place - "Update: June 3, 2024" is
+# how far the story jumped, which the model needs; that it must not SAY the
+# word is a matter for the prompt and not for a regex.
+MD_LINK = re.compile(r"\[([^\]\n]{0,140})\]\(https?://[^)\s]*\)")
+
+
+def _boru(text: str) -> str:
+    """Drop the repost sub's scaffolding and leave the story under it."""
+    out, pos, end = [], 0, len(text)
+    for line in text.split("\n"):
+        pat = (BORU_LINE if pos < BORU_HEAD else
+               BORU_FOOT if end - pos < BORU_TAIL else None)
+        pos += len(line) + 1
+        if BORU_URL.match(line) or (pat and pat.search(line)):
+            continue
+        out.append(line)
+    return MD_LINK.sub(r"\1", SPOILER.sub("", "\n".join(out))).strip()
+
+
+# Two flags used to be refused here and neither was a gate on the STORY.
+#
+# `locked` describes the thread, not the post under it: mods lock a thread that
+# got busy, which on a repost sub is most of the good ones. The plan path has
+# always said so - see the note above _tellable(), and the three locked stories
+# in plan_ru.md that were picked by hand.
+#
+# `over_18` is reddit's adult flag, and refusing it threw away drama for having
+# an adult subject rather than for being unpostable. Measured on the six flagged
+# posts in the r/BestofRedditorUpdates sample of 2026-09-01: the one that really
+# could not be told - intimate pictures taken while OOP slept and passed round a
+# friend group - was already caught by safety.blocked() as sexual_violence, and
+# the other five are an argument about a sister, a boyfriend with an enema and
+# three ordinary relationship rows. The flag was doing nothing the blocklist was
+# not already doing better, and it was doing it to the wrong posts.
+#
+# So the gate that is left is the one that reads the TEXT: safety.blocked() on
+# the source here, the prompt's own SKIP on anything centring on those subjects,
+# and safety.blocked() again on the narration the model writes. Between them a
+# hard story is dropped and a merely adult one is told without the detail - the
+# prompt already says "no graphic detail", which is the softening this replaces
+# the flag with.
 def _usable(p: dict, sub: str = "") -> bool:
-    text = p.get("selftext") or ""
+    sub = sub or p.get("subreddit", "")
+    # Cleaned rather than raw, because the ceiling is about how much STORY there
+    # is: a BoRU post carries most of a kilobyte of boilerplate that _clean()
+    # is about to throw away, and measured raw it would be charged for it.
+    text = _clean(p.get("selftext") or "", sub)
     return (
-        not p.get("over_18")
-        and not p.get("stickied") and not p.get("locked")
+        not p.get("stickied")        # a mod announcement, never a story
         and not _linked(p)
         and not CONTEXT_BOUND.match(p.get("title") or "")
         and p.get("num_comments", 0) >= MIN_COMMENTS
         and text not in ("[removed]", "[deleted]")
-        and MIN_CHARS <= len(text) <= _cap(sub or p.get("subreddit", ""))
+        and MIN_CHARS <= len(text) <= _cap(sub)
     )
 
 
-def _clean(s: str) -> str:
+def _clean(s: str, sub: str = "") -> str:
     # pullpush returns raw markdown with html entities; the LLM handles the rest
-    return html.unescape(s).replace("&#x200B;", "").strip()
+    s = html.unescape(s).replace("&#x200B;", "").strip()
+    # ...except on the one sub that wraps every story in the same furniture
+    return _boru(s) if sub.lower() == BORU else s
 
 
 # A story where it is OBVIOUS who was in the wrong is watched once and agreed
@@ -408,7 +524,7 @@ def _store(db, sub: str, posts: list[dict]) -> int:
     for p in posts:
         if p.get("score", 0) < MIN_SCORE or not _usable(p, sub):
             continue
-        title, text = _clean(p["title"]), _clean(p["selftext"])
+        title, text = _clean(p["title"]), _clean(p["selftext"], sub)
         # cheapest possible gate: reject here and the story never costs an LLM call
         if hit := safety.blocked(title, text):
             log.info("skipping %s (%s)", p["id"], hit)
@@ -494,14 +610,33 @@ def _bodies(ids: list[str]) -> dict[str, dict]:
     return {p["id"]: p for p in data}
 
 
+def _priority(row) -> tuple[bool, float]:
+    """Sort key for the pool: r/BestofRedditorUpdates first, then contested().
+
+    A HARD priority and not a bonus term, which is what "first" has to mean if
+    it is to mean anything: every BoRU row outranks every other row, however
+    loud the other row is, and the remaining eight subs surface only on the runs
+    where the BoRU pool has nothing left to give. That is the intended shape -
+    those subs are the fallback now - but it is also the thing to look at first
+    if the feed ever reads as one sub. A softer version is one term added inside
+    contested() instead of a field in front of it.
+
+    Within each of the two groups the order is contested() exactly as before:
+    the argument, not the score.
+    """
+    pid, sub, score, comments, ratio, title = row
+    return (sub.lower() == BORU, contested(title, comments, score, ratio))
+
+
 def _pick(limit: int, subs: list[str] | None = None) -> list[dict]:
     """Up to `limit` unused stories from `subs`, best first.
 
-    "Best" is contested() - the argument, not the score. Nothing here spreads
-    the answer across subs on purpose; that is refill()'s job, which shuffles
-    and reads every sub in turn. A cap here would be theatre anyway - a run
-    takes the FIRST story the prompt accepts, so the only row that really
-    matters is the top one.
+    "Best" is _priority(): r/BestofRedditorUpdates ahead of everything, and
+    contested() - the argument, not the score - within each side of that.
+    Nothing here spreads the answer across subs on purpose; that is refill()'s
+    job, which shuffles and reads every sub in turn. A cap here would be theatre
+    anyway - a run takes the FIRST story the prompt accepts, so the only row
+    that really matters is the top one.
     """
     subs = subs or SUBREDDITS       # see refill() on why not a default argument
     db = _db()
@@ -521,8 +656,7 @@ def _pick(limit: int, subs: list[str] | None = None) -> list[dict]:
                "comments": comments, "ratio": ratio,
                "rank": contested(title, comments, score, ratio)}
               for pid, sub, score, comments, ratio, title in
-              sorted(rows, key=lambda r: contested(r[5], r[3], r[2], r[4]),
-                     reverse=True)[:limit]]
+              sorted(rows, key=_priority, reverse=True)[:limit]]
     if not ranked:
         log.info("pool: nothing left for this channel")
         db.close()
@@ -545,7 +679,7 @@ def _pick(limit: int, subs: list[str] | None = None) -> list[dict]:
             log.info("%s is gone or can no longer be told, dropping it", p["id"])
             db.execute("DELETE FROM pool WHERE id=?", (p["id"],))
             continue
-        title, text = _clean(raw["title"]), _clean(raw["selftext"])
+        title, text = _clean(raw["title"]), _clean(raw["selftext"], p["sub"])
         if hit := safety.blocked(title, text):
             log.info("skipping %s (%s)", p["id"], hit)
             db.execute("DELETE FROM pool WHERE id=?", (p["id"],))
@@ -676,10 +810,11 @@ def _tellable(p: dict) -> bool:
     # and a row that fails here is DELETED from the pool rather than marked
     # used - so the ones already in there are cleaned out as they surface, at
     # no cost to the day they surfaced on.
-    text = p.get("selftext") or ""
-    return (not p.get("over_18") and not _linked(p)
+    sub = p.get("subreddit", "")
+    text = _clean(p.get("selftext") or "", sub)   # see _usable() on why cleaned
+    return (not _linked(p)
             and text not in ("[removed]", "[deleted]")
-            and MIN_CHARS <= len(text) <= _cap(p.get("subreddit", "")))
+            and MIN_CHARS <= len(text) <= _cap(sub))
 
 
 def next_planned() -> dict | None:
@@ -717,7 +852,7 @@ def next_planned() -> dict | None:
             mark_used(e["id"], p.get("score", 0) if p else 0,
                       p.get("subreddit", "?") if p else "?")
             continue
-        title, text = _clean(p["title"]), _clean(p["selftext"])
+        title, text = _clean(p["title"]), _clean(p["selftext"], p["subreddit"])
         hit = safety.blocked(title, text)
         if hit:
             log.error("plan: %s trips the blocklist (%s), dropping it",
@@ -809,7 +944,7 @@ def next_daily() -> dict | None:
             mark_used(i, p.get("score", 0) if p else 0,
                       p.get("subreddit", "?") if p else "?")
             continue
-        title, text = _clean(p["title"]), _clean(p["selftext"])
+        title, text = _clean(p["title"]), _clean(p["selftext"], p["subreddit"])
         if hit := safety.blocked(title, text):
             log.error("daily: %s trips the blocklist (%s), dropping it", i, hit)
             mark_used(i, p["score"], p["subreddit"])
@@ -999,7 +1134,12 @@ if __name__ == "__main__":
     ok = {"selftext": "x" * 500, "over_18": False, "num_comments": 500, "title": "A story"}
     assert _usable(ok)
     assert not _usable({**ok, "selftext": "[removed]"})
-    assert not _usable({**ok, "over_18": True})
+    # An adult flag is not a gate any more - see the note above _usable().
+    # What refuses these is the text: the blocklist here, the prompt after it.
+    assert _usable({**ok, "over_18": True}) and _usable({**ok, "locked": True})
+    assert safety.blocked("intimate pictures taken while she slept, "
+                          "which is sexual assault"), \
+        "and this is what has to refuse the hard ones instead"
     assert not _usable({**ok, "selftext": "too short"})
     assert not _usable({**ok, "num_comments": 3}), "dead post should be dropped"
     assert not _usable({**ok, "stickied": True})
@@ -1024,6 +1164,64 @@ if __name__ == "__main__":
     assert _usable({**ok, "is_self": True}), "a text post is the whole point"
 
     assert _clean("don&#39;t") == "don't"
+
+    # The repost sub goes first, and "first" is not "usually first": the loudest
+    # possible row from anywhere else still sits behind the quietest BoRU one.
+    # Row shape is _pick()'s SELECT: id, sub, score, comments, ratio, title.
+    _loud = ("a", "AmItheAsshole", 99_000, 9_000, 0.55, "AITA for saying no?")
+    _quiet = ("b", BORU, MIN_SCORE, MIN_COMMENTS, 0.99, "A thing happened")
+    assert sorted([_loud, _quiet], key=_priority, reverse=True)[0] is _quiet, \
+        "a hard priority, not a bonus term"
+    # ...and inside each group nothing changed: contested() still decides.
+    _quiet2 = ("c", BORU, 99_000, 9_000, 0.55, "AITA for saying no?")
+    assert sorted([_quiet, _quiet2], key=_priority, reverse=True)[0] is _quiet2
+
+    # The repost sub, on a post shaped like the ones it actually publishes.
+    # Both halves are load-bearing: the header is narrated word for word if it
+    # survives, and a filter that reaches past the header eats the story - the
+    # line below is exactly the sentence a keyword list gets wrong.
+    _boru_post = (
+        "**I am NOT OOP. OOP is** u/someone\n\n"
+        "**Originally posted to** r/AITAH\n\n"
+        "**Thanks to u/finder for the suggestion!**\n\n"
+        "**Trigger Warnings:** >!infidelity, emotional abuse!<\n\n"
+        "-----------------------------------\n\n"
+        "[Original Post](https://redd.it/abc): **May 18, 2024**\n\n"
+        "I am not going to lie, I was scared.\n\n"
+        + "He would not answer the phone. " * 30 + "\n\n"
+        "[Update](https://redd.it/def): **June 3, 2024**\n\n"
+        "He came back.\n\n"
+        "# **THIS IS A REPOST SUB - I AM NOT OOP**")
+    _told = _clean(_boru_post, BORU)
+    assert _told.startswith("I am not going to lie"), _told[:80]
+    assert _told.endswith("He came back."), _told[-80:]
+    assert "OOP" not in _told and "Trigger" not in _told and ">!" not in _told
+    # The updates are the story on this sub, so the date line that opens one has
+    # to survive - it is the only thing saying how much later this happened.
+    # Its URL does not: a reveddit address with share parameters is a hundred
+    # characters of noise sitting exactly where the story turns.
+    assert "Update: **June 3, 2024**" in _told and "redd.it/def" not in _told
+    # ...and nothing of this happens to a post from any other sub
+    assert _clean(_boru_post, "AITAH").startswith("**I am NOT OOP")
+    # The sub has had a decade of header layouts and every one of these is a
+    # line that leaked through a pattern written against the 2024 one alone.
+    _line = "Weird title. Weirder situation."
+    for _v in ("**Im not OP! This is an repost!**",
+               "#Reminder: I am not the original OP.",
+               "As always, I am not OOP! The OOP is u/somebody",
+               "Originally posted by u/x in r/AITAH on March 4, '23",
+               "https://www.reveddit.com/v/AmItheAsshole/comments/vvt8p0/"):
+        assert _clean(f"{_v}\n\n{_line}", BORU) == _line, _v
+    # The cap is measured on what is left, not on what arrived: charged for the
+    # boilerplate, a post at the ceiling is refused for text it never tells.
+    _boru_head = _boru_post[:_boru_post.index("[Original Post]")]
+    _at_cap = _boru_head + "y" * BORU_CHARS
+    _sub_row = {**ok, "subreddit": BORU, "num_comments": 500}
+    assert _usable({**_sub_row, "selftext": _at_cap}), \
+        "a story AT the ceiling must not be refused for the wrapper around it"
+    assert not _usable({**_sub_row, "selftext": _at_cap + "y"})
+    assert not _usable({**_sub_row, "selftext": _at_cap, "subreddit": "AITAH"}), \
+        "the feed's own ceiling does not move with it"
 
     # The pool is ordered by how much of a fight a post is, and every signal has
     # to earn its place. Each one is checked as a DIFFERENCE against the same
@@ -1175,10 +1373,10 @@ if __name__ == "__main__":
     # body is the second, and three of plan_ru.md's stories are locked.
     _base = {"selftext": "x" * 500, "over_18": False, "num_comments": 500,
              "title": "A story"}
-    assert _tellable({**_base, "locked": True}) and not _usable({**_base, "locked": True})
+    assert _tellable({**_base, "locked": True}) and _usable({**_base, "locked": True})
     assert _tellable({**_base, "num_comments": 2}), "the plan already chose it"
     assert not _tellable({**_base, "selftext": "[removed]"})
-    assert not _tellable({**_base, "over_18": True})
+    assert _tellable({**_base, "over_18": True}), "the adult flag is not a gate"
     assert not _tellable({**_base, "selftext": "x" * (MAX_CHARS + 1)})
 
     # The horror slot may be longer at the source, because it is told as one

@@ -1,11 +1,15 @@
-"""Step 5 (YouTube): upload a finished mp4 as a Short.
+"""Step 5 (YouTube): upload a finished mp4.
 
     python youtube.py --auth              one-time, gets the refresh token
     python youtube.py out/<id>.mp4        upload (private)
     python youtube.py out/<id>.mp4 --public
 
-A Short is just a normal upload: vertical, under three minutes, with #Shorts
-in the text. There is no separate Shorts endpoint.
+This channel no longer publishes Shorts. It did - vertical, under three
+minutes, with #Shorts in the text, which is all a Short ever was - and the
+shelf returned views in the tens. So the tag is gone, and with it the
+three-minute ceiling that used to keep anything longer out of this queue
+entirely. What goes up now is an ordinary vertical video of whatever length
+the story is worth, which is up to config.PART_SEC.
 
 Two things to know before wiring this into a schedule:
   - An unverified API project can only produce PRIVATE videos. Making them
@@ -32,8 +36,8 @@ from pathlib import Path
 
 import tags as tags_          # `tags` is the local variable in description_for
 from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL, OUT_DIR,
-                    STOP_REASON, STOPPED,
-                    YT_CLIENT_ID, YT_CLIENT_SECRET, YT_MIN_GAP_HOURS,
+                    STOP_REASON, STOPPED, chan_key,
+                    YT_CLIENT_ID, YT_CLIENT_SECRET, YT_ENABLED, YT_MIN_GAP_HOURS,
                     YT_PAUSED_UNTIL, YT_PER_DAY, YT_REFRESH_KEY,
                     YT_REFRESH_TOKEN, save_env)
 
@@ -44,10 +48,6 @@ SCOPE = "https://www.googleapis.com/auth/youtube.upload"
 REDIRECT = "http://localhost:8080"
 
 TITLE_MAX = 100        # YouTube rejects longer titles
-# Past this YouTube stops treating a vertical upload as a Short, whatever the
-# text says - so past this the file is not offered to YouTube at all, exactly
-# as a part of a split story is not. See _too_long().
-SHORTS_MAX = 180
 DESC_MAX = 5000
 CATEGORY_PEOPLE_BLOGS = "22"
 
@@ -85,12 +85,15 @@ def access_token() -> str:
 
 
 def title_for(text: str) -> str:
-    """#Shorts is what routes the upload into the Shorts shelf."""
-    tag = " #Shorts"
+    """The story's own title, trimmed to what YouTube accepts.
+
+    It used to end in " #Shorts", which is the only thing that ever routed an
+    upload into that shelf. See the module docstring on why it does not.
+    """
     text = text.strip()
-    if len(text) + len(tag) > TITLE_MAX:
-        text = text[:TITLE_MAX - len(tag) - 3].rstrip() + "..."
-    return text + tag
+    if len(text) > TITLE_MAX:
+        text = text[:TITLE_MAX - 3].rstrip() + "..."
+    return text
 
 
 def description_for(title: str, body: str = "", hashtags=None) -> str:
@@ -108,7 +111,7 @@ def description_for(title: str, body: str = "", hashtags=None) -> str:
     """
     pool = (tags_.pick(title, body) if hashtags is None
             else random.sample(list(hashtags), min(5, len(hashtags))))
-    tags = " ".join(pool[:5] + ["#Shorts"])
+    tags = " ".join(pool[:5])
 
     teaser = " ".join(re.split(r"(?<=[.!?])\s+", body.strip())[:2]).strip()
     parts = [title.strip()] + ([teaser] if teaser else [])
@@ -275,32 +278,15 @@ def _split(mp4: Path) -> bool:
     return _meta_for(mp4).get("total", 0) > 1
 
 
-def _too_long(mp4: Path) -> bool:
-    """Is this video past what YouTube will treat as a Short?
-
-    Refused on the same grounds a part is, and by the same kind of predicate:
-    this queue is a Shorts queue. Past three minutes the upload stops being a
-    Short whatever the text says, and what arrives instead is an ordinary
-    video on a channel whose every other upload is vertical and sixty seconds
-    - published against an allowance of three a day that the feed needs.
-    The horror slot runs to config.HORROR_SEC and goes to TikTok alone.
-
-    Read off the meta rather than measured here: main.py already timed the
-    narration, and ffprobing every candidate to learn what is written down
-    would be a subprocess per file per run. A file with no `sec` predates the
-    horror slot, and every video from then was 75 seconds - so absent reads as
-    short, which is what it was.
-    """
-    return _meta_for(mp4).get("sec", 0) > SHORTS_MAX
-
-
 def pending() -> list:
     """This channel's rendered videos that have not been uploaded, oldest first.
 
-    Parts of a split story are not among them - see _split() - and neither is
-    anything past the Shorts ceiling, see _too_long(). Nothing else filters
-    them out later, so a file either of those refuses simply sits in out/ as
-    far as YouTube is concerned, and never blocks the queue behind it.
+    Parts of a split story are not among them - see _split(). There used to be
+    a length filter here as well, refusing anything past three minutes because
+    past three minutes an upload is not a Short: that ceiling went with the
+    Shorts tag, and a five-minute story is now an ordinary upload like any
+    other. A file _split() refuses simply sits in out/ as far as YouTube is
+    concerned, and never blocks the queue behind it.
     Whole stories all queue here now: the score bar this used to apply on top
     (YT_VIRAL_ONLY) assumed TikTok was taking everything it refused, which was
     never true for a channel with TikTok switched off.
@@ -309,7 +295,7 @@ def pending() -> list:
         done = {r[0] for r in db.execute("SELECT file FROM uploaded")}
     return sorted((p for p in OUT_DIR.glob("*.mp4")
                    if p.name not in done and _mine(p) and not _split(p)
-                   and not _too_long(p) and not _scratch(p)),
+                   and not _scratch(p)),
                   key=lambda p: p.stat().st_mtime)
 
 
@@ -374,6 +360,12 @@ def due() -> str:
     # the deps before main.py tells it there was nothing to do.
     if STOPPED:
         return STOP_REASON
+    # Ahead of the pause and the allowance, because it is not a schedule at all:
+    # this channel does not publish to YouTube. YT_PAUSED_UNTIL expires by
+    # design and a quota of zero is daily_allowance()'s unset sentinel, so
+    # neither of those can say "off" and mean it.
+    if not YT_ENABLED:
+        return f"youtube is off for this channel ({chan_key('YT_ENABLED')}=0)"
     if left := _pause_left():
         return f"paused for another {left:.1f}h (YT_PAUSED_UNTIL={YT_PAUSED_UNTIL})"
     s = status()
@@ -387,6 +379,14 @@ def due() -> str:
 
 def upload_next(private: bool = True, force: bool = False) -> str | None:
     """Upload at most one video, if the schedule allows it right now."""
+    # Asked before anything else and --force does not lift it: a switch that
+    # --force overrides is not a switch. Same shape as publish.py's channel
+    # pause, and for the same reason - `python youtube.py <file>` by hand still
+    # works, which is the escape hatch for a one-off upload.
+    if not YT_ENABLED:
+        log.info("youtube is off for this channel (%s=0)",
+                 chan_key("YT_ENABLED"))
+        return None
     s = status()
     queue = pending()
     log.info("day %d, %d/%d used today, %.1fh since last, %d queued",
@@ -468,9 +468,9 @@ if __name__ == "__main__":
 
     # kept behind a flag so normal runs print only what the operator needs
     if "--selftest" in sys.argv:
-        assert title_for("Короткий заголовок").endswith(" #Shorts")
+        assert title_for("Короткий заголовок") == "Короткий заголовок"
         assert len(title_for("я" * 200)) <= TITLE_MAX
-        assert title_for("я" * 200).endswith(" #Shorts"), "the tag must survive trimming"
+        assert "#Shorts" not in title_for("я" * 200), "this channel is not a Shorts channel"
 
         # A split story never reaches this platform. Asserted on the predicate
         # pending() actually calls, against a real meta file - a check on the
@@ -491,23 +491,17 @@ if __name__ == "__main__":
             _bare.write_bytes(b"")
             assert not _split(_bare)
 
-            # The horror slot is refused on the same terms: past the Shorts
-            # ceiling it is not a Short, and this queue is a Shorts queue.
-            # A file with no `sec` is one of the old 75-second ones.
+            # Length is no longer a reason to refuse a file. A five-minute
+            # story used to be TikTok's alone because it was not a Short;
+            # nothing here is a Short now, so the queue takes it.
             _long = Path(_tmp) / "long.mp4"
             _long.write_bytes(b"")
             _long.with_suffix(".meta.json").write_text(
-                json.dumps({"channel": CHANNEL, "sec": SHORTS_MAX + 1}), "utf-8")
-            assert _too_long(_long), "a five-minute story is TikTok's alone"
-            assert not _too_long(_whole) and not _too_long(_bare)
-            _edge = Path(_tmp) / "edge.mp4"
-            _edge.write_bytes(b"")
-            _edge.with_suffix(".meta.json").write_text(
-                json.dumps({"channel": CHANNEL, "sec": SHORTS_MAX}), "utf-8")
-            assert not _too_long(_edge), "the ceiling itself is still a Short"
+                json.dumps({"channel": CHANNEL, "sec": 900}), "utf-8")
+            assert not _split(_long), "a whole story of any length belongs here"
 
         assert len(description_for("t", "x" * 9000)) <= DESC_MAX
-        assert "#Shorts" in description_for("Заголовок", "Первое. Второе. Третье.")
+        assert "#Shorts" not in description_for("Заголовок", "Первое. Второе.")
 
         # the teaser must stop at two sentences, not dump the whole story
         d = description_for("Заголовок", "Первое. Второе. Третье. Четвёртое.")
@@ -539,6 +533,17 @@ if __name__ == "__main__":
         else:
             assert daily_allowance(0) == 2 and daily_allowance(6) == 2
             assert daily_allowance(7) == 3 and daily_allowance(365) == 3, "3 is the ceiling"
+
+        # The switch is not a pause and not an allowance, and both of the other
+        # two would read as "on" here: YT_PAUSED_UNTIL expires by design, and a
+        # YT_PER_DAY of zero is daily_allowance()'s unset sentinel - it hands
+        # back the two-or-three ramp, which is why the channel needs a switch of
+        # its own to be off at all.
+        assert daily_allowance(0) > 0, "a quota of zero is not how this is off"
+        globals()["YT_ENABLED"] = False
+        assert "youtube is off" in due(), due()
+        assert upload_next(force=True) is None, "--force must not lift the switch"
+        globals()["YT_ENABLED"] = True
 
         # The pause is a deadline, not a switch: it has to expire on its own.
         now = datetime.datetime(2026, 8, 10, 14, tzinfo=datetime.timezone.utc)

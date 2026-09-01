@@ -49,7 +49,7 @@ import time
 
 import script
 import source
-from config import (OUTPUT_LANG, REVIEW_BATCH, REVIEW_TAKES, REVIEW_TZ_H,
+from config import (PART_SEC, OUTPUT_LANG, REVIEW_BATCH, REVIEW_TAKES, REVIEW_TZ_H,
                     chan_file)
 
 log = logging.getLogger(__name__)
@@ -67,7 +67,7 @@ ACCEPT = {"+", "да", "ок", "ok", "ага", "yes"}
 REJECT = {"-", "нет", "скип", "skip", "no", "мимо", "хуйня"}
 
 _COLS = ("post_id", "issue", "ts", "gender", "sub", "score", "written",
-         "answered", "title", "body", "takes", "take", "pub_at", "voice")
+         "answered", "title", "body", "takes", "take", "pub_at", "voice", "sec")
 
 
 def _db():
@@ -115,6 +115,16 @@ def _db():
     # as, and empty means "draw one", which is what the render always did.
     if "voice" not in have:
         db.execute("ALTER TABLE review ADD COLUMN voice TEXT DEFAULT ''")
+    # `sec` is the runtime ONE part of this story was written for, and it is
+    # here because it is no longer the same for every story: script.target_sec()
+    # sizes a repost-sub story by its source and divides it over its parts, so a
+    # part may be worth 758 words where the feed's is worth 332. Judging a
+    # rewrite against the wrong one of those is the "one knob, two callers" bug
+    # config.TARGET_SEC carries a whole paragraph about. 0 is what every row
+    # written before this reads as, and script._target_words(0) falls back to
+    # the flat TARGET_SEC - which is what those rows were written for.
+    if "sec" not in have:
+        db.execute("ALTER TABLE review ADD COLUMN sec INT DEFAULT 0")
     return db
 
 
@@ -268,7 +278,8 @@ def _body(post: dict, written: list, critic=None) -> str:
         f"вопроса. Последняя закрывается вопросом зрителю с меткой настроения и "
         f"одним `[emphasis]` — `[doubtful] А вы бы [emphasis] сделали так же?`; "
         f"а если просто оборвёшь текст без вопроса, подставится вопрос модели. "
-        f"Каждая часть — около {script._target_words()} слов вместе с названием, "
+        f"Каждая часть — около "
+        f"{script._target_words(script.target_sec(post, len(written)))} слов вместе с названием, "
         f"оно читается в начале каждой.\n\n"
         + (f"Если будешь переписывать текст — частей {len(written)}, раздели их "
            f"строкой из трёх дефисов; можно прислать меньше, но не меньше двух. "
@@ -293,17 +304,20 @@ def park(post: dict, gender: str, written: list[tuple[str, str]],
     issue = int(url.rstrip("/").rsplit("/", 1)[1])
     with _db() as db:
         db.execute("INSERT OR REPLACE INTO review(post_id, lang, issue, ts, "
-                   "gender, sub, score, written, answered) VALUES (?,?,?,?,?,?,?,?,0)",
+                   "gender, sub, score, written, answered, sec) "
+                   "VALUES (?,?,?,?,?,?,?,?,0,?)",
                    (post["id"], OUTPUT_LANG, issue, time.time(), gender,
-                    post["sub"], post["score"], json.dumps(written, ensure_ascii=False)))
+                    post["sub"], post["score"],
+                    json.dumps(written, ensure_ascii=False),
+                    script.target_sec(post, len(written))))
     log.info("%s: title is with the user on issue #%d", post["id"], issue)
     return issue
 
 
 # -------------------------------------------------------------------- the reply
 
-def _choose(comments: list[dict], owner: str, written: list, answered: int
-            ) -> tuple[str, list, str, int]:
+def _choose(comments: list[dict], owner: str, written: list, answered: int,
+            sec: int = 0) -> tuple[str, list, str, int]:
     """(title, bodies, complaint, comment_id) for the owner's newest comment.
 
     The comment is read in the shape the model answers in: a first line, then a
@@ -367,7 +381,7 @@ def _choose(comments: list[dict], owner: str, written: list, answered: int
     if bodies and not script.plain(bodies[-1]).rstrip().endswith("?"):
         if cta := script.split_cta(written[-1][1])[1]:
             bodies[-1] = f"{bodies[-1].rstrip()} {cta}"
-    if fault := _body_fault(bodies, title, len(written)):
+    if fault := _body_fault(bodies, title, len(written), sec):
         return "", [], fault, last["id"]
     return title, bodies, "", last["id"]
 
@@ -384,7 +398,7 @@ def _only_question(body: str) -> bool:
     return len(sentences) == 1 and script.plain(body).rstrip().endswith("?")
 
 
-def _body_fault(bodies: list[str], title: str, parts: int) -> str:
+def _body_fault(bodies: list[str], title: str, parts: int, sec: int = 0) -> str:
     """Empty when a hand-written narration is usable, otherwise why not.
 
     The same things the model's own text has to satisfy, and no more: how many
@@ -406,7 +420,10 @@ def _body_fault(bodies: list[str], title: str, parts: int) -> str:
         return (f"история написана в {parts} частях, а в комментарии "
                 f"{len(bodies)} — раздели текст строкой из трёх дефисов, "
                 f"от 2 до {parts} частей")
-    target = script._target_words()
+    # `sec` is what ONE part of THIS story was written for - a repost-sub part
+    # runs longer than a feed video and is worth more words. 0 means the row
+    # predates the column and falls back to the flat TARGET_SEC it was sized on.
+    target = script._target_words(sec)
     for i, body in enumerate(bodies, 1):
         label = f"часть {i}: " if len(bodies) > 1 else ""
         if fault := (script._kin_fault(body)
@@ -594,7 +611,7 @@ def _judge(r: dict, timeout: bool) -> dict | None:
         return _final(r, json.loads(r["body"]) if r["body"] else [])
 
     title, bodies, fault, cid = _choose(comments, _owner(),
-                                        r["written"], r["answered"])
+                                        r["written"], r["answered"], r["sec"])
     if title is None:
         # Thrown away, and it does not come back: the post was marked used when
         # it was written, which is exactly the record needed here.
@@ -1026,6 +1043,13 @@ if __name__ == "__main__":
 
     ONE = [[MODEL, _filler("Модель нашла коробку. "
                             "«Не трогай её», сказала сменщица. ") + MODEL_CTA]]
+    # The length a rewrite is judged against is the length THIS story was
+    # written for, not the channel's flat one: a repost-sub part runs to
+    # script.target_sec() and is worth twice the words. Same text, two verdicts,
+    # which is the whole point of carrying `sec` on the row.
+    assert not _body_fault([ONE[0][1]], MODEL, 1), "sized for the flat target"
+    assert "дополни" in _body_fault([ONE[0][1]], MODEL, 1, PART_SEC), \
+        "and too short for a five-minute part"
     FILLER = _filler("Модель нашла эту коробку сама. "
                      "«Не трогай её», сказала сменщица. ")
     THREE = [[MODEL, FILLER + "И тут всё оборвалось."],
@@ -1197,7 +1221,7 @@ if __name__ == "__main__":
                  "answered INT DEFAULT 0, title TEXT DEFAULT '', "
                  "body TEXT DEFAULT '', takes TEXT DEFAULT '', "
                  "take INT DEFAULT -1, pub_at REAL DEFAULT 0, "
-                 "voice TEXT DEFAULT '')")
+                 "voice TEXT DEFAULT '', sec INT DEFAULT 0)")
     _mem.executemany("INSERT INTO review(post_id, lang, issue, ts, gender, sub, "
                      "score, written, title) VALUES (?,?,?,?,'m','s',1,?,?)",
                      [(pid, OUTPUT_LANG, iss, ts, w, t)

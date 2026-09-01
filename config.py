@@ -111,9 +111,17 @@ LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
 # env as an empty string, not as an absent one.
 LLM_REASONING = os.getenv("LLM_REASONING") or "none"
 # And a ceiling of our own, so a runaway costs a failed story instead of a
-# quarter of a day's budget. The longest thing asked for is a HORROR_SEC
-# narration, about 2k tokens; polish re-emits it once more with markup.
-LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS") or 4000)
+# quarter of a day's budget.
+#
+# 4000 was set when the longest thing asked for was a HORROR_SEC narration of
+# about 2k tokens. A split story is written in ONE call - every part in the same
+# answer, separated by three dashes, because the model has to see the whole
+# story to cut it where the story turns - so the longest answer is now every
+# part at once: PART_SEC times MAX_PARTS is 15 minutes, about 2270 Russian words
+# at _heard_wpm(), and Russian runs two to three tokens to the word. That is
+# 5-7k, and 4000 would have truncated it in the middle of part two, which reads
+# downstream as a part that stops rather than ends.
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS") or 10000)
 
 TTS_BACKEND = os.getenv("TTS_BACKEND", "fish")     # fish | edge
 TTS_VOICE = os.getenv("TTS_VOICE", "en-US-BrianMultilingualNeural")   # edge only
@@ -342,7 +350,14 @@ PART_WORD = {"ru": "Часть", "en": "Part"}
 # ru raised 87 -> 130 on 2026-08-26 as an experiment: the complaint was that
 # stories come out squeezed, and 130 seconds is ~335 Russian words against 225.
 # Still a Short - YouTube's ceiling is 180 and OVER puts the longest at ~153.
-# Put it back if retention drops; that is what this is being watched for.
+#
+# It is a FLOOR since 2026-09-02 and no longer a target. Every video is sized by
+# the length of its own source now - see PART_SEC - and this is what a story too
+# thin to reach it is rounded up to. That is a technical floor rather than an
+# editorial one: below MIN_SEC a video loses monetization, and aiming at MIN_SEC
+# itself would land under it half the time on script.TOLERANCE alone. Only
+# sources under about 1850 characters sit on it, and they are the one place any
+# padding is left.
 _TARGET_SEC = {"ru": 130, "en": 75}
 TARGET_SEC = int(chan_env("TARGET_SEC", str(_TARGET_SEC.get(CHANNEL, 75))))
 # The ceiling for the horror slot, and only a ceiling: script.target_sec()
@@ -354,6 +369,30 @@ TARGET_SEC = int(chan_env("TARGET_SEC", str(_TARGET_SEC.get(CHANNEL, 75))))
 # longer treats the upload as a Short: youtube.py drops the #Shorts tag for
 # these, which is the correct label and also a smaller audience.
 HORROR_SEC = int(os.getenv("HORROR_SEC", 330))
+# r/BestofRedditorUpdates, named once here because source.py needs it in two
+# places - it cleans the sub's boilerplate, caps its length by it, and ranks it
+# ahead of everything else. A sub matched by name in several spots is a sub that
+# gets renamed in one of them.
+BORU = "bestofredditorupdates"
+# The ceiling on ONE video, for every sub but horror. The ceiling on a whole
+# story is this times script.MAX_PARTS - fifteen minutes over three parts.
+#
+# A CEILING and not a target, which is the whole shape of it: script.target_sec()
+# takes how long the source would run told in full and divides it EVENLY over as
+# many parts as it takes to get under this, so a story worth seven minutes is
+# two parts of three and a half rather than two of five with the second one
+# padded. Nothing is ever asked to fill a length it does not have material for.
+#
+# The floor takes care of itself: dividing by ceil(full / PART_SEC) never yields
+# a part under half of this, measured over 143 candidates on 2026-09-02, so
+# there is no separate rule keeping the last part long enough to publish.
+#
+# It governed only r/BestofRedditorUpdates for a day and governs the whole feed
+# since 2026-09-02. Before that the feed was a flat TARGET_SEC because it was a
+# Shorts feed; past 180 seconds YouTube stops treating a vertical upload as a
+# Short, and the shelf was returning views in the tens, so the ceiling that
+# mattered stopped mattering - see YT_ENABLED.
+PART_SEC = int(os.getenv("PART_SEC", 300))
 # hard floor: under this a video loses monetization eligibility, so main.py
 # re-synthesizes at a slower rate rather than shipping a 58-second clip
 MIN_SEC = int(os.getenv("MIN_SEC", 62))
@@ -524,6 +563,18 @@ YT_MIN_GAP_HOURS = float(os.getenv("YT_MIN_GAP_HOURS", 5))
 # channel with TikTok on, and for the English one it meant the channel had no
 # outlet at all and burned ten stories in a day rendering for nobody. With the
 # bands collapsed there is no viral floor left to be picky about either.
+# Off for ru since 2026-09-02, and a switch rather than a quota of zero for the
+# same reason TIKTOK_ENABLED is one - here the reason is even plainer, because
+# daily_allowance() reads `YT_PER_DAY or (2 if day < 7 else 3)`: zero is the
+# UNSET sentinel there and falls straight through to two or three a day.
+#
+# Why it is off: the channel published Shorts, the shelf returned views in the
+# tens, and the answer was to stop making Shorts - see PART_SEC and youtube.py's
+# docstring. TikTok takes everything meanwhile, parts included, so nothing is
+# rendered that has nowhere to go. Per channel, so the English channel is not
+# switched off by the Russian one's decision.
+YT_ENABLED = chan_env("YT_ENABLED", "1").strip().lower() not in (
+    "0", "false", "no", "off")
 YT_PER_DAY = int(os.getenv("YT_PER_DAY", 0))
 # Pause with an expiry: ISO-8601, UTC assumed, e.g. 2026-08-12T14:00. Past that
 # moment the value is inert, which is the whole point - a pause that has to be
@@ -590,6 +641,10 @@ if __name__ == "__main__":
     # TikTok refuses the upload outright.
     assert TARGET_SEC < HORROR_SEC <= 600, \
         f"HORROR_SEC={HORROR_SEC} must sit between TARGET_SEC and 600"
+    # Same two bounds, same reasons: below TARGET_SEC a part would be shorter
+    # than an ordinary video, and TikTok refuses an upload past ten minutes.
+    assert TARGET_SEC < PART_SEC <= 600, \
+        f"PART_SEC={PART_SEC} must sit between TARGET_SEC and 600"
     # Loudness is a ranking term, so it has to sit above the floor to mean
     # anything: at or below it every candidate scores the full point and the
     # term stops separating anything at all.
@@ -665,6 +720,7 @@ if __name__ == "__main__":
     print(f"    voices: {len(FISH_VOICES_MALE)} male, {len(FISH_VOICES_FEMALE)} female"
           f"   yt token: {'set' if YT_REFRESH_TOKEN else 'MISSING'} ({YT_REFRESH_KEY})"
           f"   tiktok token: {'set' if TIKTOK_REFRESH_TOKEN else 'MISSING'}")
+    print(f"    youtube: {'on' if YT_ENABLED else 'OFF'}")
     print(f"    tiktok: {'on' if TIKTOK_ENABLED else 'PAUSED'} via "
           f"{TIKTOK_BACKEND}"
           + (f" as {TIKTOK_TAU_USER}, proxy "

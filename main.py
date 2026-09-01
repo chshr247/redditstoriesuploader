@@ -99,8 +99,9 @@ def _render(title: str, body: str, gender: str, key: str, sub: str,
     # publishing runs separately and later, so the text has to survive on disk.
     # The channel goes in with it - the part marker's language and which
     # channel's queue the file belongs to are both read back from here. So does
-    # the measured length: youtube.py decides on the #Shorts tag by it, and by
-    # then the mp4 is all it has.
+    # the measured length: publish.py reports it and nothing has to ffprobe the
+    # file to learn what was already timed here. youtube.py used to refuse an
+    # upload past three minutes on it, back when this channel published Shorts.
     (out.with_suffix(".meta.json")).write_text(json.dumps(
         {"title": script.plain(title), "body": script.plain(body), "sub": sub,
          "channel": CHANNEL, "sec": round(total), **(meta or {})},

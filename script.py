@@ -1,4 +1,4 @@
-﻿"""Step 2: raw Reddit post -> title card text + narration, sized for TARGET_SEC.
+"""Step 2: raw Reddit post -> title card text + narration, sized for TARGET_SEC.
 
 Output is bare prose with no markup: whatever this returns, edge-tts reads
 out loud verbatim. No "**", no emoji, no stage directions.
@@ -18,6 +18,7 @@ language the same way. Every one of those checks exists because a rule in the
 prompt alone was not enough (see todo.md, "причина 3").
 """
 import logging
+import math
 import os
 import re
 import sys
@@ -51,8 +52,8 @@ def _prompts():
             prompts.CRITIC, prompts.CRITIC_WRITE)
 
 import safety
-from config import (CRITIC_MIN, LLM_BASE_URL, LLM_MAX_TOKENS, LLM_MODEL,
-                    LLM_REASONING, OPENAI_API_KEY, OUTPUT_LANG,
+from config import (PART_SEC, CRITIC_MIN, LLM_BASE_URL, LLM_MAX_TOKENS,
+                    LLM_MODEL, LLM_REASONING, OPENAI_API_KEY, OUTPUT_LANG,
                     HORROR_SEC, SUBREDDITS_HORROR, TARGET_SEC, VOICE_SPEEDUP,
                     chan_file)
 
@@ -116,35 +117,59 @@ log = logging.getLogger(__name__)
 # bans markup, so a bare rule can only be the one we asked for.
 PART_SEP = re.compile(r"^\s*-{3,}\s*$", re.M)
 
-# Source characters worth one video. A 75-second narration is ~195 Russian
-# words, and an English source spends fewer characters on the same events than
-# the retelling does, so the threshold sits above the narration's own length.
-# source.py never fetches past MAX_CHARS = 4000, which is where MAX_PARTS lands.
-PART_CHARS = 1800
 MAX_PARTS = 3
+# There used to be a PART_CHARS = 1800 here as well - source characters worth
+# one video - and part_count() divided by it. It went with the flat target: a
+# character budget only means a runtime while the runtime is the same for every
+# story, and it was never quite the same number anyway. Measured against
+# full_sec() it handed out one part too many, so a 3600-character post - one
+# point nine parts of material - was written as three and the model was asked
+# for forty percent more words than the story had.
 
-# How many characters of English source make one word of it. Only the horror
-# slot needs the number, and it is derived rather than picked: ~5.7 characters
-# to an English word, a faithful retelling comes back at roughly the same word
-# count in Russian, and the viewer hears _heard_wpm() of them a minute. So a
-# 4000-character post is about five minutes told in full.
+# How many characters of English source make one word of it, which is what turns
+# a post into a duration: ~5.7 characters to an English word, a faithful
+# retelling comes back at roughly the same word count in Russian, and the viewer
+# hears _heard_wpm() of them a minute. Every length decision downstream is this
+# number - see full_sec() and source_chars().
 SOURCE_CHARS_PER_WORD = 5.7
+
+
+def full_sec(post: dict) -> float:
+    """Seconds this source would run if it were told in full, nothing cut.
+
+    The unit the repost sub is sized in, and the horror slot with it: both ask
+    how much story is actually there rather than how many characters arrived.
+    Counted at _heard_wpm(), because it is a duration of the FINISHED video.
+    """
+    return len(post.get("text") or "") / SOURCE_CHARS_PER_WORD / _heard_wpm() * 60
+
+
+def source_chars(sec: float) -> int:
+    """The inverse: how many characters of source are worth `sec` of narration.
+
+    Lives here rather than where it is used, which is source.BORU_CHARS - that
+    cap is MAX_PARTS parts of PART_SEC expressed in characters, and a second
+    copy of this arithmetic is how the two would drift apart.
+    """
+    return round(sec / 60 * _heard_wpm() * SOURCE_CHARS_PER_WORD)
 
 
 def part_count(post: dict) -> int:
     """How many videos this post is worth, by length of the source alone.
 
     A guess, made before spending an LLM call: the model still gets to answer
-    with fewer parts if the material is thinner than the character count says.
+    with fewer parts if the material is thinner than the length says.
+
+    One rule for every sub since 2026-09-02 - as many parts as it takes to keep
+    each one under PART_SEC, and no more. A post is split because it does not
+    fit, never because splitting fills a feed.
     """
-    # The horror slot is one video whatever the source weighs. Splitting is a
-    # device for a 75-second feed - a cliffhanger works because the answer is
-    # an hour away and the viewer is still scrolling. A scary story cut in half
-    # is a scary story whose ending is in a different video, and target_sec()
-    # already gives it the runtime the split was buying.
+    # The horror slot is the one exception, and it is one video whatever the
+    # source weighs. A scary story cut in half is a scary story whose ending is
+    # in a different video, and target_sec() gives it the runtime instead.
     if post.get("sub") in SUBREDDITS_HORROR:
         return 1
-    return min(len(post["text"]) // PART_CHARS + 1, MAX_PARTS)
+    return max(1, min(math.ceil(full_sec(post) / PART_SEC), MAX_PARTS))
 
 
 def _wpm() -> int:
@@ -283,24 +308,45 @@ def _words(s: str) -> int:
     return len(plain(s).split())
 
 
-def target_sec(post: dict) -> int:
-    """Seconds of narration this story is worth.
+def target_sec(post: dict, parts: int = 0) -> int:
+    """Seconds of narration ONE video of this story is worth.
 
-    The feed is a flat TARGET_SEC and stays that way: a family row told in
-    three minutes is a family row nobody watched to the end of.
+    `parts` is how many it is actually being told in, and it is not always what
+    part_count() asked for: main.py clamps the split to the room left in the
+    day's batch, and only one split story is allowed per day, so a story worth
+    three parts is sometimes written as one. Passed in, the runtime follows the
+    real number and the model is asked for a length it can fill. Left at 0 it
+    falls back to the guess, which is what a caller sizing a story it has not
+    written yet has to use.
 
-    The horror slot is scaled by the length of its source instead, up to
-    HORROR_SEC. Both ends of that matter. A scary story squeezed into 75
-    seconds loses the detail it lives on - the second set of footprints goes
-    first, because it is not plot. And a flat five minutes handed to a
-    600-word post is an invitation to pad, which the prompt bans anyway, so
-    the short ones stay short and only the long ones run.
+    Every sub is sized by the length of its own SOURCE now, and the length is
+    then shared out over the parts. The feed used to be a flat TARGET_SEC on
+    the grounds that a family row told in three minutes is a family row nobody
+    watched to the end of - which was right while this was a Shorts channel and
+    is the thing that stopped being true when the Shorts shelf did. Flat also
+    cut both ways and mostly cut the wrong one: a post worth seventy seconds was
+    given a hundred and thirty, and the prompt bans padding, so what came back
+    was the same story said slower.
+
+    So: full_sec() divided by the parts it is told in, held between TARGET_SEC
+    and PART_SEC. A nine-minute story is two parts of four and a half, not two
+    of five with the second one padded - the padding is what the low end of
+    _fits() would keep sending back.
+
+    The horror slot is the exception at BOTH ends: one video, and up to
+    HORROR_SEC rather than PART_SEC, because it is not split at all.
+
+    TARGET_SEC survives as the FLOOR. It is not an editorial minimum any more,
+    it is headroom over config.MIN_SEC: past that floor a video loses
+    monetization, main.py re-synthesizes it slower rather than shipping it, and
+    aiming at MIN_SEC itself would land under it half the time on TOLERANCE
+    alone. Everything shorter than about 1850 source characters sits on this
+    floor and is the only padding left anywhere.
     """
-    if post.get("sub") not in SUBREDDITS_HORROR:
-        return TARGET_SEC
-    full = round(len(post.get("text") or "") / SOURCE_CHARS_PER_WORD
-                 / _heard_wpm() * 60)
-    return max(TARGET_SEC, min(HORROR_SEC, full))
+    if post.get("sub") in SUBREDDITS_HORROR:
+        return max(TARGET_SEC, min(HORROR_SEC, round(full_sec(post))))
+    return max(TARGET_SEC, min(PART_SEC, round(
+        full_sec(post) / (parts or part_count(post)))))
 
 
 def _target_words(sec: int = 0) -> int:
@@ -1308,7 +1354,7 @@ def write_script(post: dict, parts: int = 1) -> tuple:
 
     WRITE, POLISH, MULTI, GENRE = _prompts()[:4]
     client = OpenAI(api_key=OPENAI_API_KEY, base_url=LLM_BASE_URL or None)
-    sec = target_sec(post)
+    sec = target_sec(post, parts)
     target = _target_words(sec)
     lang, name = OUTPUT_LANG, LANG_NAME[OUTPUT_LANG]
     # Which slot this story came from is written nowhere but its sub, and both
@@ -1453,9 +1499,47 @@ if __name__ == "__main__":
     assert target_sec(_thin) == TARGET_SEC, "a thin source is not padded out"
     assert target_sec(_fat) == HORROR_SEC, "and a long one stops at the ceiling"
     assert TARGET_SEC < target_sec(_mid) < HORROR_SEC, target_sec(_mid)
-    assert target_sec(_feed) == TARGET_SEC, "the feed does not move"
     assert part_count(_fat) == 1, "the horror slot is one video, whatever it weighs"
-    assert part_count(_feed) > 1, "...and the feed still splits what is long"
+    # The feed is sized off its own source now, exactly like everything else, and
+    # 4000 characters is under five minutes - so the sub that used to be three
+    # flat parts is one video of what the story actually weighs.
+    assert part_count(_feed) == 1, "MAX_CHARS does not reach a second part"
+    assert TARGET_SEC < target_sec(_feed) < PART_SEC, target_sec(_feed)
+    assert abs(target_sec(_feed) - round(full_sec(_feed))) <= 1, "told in full"
+
+    # Splitting: what has to hold is that the parts SHARE the runtime instead of
+    # each taking the ceiling - a story worth seven minutes is two of three and a half, and two
+    # of five would be five minutes of padding the prompt is not allowed to
+    # write. The bound going the other way is MAX_PARTS: at the source cap the
+    # story is exactly MAX_PARTS parts of PART_SEC and not one more.
+    _b = lambda n: {"sub": "AmItheAsshole", "text": "x" * n}
+    _cap_post = _b(source_chars(MAX_PARTS * PART_SEC))
+    assert part_count(_cap_post) == MAX_PARTS, part_count(_cap_post)
+    assert target_sec(_cap_post) == PART_SEC, target_sec(_cap_post)
+    assert part_count(_b(600)) == 1 and target_sec(_b(600)) == TARGET_SEC, \
+        "a short one is an ordinary single video, not a padded five minutes"
+    _seven = _b(source_chars(7 * 60))
+    assert part_count(_seven) == 2, part_count(_seven)
+    assert abs(target_sec(_seven) - 210) <= 1, target_sec(_seven)
+    # ...and when the day has no room to split it, the ONE video it is told in
+    # gets the whole runtime rather than a part's share of it. Sized off the
+    # guess instead, the model would be asked for half a story's words and told
+    # to fit the whole story into them.
+    assert target_sec(_seven, 1) == PART_SEC, target_sec(_seven, 1)
+    assert abs(target_sec(_seven, 3) - 140) <= 1, target_sec(_seven, 3)
+    # Divided evenly, a part is never short enough to need a floor of its own,
+    # which is why there is no rule here keeping the last one long: ceil() puts
+    # the worst case just over half of PART_SEC, at the story that has only
+    # barely spilled into a second part. A ONE-part story is not in this - it is
+    # an ordinary video and floors at TARGET_SEC like any other.
+    _split_posts = [p for p in (_b(n) for n in
+                                range(600, source_chars(MAX_PARTS * PART_SEC), 97))
+                    if part_count(p) > 1]
+    assert min(target_sec(p) for p in _split_posts) >= PART_SEC / 2
+    # Every part is written in ONE answer, so the token ceiling has to hold the
+    # whole story - this is the check config.LLM_MAX_TOKENS was raised for.
+    assert _target_words(PART_SEC) * MAX_PARTS * 2 < LLM_MAX_TOKENS, \
+        f"{LLM_MAX_TOKENS} tokens cannot hold {MAX_PARTS} parts of {PART_SEC}s"
     # The horror slot has to be worth its own prompt, its own voice and four
     # times the render: a ceiling that is not far above the feed's target is a
     # slot that buys nothing. Was 3x while the feed sat at 87 seconds; the feed
@@ -1758,8 +1842,19 @@ if __name__ == "__main__":
 
     # how many videos a post is worth, by source length alone
     assert part_count({"text": "x" * 500}) == 1
-    assert part_count({"text": "x" * (PART_CHARS + 10)}) == 2
-    assert part_count({"text": "x" * 4000}) == MAX_PARTS, "MAX_CHARS must not exceed it"
+    # A post is split when it does not FIT, so the seam is a duration and the
+    # whole ordinary feed sits on one side of it: source.MAX_CHARS is 4000,
+    # which is under five minutes told in full, so those subs are one video now.
+    assert part_count({"text": "x" * source_chars(PART_SEC)}) == 1
+    assert part_count({"text": "x" * (source_chars(PART_SEC) + 10)}) == 2
+    assert part_count({"text": "x" * 4000}) == 1, \
+        "MAX_CHARS is worth one video, not three"
+    # source.BORU_CHARS is this same arithmetic run backwards, and the two are
+    # a cap and its split: read apart they drift, and a sub whose cap is above
+    # what its parts hold squeezes the difference out of every story.
+    import source
+    assert source.BORU_CHARS == source_chars(MAX_PARTS * PART_SEC), \
+        f"{source.BORU_CHARS} is not {MAX_PARTS} parts of {PART_SEC}s"
 
     # STAGE ONE. A two-part answer must come apart cleanly: ONE NARRATOR at the
     # top holding for every part, a cliffhanger in the half that is not the
