@@ -21,9 +21,10 @@ pool's again. Only the `id` in backticks is read — reorder or trim freely.
 | 12 | [`1mvlywh`](https://redd.it/1mvlywh) | 4.5k / 1.3k | husband screamed at our 6yo just for singing "Golden" |
 | 13 | [`hshqzb`](https://redd.it/hshqzb) | 53k / 6.8k | bf isn't okay with me being promiscuous in the past |
 | 14 | [`1txw19e`](https://redd.it/1txw19e) | 5.8k / 1.7k | brother slept with every girlfriend I had for a decade |
-| 15 | [`1p35sdz`](https://redd.it/1p35sdz) | 6.9k / 1.2k | just found out my mom sends my girlfriend cruel messages |
-| 16 | [`1viemt8`](https://redd.it/1viemt8) | 4.1k / 731 | husband increasingly cruel since his dad died |
-| 17 | [`1og8p9d`](https://redd.it/1og8p9d) | 6.8k / 717 | commented on my bf's "are we dating the same guy" post & he found out |
-| 18 | [`1v9q7yu`](https://redd.it/1v9q7yu) | 4.4k / 1.2k | grandparents' inheritance excluded my stepsiblings, dad demands I share |
-| 19 | [`1s2fas9`](https://redd.it/1s2fas9) | 6.6k / 2.1k | pregnant, can barely eat — partner didn't sleep because I ate McDonald's |
-| 20 | [`gy79dx`](https://redd.it/gy79dx) | 32k / 1.2k | boyfriend won't stop telling me I have B.O. |
+| 15 | [`1vjwjrx`](https://redd.it/1vjwjrx) | 5.2k / 925 | found a starving dog, no chip, adopted her - a year later the owner turns up |
+| 16 | [`1p35sdz`](https://redd.it/1p35sdz) | 6.9k / 1.2k | just found out my mom sends my girlfriend cruel messages |
+| 17 | [`1viemt8`](https://redd.it/1viemt8) | 4.1k / 731 | husband increasingly cruel since his dad died |
+| 18 | [`1og8p9d`](https://redd.it/1og8p9d) | 6.8k / 717 | commented on my bf's "are we dating the same guy" post & he found out |
+| 19 | [`1v9q7yu`](https://redd.it/1v9q7yu) | 4.4k / 1.2k | grandparents' inheritance excluded my stepsiblings, dad demands I share |
+| 20 | [`1s2fas9`](https://redd.it/1s2fas9) | 6.6k / 2.1k | pregnant, can barely eat — partner didn't sleep because I ate McDonald's |
+| 21 | [`gy79dx`](https://redd.it/gy79dx) | 32k / 1.2k | boyfriend won't stop telling me I have B.O. |
