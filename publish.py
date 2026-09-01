@@ -1798,6 +1798,19 @@ if __name__ == "__main__":
     assert not _tau_retryable("NOT logged in: Login expired")
     assert not _tau_retryable("[-] Failed to parse signature data")
 
+    # The login-wall marker lives in two files that never import each other:
+    # uipost.js prints it, post.ps1 greps for it to open "не залогинен"
+    # instead of the generic crash issue. Renaming it on one side alone loses
+    # the specific report silently - and silence is the exact failure it was
+    # added to break. Skipped where the UI path is not configured at all,
+    # which is every CI runner.
+    _ps1 = Path(__file__).resolve().parent / ".private" / "tau" / "post.ps1"
+    if TIKTOK_TAU_UI and Path(TIKTOK_TAU_UI).exists() and _ps1.exists():
+        assert "NOT_LOGGED_IN" in Path(TIKTOK_TAU_UI).read_text("utf-8"), (
+            "uipost.js stopped printing the marker post.ps1 greps for")
+        assert "NOT_LOGGED_IN" in _ps1.read_text("utf-8"), (
+            "post.ps1 stopped greping for uipost.js's login-wall marker")
+
     print("chunking, caption, allowance and status logic ok", file=sys.stderr)
 
     try:
