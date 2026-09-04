@@ -646,10 +646,28 @@ def _pick(limit: int, subs: list[str] | None = None) -> list[dict]:
               "(SELECT id FROM seen WHERE lang=?)")
     rows = db.execute(unused, (*subs, OUTPUT_LANG)).fetchall()
 
-    if tuple(subs) not in _refilled and len(rows) < POOL_LOW:
-        log.info("pool: %d left to choose from, refilling", len(rows))
+    # A sub added to the config AFTER the pool was stocked is never harvested,
+    # because the only trigger used to be the whole pool running dry - and eight
+    # subs of backlog keep it full for months. Measured 2026-09-05:
+    # r/BestofRedditorUpdates had been in SUBREDDITS since 2026-09-01 and ranked
+    # ahead of everything by _priority(), with 253 unused rows in the pool, not
+    # one of them its own, and the last harvest dated 2026-08-21. The hard
+    # first place had nothing to put in it, so the sub read as switched off.
+    have = {r[1].lower() for r in rows}
+    starved = [s for s in subs if s.lower() not in have]
+    if tuple(subs) not in _refilled and (starved or len(rows) < POOL_LOW):
+        if starved:
+            log.info("pool: nothing at all from %s, harvesting those",
+                     ", ".join(f"r/{s}" for s in starved))
+        else:
+            log.info("pool: %d left to choose from, refilling", len(rows))
         _refilled.add(tuple(subs))
-        log.info("pool: +%d rows", refill(db, subs=subs))
+        # A starved sub is harvested BY NAME rather than by hoping the shuffle
+        # reaches it: refill() spreads POOL_WINDOWS reads over the whole list,
+        # which is one read in nine for the sub that has none.
+        log.info("pool: +%d rows",
+                 refill(db, windows=len(starved) or POOL_WINDOWS,
+                        subs=starved or subs))
         rows = db.execute(unused, (*subs, OUTPUT_LANG)).fetchall()
 
     ranked = [{"id": pid, "sub": sub, "score": score, "title": title,
@@ -1321,6 +1339,27 @@ if __name__ == "__main__":
         assert left == 0, "a post that has gone must not be ranked again"
         db.execute("DELETE FROM pool WHERE id LIKE '_sp_%'")
         db.execute("DELETE FROM seen WHERE id LIKE '_sp_%'")
+    # A sub in the config with no rows of its own has to set off a harvest of
+    # ITSELF, whatever the rest of the pool holds. This is the whole BoRU bug:
+    # planted rows for one sub, a second sub configured and empty, and a pool
+    # far too full to be called low.
+    _asked = []
+    _real_refill = refill
+    globals()["refill"] = lambda db, windows=None, subs=None: (
+        _asked.append((windows, subs)) or 0)
+    globals()["_refilled"] = set()
+    _planted_by_id["_sp_only"] = ("_sp_only", "_selftest_sub",
+                                  MIN_SCORE + 10, 900, 0.72)
+    with _db() as db:
+        db.execute("INSERT OR REPLACE INTO pool(id, sub, score, comments, ratio,"
+                   " title, ts) VALUES ('_sp_only', '_selftest_sub', ?, 900,"
+                   " 0.72, 'A story', ?)", (MIN_SCORE + 10, time.time()))
+    _pick(1)
+    assert _asked == [(1, ["_selftest_other"])], _asked
+    globals()["refill"] = _real_refill
+    with _db() as db:
+        db.execute("DELETE FROM pool WHERE id LIKE '_sp_%'")
+
     globals()["SUBREDDITS"], globals()["_refilled"], globals()["_bodies"] = _real
     print("pool and ranking ok")
 
