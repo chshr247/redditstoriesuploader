@@ -380,9 +380,9 @@ def part_prefix(meta: dict) -> str:
 
     Lives here rather than in youtube.py because splitting is TikTok's alone -
     see youtube._split(). Only the PUBLISHED caption carries the marker: the
-    narrated title card stays clean, it is the hook and three syllables of
-    "часть вторая" in front of it is dead air. In the feed the marker leads the
-    title, which is why caption() must not trim it away.
+    title card stays clean - it is the cover, and "часть вторая" across it is
+    two words of the thumbnail spent on bookkeeping. In the feed the marker
+    leads the title, which is why caption() must not trim it away.
     """
     if meta.get("total", 0) <= 1:
         return ""

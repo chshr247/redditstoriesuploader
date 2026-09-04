@@ -279,8 +279,9 @@ def _body(post: dict, written: list, critic=None) -> str:
         f"одним `[emphasis]` — `[doubtful] А вы бы [emphasis] сделали так же?`; "
         f"а если просто оборвёшь текст без вопроса, подставится вопрос модели. "
         f"Каждая часть — около "
-        f"{script._target_words(script.target_sec(post, len(written)))} слов вместе с названием, "
-        f"оно читается в начале каждой.\n\n"
+        f"{script._target_words(script.target_sec(post, len(written)))} слов. "
+        f"Название вслух не читается — оно только на карточке, первые "
+        f"кадры, под обложку. Хук теперь первое предложение текста.\n\n"
         + (f"Если будешь переписывать текст — частей {len(written)}, раздели их "
            f"строкой из трёх дефисов; можно прислать меньше, но не меньше двух. "
            f"Одно название встаёт на все части в любом случае. И оставь "
@@ -408,8 +409,8 @@ def _body_fault(bodies: list[str], title: str, parts: int, sec: int = 0) -> str:
     Nothing downstream bounds a video's length, so a narration typed twice as
     long is simply a video twice as long.
 
-    Length is per part and counts the title, because the title is narrated at
-    the head of every part even though it is written once.
+    Length is per part and is the narration alone: the title is drawn on the
+    card as a cover and never spoken - see voice.COVER_SEC.
     """
     if not bodies:
         return ""

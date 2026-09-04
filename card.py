@@ -311,6 +311,21 @@ def _zoom(img: Image.Image, s: float) -> Image.Image:
     return out
 
 
+def _accented(title: str, words: int) -> int | None:
+    """Index of the word the title's [emphasis] sits on, or None for no accent.
+
+    The mark is written in front of a word, so everything plain() leaves in
+    front of the mark is what precedes that word - counting those words IS the
+    index. Out of range means the tag trails the last word, which _title_fault()
+    refuses, so this only ever guards a title that came from somewhere else.
+    """
+    i = title.lower().find("[emphasis")
+    if i < 0:
+        return None
+    n = len(script.plain(title[:i]).split())
+    return n if n < words else None
+
+
 def build(words: list[dict], title: str, title_end: float, name: str,
           part: int = 0, channel: str = CHANNEL) -> list[tuple[float, float, Path]]:
     """(start, end, png) for the whole title card, one entry per lit word.
@@ -334,8 +349,14 @@ def build(words: list[dict], title: str, title_end: float, name: str,
         tokens[-1] = tokens[-1].rstrip(".!?") or tokens[-1]
 
     if not tokens:
+        # The ordinary case now: the title is not narrated, so there are no word
+        # timings to follow and the card is one still - the COVER, up for
+        # voice.COVER_SEC. The [emphasis] is still drawn, and on a still frame it
+        # matters more than it did while it was moving: it is placed by hand in
+        # the review issue, on the word the line turns on, and it is the one word
+        # the thumbnail leads with.
         plain = safety.mask(script.plain(title)).split()
-        img = _draw(plain, None, part, channel)
+        img = _draw(plain, _accented(title, len(plain)), part, channel)
         path = OUT_DIR / f"{name}_card0.png"
         img.save(path)
         return [(0.0, title_end, path)]

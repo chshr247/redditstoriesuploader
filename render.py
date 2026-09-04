@@ -33,6 +33,7 @@ SKIP_HEAD = 30.0           # seconds of every background clip that are off limit
 PROBE_FPS = 4              # frames sampled per second when mapping a clip's motion
 HOOK_WINDOW = 3            # seconds a seek is judged on: the hook, and nothing after it
 MOTION_DIR = BG_DIR / ".motion"   # one json per clip, next to the footage it describes
+CUT_MIN_CARD = 1.0         # a card shorter than this is a cover, and nothing to cut on
 CUT_MIN_GAP = 90.0         # how far the post-title footage must be from the opening
 CUT_TRIES = 40             # draws allowed to find that gap before the cut is dropped
 
@@ -399,7 +400,15 @@ def _cut(bg_dur: float, dur: float, title_end: float, name: str,
     card to cut on, a story too short to have two parts, or a clip that could
     not offer a far enough second window in CUT_TRIES draws.
     """
-    if title_end <= 0 or dur - title_end < HOOK_WINDOW:
+    # The card is a COVER now, not a passage of narration: it is gone inside a
+    # second, and there is no "before it the viewer is reading" left to cut on.
+    # A jump three tenths of a second in is a glitch, not a beat.
+    #
+    # ponytail: this drops the one cut these videos had, and with it the reason
+    # the footage was not one unbroken stretch. If they start reading as a
+    # conveyor again, the beat to cut on is the end of the opening line - which
+    # is in `words` and would be passed in here the way title_end is now.
+    if title_end < CUT_MIN_CARD or dur - title_end < HOOK_WINDOW:
         return None
     for _ in range(CUT_TRIES):
         pick = _seek(bg_dur, dur - title_end, name, scores)

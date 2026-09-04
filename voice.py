@@ -38,6 +38,21 @@ FISH_URL = "https://api.fish.audio/v1/tts"
 # NOTE: pacing knob for edge. Fish has its own, FISH_SPEED.
 RATE = "+0%"
 
+# How long the title card stays up, now that it is a COVER and not a passage of
+# narration: FIVE frames at render.FPS, which is what TikTok's picker needs to
+# offer the card as the thumbnail. Not one frame more - past that it stops being
+# a cover and goes back to being a thing standing between the viewer and the
+# first line, which is the whole reason the title stopped being narrated.
+#
+# Deliberately NOT stretched to cover the whoosh, even though those frames are
+# silent and would be free: silent is not unwatched.
+#
+# ponytail: five is the number that makes the thumbnail work, not a tuned one.
+# If the posted cover turns out not to be the card, the fix is not a longer card
+# - it is uploading the still through the Studio's own cover editor from
+# uipost.js.
+COVER_SEC = round(5 / 30, 3)
+
 log = logging.getLogger(__name__)
 _whisper = None
 
@@ -605,13 +620,23 @@ def speak_parts(title: str, body: str, name: str, gap: float = 0.0,
         # already shouted, so a warning here would only be a second voice.
         log.info("%s: no closing question, narrating the body as one take", name)
 
-    # the title's own timings are what light the card up word by word - they
-    # were always computed here and thrown away
-    t_mp3, t_words = speak(_cued(title, FISH_TITLE_CUE), f"{name}_title",
-                           rate=rate, speed=speed, fish_voice=fish_voice)
+    # The title is NOT narrated any more, and this is the whole seam where that
+    # was decided. It stays on screen as the COVER - render.py holds the card up
+    # for COVER_SEC, which is what TikTok's picker takes as the thumbnail - but
+    # the first thing anybody HEARS is the story's own opening line.
+    #
+    # Measured over the 120 posts in tiktok.csv on 2026-09-05, ranked inside
+    # their own week so the account's falling reach does not drown the signal:
+    # the LENGTH of a title has no relation to how a video does (Spearman
+    # -0.037, and the 9-to-10-word band the rules aim at is the worst of the
+    # four), while a concrete hostile action in the opening line is worth +0.16
+    # of within-week position, p=0.008, and holds with the five viral outliers
+    # removed. So the three seconds the title spent at the front bought nothing
+    # the story's first sentence cannot buy better - provided that sentence is
+    # written as a hook, which is prompts.py's half of this change.
     b_mp3, b_words = speak_body(story, name, rate=rate, speed=speed,
                                 fish_voice=fish_voice, have=body_mp3)
-    parts, words = [t_mp3, b_mp3], list(b_words)
+    parts, words = [b_mp3], list(b_words)
 
     if cta:
         c_mp3, c_words = speak(_cued(cta, FISH_CTA_CUE), f"{name}_cta",
@@ -627,7 +652,9 @@ def speak_parts(title: str, body: str, name: str, gap: float = 0.0,
     # Where the story starts, on the takes as they were synthesized. Every
     # timing above is on that same unsped clock, so the whole set is offset here
     # and scaled once, after the speed-up is applied to the audio below.
-    offset = duration(t_mp3) + gap
+    # Nothing precedes the story on the track now; `gap` still leads it if a
+    # caller asked for one.
+    offset = gap
     merged = OUT_DIR / f"{name}.mp3"
     pad = f"[0:a]apad=pad_dur={gap}[t];[t]" if gap else "[0:a]"
     chain = pad + "".join(f"[{i}:a]" for i in range(1, len(parts)))
@@ -644,16 +671,16 @@ def speak_parts(title: str, body: str, name: str, gap: float = 0.0,
          f"{chain}concat=n={len(parts)}:v=0:a=1{_speedup()}{delay}",
          str(merged)], check=True)
 
-    title_end = offset / VOICE_SPEEDUP + lead
+    # The card is a cover and no longer a passage of narration, so its length is
+    # a fixed number of FRAMES rather than however long the title took to read.
+    # No word timings go with it: card.build() draws one unlit frame for the
+    # whole stretch when the list is empty, which is what a cover wants.
+    title_end, t_words = COVER_SEC, []
     words = _scaled(words, offset, lead=lead)
-    # the card's own highlight rides the sped-up title audio too, so these move
-    # by the same factor - and by the lead as well, because the card is on
-    # screen from frame zero while the voice it follows is not
-    t_words = _scaled(t_words, lead=lead)
     (OUT_DIR / f"{name}.json").write_text(json.dumps(words, ensure_ascii=False), "utf-8")
     if lead:
         log.info("%s: %.2fs of %s in front of the first word", name, lead, SFX.name)
-    log.info("%s: title %.1fs + story %.1fs%s = %.1fs total%s", name, title_end,
+    log.info("%s: cover %.2fs + story %.1fs%s = %.1fs total%s", name, title_end,
              duration(b_mp3),
              f" + question {duration(parts[-1]):.1f}s" if cta else "",
              duration(merged),
@@ -853,6 +880,42 @@ if __name__ == "__main__":
     assert _cued("Она вернула всё.", FISH_BODY_CUE, " ").startswith(FISH_BODY_CUE)
     # the comma join is still what the title and the question get
     assert _cued("[doubtful] Вопрос?", "[calm, flat]").startswith("[doubtful, calm, flat]")
+
+    # The title is a COVER now, not a take. Three things have to hold, and all
+    # three are arithmetic every render depends on, so they are checked with the
+    # engine stubbed out rather than by listening to a demo: no title is ever
+    # synthesized, the card's length is the cover and not a narration, and the
+    # story's first word lands at the front of the track behind nothing but the
+    # whoosh.
+    _real = (speak, speak_body, duration, subprocess.run)
+    _asked = []
+
+    def _fake_speak(text, name, **kw):
+        _asked.append(name)
+        return OUT_DIR / f"{name}.mp3", [{"word": "?", "start": 0.0, "end": 0.5}]
+
+    def _fake_body(story, name, **kw):
+        _asked.append(name)
+        return OUT_DIR / f"{name}.mp3", [{"word": "a", "start": 0.0, "end": 0.4},
+                                         {"word": "b", "start": 0.4, "end": 0.9}]
+
+    globals()["speak"], globals()["speak_body"] = _fake_speak, _fake_body
+    globals()["duration"] = lambda f: 0.7 if str(f) == str(SFX) else 10.0
+    subprocess.run = lambda *a, **k: None
+    try:
+        _, _w, _tend, _tw = speak_parts(
+            "[emphasis] Заголовок", "Сестра забрала гаджеты. А вы бы забрали?",
+            "_selftest_cover")
+    finally:
+        (globals()["speak"], globals()["speak_body"], globals()["duration"],
+         subprocess.run) = _real
+    assert not any("_title" in n for n in _asked), \
+        f"the title is being narrated again: {_asked}"
+    assert _tend == COVER_SEC, _tend
+    assert _tw == [], "a cover has no word timings - card.py draws one still"
+    assert _w[0]["start"] == 0.7, \
+        f"the story must open the track behind the whoosh alone, not {_w[0]}"
+    print("cover card and story-first track ok")
 
     # full-length narration on purpose: pace on a two-sentence clip is not
     # representative, and this number is what WPM in script.py must match

@@ -1,4 +1,4 @@
-"""Pipeline: Reddit story -> vertical mp4 with a narrated title card.
+"""Pipeline: Reddit story -> vertical mp4 opening on its own first line.
 
     python main.py        one video
     python main.py 5      five
@@ -172,8 +172,8 @@ def make_reviewed(r: dict) -> Path:
     """Render the parked story under the title that came back off the issue.
 
     The chosen title replaces the model's on EVERY part. A split story has one
-    title by construction - it is narrated and lit at the head of each part -
-    and all of the parts were written against it in a single call.
+    title by construction - it is the cover drawn at the head of each part - and
+    all of the parts were written against it in a single call.
 
     The narrator comes off the row where the readings put it, and is drawn here
     only for a story that was never read aloud - a split one, or a channel with

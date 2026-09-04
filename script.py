@@ -98,11 +98,11 @@ OVER = 0.18
 # it would squeeze the payoff, which is the one part that must not be rushed.
 CTA_SEC = 3
 
-# The title is narrated at the head of every part, so it always ate part of the
-# same budget. Stage one no longer writes it, and holding its share back here is
-# what keeps the two stages counting the same seconds: six to twelve words by
-# rule, nine in the middle, and TOLERANCE is worth ten times that either way.
-TITLE_WORDS = 9
+# The title used to be narrated at the head of every part and was held back out
+# of the budget for it. It is a COVER now - drawn on the card, never spoken, see
+# voice.COVER_SEC - so the whole budget belongs to the narration again, and a
+# story written under the old arithmetic came out about nine words, four
+# seconds, short of the length it was asked for.
 
 LANG_NAME = {"ru": "Russian", "en": "English"}
 
@@ -350,7 +350,7 @@ def target_sec(post: dict, parts: int = 0) -> int:
 
 
 def _target_words(sec: int = 0) -> int:
-    """Budget for title plus narration together - both are spoken.
+    """Budget for the narration. The title is not in it - it is not spoken.
 
     CTA_SEC rides on top of TARGET_SEC so the closing question is paid for out
     of extra runtime instead of out of the ending.
@@ -631,6 +631,60 @@ def _kin_fault(text: str, lang: str = "") -> str:
         if m:
             return (f"\"{m.group()}\" is a word a young viewer has to stop and "
                     f"work out - name the person plainly instead, \"{fix}\"")
+    return ""
+
+
+# The FIRST SENTENCE is the whole hook now - the title is a cover and is not
+# read out, see voice.COVER_SEC - so a word the viewer has to stop and work out
+# costs the video there in a way it does not cost it in the middle. These are
+# the words the source's English hands over unchanged: "my friends staged an
+# intervention" comes back as "друзья устроили мне интервенцию" whatever the
+# prompt says - measured twice in a row on 2026-09-05 with the rule naming that
+# exact word and its replacement.
+#
+# ponytail: a CLOSED hand-picked list, like ARCHAIC_KIN above, and deliberately
+# not a heuristic. Measured over the 27 narrations in out/ on the same day:
+# every pattern that catches интервенция also catches ситуация, историю and
+# который - borrowed endings are most of ordinary Russian - and a check that
+# refuses those is the one that was tried before and made things worse. Nothing
+# outside this list can fire. Grow it when a word actually turns up in a hook,
+# and not before.
+HARD_IN_HOOK = {
+    "ru": [
+        (re.compile(r"\bинтервенц\w*", re.IGNORECASE), "разговор всей компанией"),
+        (re.compile(r"\bконфронтац\w*", re.IGNORECASE), "ссора в лицо"),
+        (re.compile(r"\bдистанциров\w*", re.IGNORECASE), "перестал общаться"),
+        (re.compile(r"\bэскалац\w*", re.IGNORECASE), "стало только хуже"),
+        (re.compile(r"\bультиматум\w*", re.IGNORECASE), "поставила условие"),
+        (re.compile(r"\bпрецедент\w*", re.IGNORECASE), "такое уже было"),
+        (re.compile(r"\bдепривац\w*", re.IGNORECASE), "не давали спать"),
+        (re.compile(r"\bнекомфортн\w*", re.IGNORECASE), "неудобно"),
+    ],
+    "en": [
+        (re.compile(r"\baltercation\b", re.IGNORECASE), "a screaming row"),
+        (re.compile(r"\breiterat\w*", re.IGNORECASE), "said it again"),
+        (re.compile(r"\bescalat\w*", re.IGNORECASE), "it got worse"),
+    ],
+}
+
+
+def _hard_fault(body: str, lang: str = "") -> str:
+    """Empty unless the OPENING SENTENCE reaches for a word nobody says.
+
+    The first sentence only, and that narrowness is the point: the same word two
+    hundred words in is a wobble, in the hook it is the whole video, and a check
+    that fired everywhere would be arguing with the story instead of guarding
+    its opening.
+
+    Stage one only - see where it is called. Stage two may not change a word, so
+    a complaint about the words there is one nothing is allowed to fix.
+    """
+    first = plain(body).split(".")[0]
+    for pat, fix in HARD_IN_HOOK.get(lang or OUTPUT_LANG, ()):
+        if m := pat.search(first):
+            return (f'the opening sentence says "{m.group()}", which nobody '
+                    f'says out loud - it is the one sentence a viewer decides '
+                    f'on, so say what happened: "{fix}"')
     return ""
 
 
@@ -1065,15 +1119,15 @@ def _parse_write(raw: str, post: dict, parts: int, target: int,
                    (_kin_fault(body, lang),
                     _flat_fault(body, lang),
                     _open_fault(body) if i == 1 else "",
+                    _hard_fault(body, lang) if i == 1 else "",
                     _ending_fault(body, final=i == len(chunks), markup=False,
                                   lang=lang))
                    if f]
         n = _words(body)
-        if not _fits(n + TITLE_WORDS, target):
+        if not _fits(n, target):
             faults.append(f"{label}it is {n} words, rewrite to about "
-                          f"{target - TITLE_WORDS} - "
-                          + ("cut it down" if n + TITLE_WORDS > target
-                             else "expand it"))
+                          f"{target} - "
+                          + ("cut it down" if n > target else "expand it"))
         out.append(body)
     return (gender or guess_gender(post), out), faults
 
@@ -1410,7 +1464,7 @@ def write_script(post: dict, parts: int = 1) -> tuple:
     if parts > 1:
         system += MULTI[lang].format(n=parts)
     ask = (f"{'Each part' if parts > 1 else 'The'} narration must be about "
-           f"{target - TITLE_WORDS} words. With the title read over it that is "
+           f"{target} words, which is "
            f"{sec + CTA_SEC} seconds of speech, the last {CTA_SEC} of "
            "them the closing question"
            + (", which only the final part has.\n\n" if parts > 1 else ".\n\n")
@@ -1732,6 +1786,11 @@ if __name__ == "__main__":
                            "стол. «Или кот, или я».")
     assert _open_fault("Мы с парнем вместе десять месяцев. Он живёт с "
                        "родителями и каждый вечер проводит у меня.")
+    assert _hard_fault("Друзья устроили мне интервенцию. Потом ушли.", "ru")
+    assert not _hard_fault("Друзья позвали меня на разговор. Была интервенция.",
+                           "ru"), "past the first sentence it is not the hook"
+    assert not _hard_fault("Соседка потребовала денег за ситуацию с трубой.",
+                           "ru"), "an ordinary borrowed word must never fire"
     assert _open_fault("слово " * (OPENING_WORDS + 5) + "«поздно».")
     assert not _open_fault("слово " * (OPENING_WORDS - 5) + "«вовремя».")
 
