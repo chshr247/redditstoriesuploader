@@ -586,7 +586,11 @@ YT_MIN_GAP_HOURS = float(os.getenv("YT_MIN_GAP_HOURS", 5))
 # docstring. TikTok takes everything meanwhile, parts included, so nothing is
 # rendered that has nowhere to go. Per channel, so the English channel is not
 # switched off by the Russian one's decision.
-YT_ENABLED = chan_env("YT_ENABLED", "1").strip().lower() not in (
+#
+# The DEFAULT is off, for every channel, since 2026-09-05. It used to be "1"
+# and only the local .env said 0, so CI - which never passed the key - kept
+# uploading. Turn a channel back on with YT_ENABLED=1 (or YT_ENABLED_EN=1).
+YT_ENABLED = chan_env("YT_ENABLED", "0").strip().lower() not in (
     "0", "false", "no", "off")
 YT_PER_DAY = int(os.getenv("YT_PER_DAY", 0))
 # Pause with an expiry: ISO-8601, UTC assumed, e.g. 2026-08-12T14:00. Past that
