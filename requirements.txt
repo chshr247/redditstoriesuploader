@@ -14,3 +14,7 @@ pymorphy3==2.0.6     # склонение числительных: "после 
 # download even with a valid token, and 2026.08.19 downloads.
 yt-dlp>=2026.08.19
 yt-dlp-ejs
+# The PO token provider, PINNED: the plugin refuses a generator script whose
+# version differs from its own, and publish.yml builds that script from the
+# tag it reads out of this very line. Bump the two together or not at all.
+bgutil-ytdlp-pot-provider==1.3.2

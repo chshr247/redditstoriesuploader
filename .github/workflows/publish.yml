@@ -438,6 +438,38 @@ jobs:
       #     done
       #     find assets/ad -type f | head -20
 
+      # YouTube signs its media URLs with a challenge the extractor has to
+      # solve, and upvote.py renders a harvested story from the SOURCE
+      # recording - which out/ never carries between jobs, so every harvested
+      # render downloads its video here. yt-dlp alone answers 403 to that
+      # while the metadata listing keeps working perfectly, which is the
+      # confusing part; it needs a JS runtime and a PO token provider too.
+      # node is preinstalled on this runner and pip brings the plugin, so what
+      # is left is the generator script, built into the path the plugin looks
+      # in by default. Ordinary stories never reach any of it.
+      - name: Cache the PO token generator
+        if: steps.gate.outputs.go == 'true'
+        id: pot
+        uses: actions/cache@v4
+        with:
+          path: ~/bgutil-ytdlp-pot-provider
+          key: bgutil-${{ hashFiles('requirements.txt') }}
+
+      - name: Build the PO token generator
+        if: steps.gate.outputs.go == 'true' && steps.pot.outputs.cache-hit != 'true'
+        # The tag comes out of requirements.txt so the script and the plugin
+        # cannot drift apart: a mismatched version is refused, and the refusal
+        # reads as an ordinary 403 further down.
+        run: |
+          tag=$(sed -n 's/^bgutil-ytdlp-pot-provider==//p' requirements.txt)
+          git clone -q --depth 1 --branch "$tag" \
+            https://github.com/Brainicism/bgutil-ytdlp-pot-provider \
+            ~/bgutil-ytdlp-pot-provider
+          cd ~/bgutil-ytdlp-pot-provider/server
+          npm install --no-audit --no-fund --silent
+          npx tsc
+          test -f build/generate_once.js
+
       - name: Install dependencies
         if: steps.gate.outputs.go == 'true'
         run: pip install -q -r requirements.txt
