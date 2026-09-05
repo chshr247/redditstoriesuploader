@@ -49,6 +49,7 @@ import time
 
 import script
 import source
+import upvote
 from config import (PART_SEC, OUTPUT_LANG, REVIEW_BATCH, REVIEW_TAKES, REVIEW_TZ_H,
                     chan_file)
 
@@ -556,8 +557,14 @@ def _stage(r: dict, timeout: bool) -> str:
     parts is nine links, and nobody picks from nine. Turned off - REVIEW_TAKES
     of 0 or 1 - every row goes straight to "render", which is what every row
     did before this existed.
+
+    A story that arrived with its own recording skips the stage outright: the
+    readings exist to choose between performances of a text nobody has spoken
+    yet, and this one was harvested BECAUSE somebody already spoke it. Three
+    synthesized takes of it would be three readings of a story that ships in
+    none of them - see upvote.py, and main._render's body_mp3.
     """
-    if REVIEW_TAKES <= 1 or len(r["written"]) > 1:
+    if REVIEW_TAKES <= 1 or len(r["written"]) > 1 or upvote.heard(r["post_id"]):
         return "render"
     if not r["takes"]:
         return "offer"

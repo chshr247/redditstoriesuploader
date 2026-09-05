@@ -35,10 +35,11 @@ import render
 import review
 import script
 import source
+import upvote
 import voice
-from config import (CHANNEL, LOUD_AT, MIN_SEC, OUT_DIR, REVIEW_BATCH,
-                    REVIEW_TAKES, STOP_REASON, STOPPED, TIKTOK_ENABLED,
-                    TIKTOK_PER_DAY, chan_file, chan_key)
+from config import (CHANNEL, LOUD_AT, MIN_SEC, OUT_DIR, PART_SEC,
+                    REVIEW_BATCH, REVIEW_TAKES, STOP_REASON, STOPPED,
+                    TIKTOK_ENABLED, TIKTOK_PER_DAY, chan_file, chan_key)
 
 log = logging.getLogger("main")
 
@@ -61,9 +62,12 @@ def _render(title: str, body: str, gender: str, key: str, sub: str,
     # that voice's own pace instead of the -15% asked for. Measured 2026-08-18:
     # 173 wpm re-voiced to 124, a 29% drop from a 15% request.
     fish_voice = fish_voice or voice.pick_voice(gender, sub)
+    # A harvested story's audio is the whole reading, question and all, while
+    # a take picked off an issue stops before the closing question. The key
+    # says which this is - upvote ids and no others start "yt_".
     mp3, words, title_end, title_words = voice.speak_parts(
         title, body, name, gender=gender, fish_voice=fish_voice,
-        body_mp3=body_mp3)
+        body_mp3=body_mp3, whole=upvote.heard(key))
 
     # Word counts only approximate duration - the voice paced 167-214 wpm across
     # runs. Cheaper to re-synthesize slower than to ask the model for more words.
@@ -123,6 +127,50 @@ def write_and_park(post: dict, n: int = 1) -> None:
                  post["id"])
     review.park(post, gender, written, critic)
     source.mark_used(post["id"], post["score"], post["sub"])
+
+
+def park_heard(s: dict, n: int) -> bool:
+    """Park a harvested story: the text is the tape's, and nothing rewrites it.
+
+    No LLM call, which is the point twice over - it is a story somebody has
+    already read aloud, so there is nothing to write, and the recording only
+    stays usable while the words are the ones on it. The user is asked for a
+    title exactly as for any other story; a title is all there is to decide
+    here, because the narration is already read.
+
+    The gender is not known and is not on the tape either. It tints the
+    subtitles (render.NARRATOR_COLOURS) and picks the fallback narrator if the
+    text is ever rewritten - and an unknown gender keeps the captions white,
+    which is the honest answer for a voice this pipeline did not cast.
+    """
+    written = upvote.split_parts(s["id"], n)
+    if len(written) < n:
+        # The recording is as long as it is - a part fewer is not a shorter
+        # video here, it is one video of everything, and PART_SEC is the
+        # length this channel publishes at. So the story is burned rather
+        # than shipped at three times that: the model marked nowhere in it
+        # the story turns, and a cut anywhere else is a cut mid-scene.
+        log.warning("heard: %s wants %d parts and breaks into %d - dropping it",
+                    s["id"], n, len(written))
+        upvote.mark_used(s["id"])
+        return False
+    if fault := upvote.too_long(s["id"]):
+        # The count fitted and the cut did not: the turns in this story are
+        # spaced too unevenly for its parts to come out level, and one of them
+        # is longer than a video may be. Nothing downstream trims it, so it is
+        # dropped here rather than refused by the platform after the render.
+        log.warning("heard: %s - %s. Dropping it.", s["id"], fault)
+        upvote.mark_used(s["id"])
+        return False
+    log.info("heard: r/%s [%d views] %d part(s): %s", s["subreddit"],
+             s["score"], len(written), s["title"][:60])
+    review.park({"id": s["id"], "sub": s["subreddit"], "score": s["score"],
+                 "text": s["selftext"]}, "", written)
+    # Marked here and not at the render, for write_and_park()'s reason: the
+    # text is safer in sqlite than the story is loose in the queue, where the
+    # next run would park it a second time while the first is still out.
+    upvote.mark_used(s["id"])
+    return True
 
 
 def offer_takes(r: dict) -> None:
@@ -188,6 +236,12 @@ def make_reviewed(r: dict) -> Path:
     # rewritten by hand into it, and a rewrite may have merged three parts into
     # two - so the count comes from here and not from what the model wrote.
     written = r["written"]
+    # Before either branch: a harvested story keeps its recording only while
+    # the text still says what the tape says. A narration retyped in the
+    # comment is a different set of words, and confirm() drops the clip so the
+    # rewrite is read aloud instead of being subtitled over somebody saying
+    # something else.
+    upvote.confirm(post["id"], written)
     if len(written) > 1:
         source.queue_parts(post, written, r["gender"], fish_voice,
                            issue=r["issue"])
@@ -197,8 +251,13 @@ def make_reviewed(r: dict) -> Path:
         # post is out of reach by then - seen.db keeps it per story, not per
         # rendered mp4. The issue travels the same way and for the same reason:
         # publish.py puts the caption back into the issue the title came from.
+        # The chosen take first, the recording second, and for a harvested
+        # story there is no take to choose - review._stage() sends those
+        # straight to the render, because a reading was never synthesized for
+        # a story that arrived with one.
         out = _render(written[0][0], written[0][1], r["gender"], post["id"],
-                      post["sub"], fish_voice=fish_voice, body_mp3=_chosen(r),
+                      post["sub"], fish_voice=fish_voice,
+                      body_mp3=_chosen(r) or upvote.narration(post["id"]),
                       meta={"score": post["score"], "issue": r["issue"]})
         review.drop_takes(post["id"], REVIEW_TAKES)
     # Last, so a render that dies leaves the answer on the row for a retry.
@@ -215,8 +274,12 @@ def make_part(p: dict) -> Path:
         # a part that is already on disk costs a TTS call for nothing.
         log.info("%s already rendered, reusing it", out.name)
         return out
+    # `key` is the whole of what a part carries - the parts table stores text
+    # and no audio - and it is enough: upvote.py recorded which stretch of
+    # which recording this part is when the story was parked. None for every
+    # ordinary story, which is the ordinary path.
     return _render(p["title"], p["body"], p["gender"], key, p["sub"],
-                   fish_voice=p["voice"],
+                   fish_voice=p["voice"], body_mp3=upvote.narration(key),
                    meta={"post_id": p["post_id"], "part": p["n"],
                          "total": p["total"], "issue": p["issue"]})
 
@@ -281,6 +344,42 @@ def _park_one(part: dict | None, may_split: bool) -> tuple[bool, int, int]:
     # The day's reserved slot comes first: one hand-picked story a day (see
     # config.DAILY_FILE), and when it has had its slot - or the list is spent
     # - next_daily() returns None and the pool fills this slot as before.
+    # How many videos a harvested story is, decided here rather than in the
+    # branch below, because a story with nowhere to put its parts has to fall
+    # THROUGH to the pool: its text is fixed, so telling it in one part is not
+    # a shorter video, it is the whole recording in one - past PART_SEC and
+    # past what TikTok accepts. It keeps its place in the queue and waits for
+    # a day with room, and the pool takes this slot meanwhile.
+    heard = upvote.next_story()
+    heard_parts = upvote.want_parts(heard) if heard else 0
+    # Two different answers, and telling them apart is the whole point of this
+    # block. A story with no room TODAY waits for a day that has some. A story
+    # with more parts than a day can EVER hold waits for ever - and since
+    # next_story() hands back one story at a time, the top one, it would sit
+    # at the head of the queue blocking every harvested story behind it, in
+    # silence. So that one is burned.
+    #
+    # The ceiling is the smallest of three, because all three have to give:
+    # how many parts a story may be told in at all, how many videos TikTok
+    # takes in a day, and how many the batch will ask for. A recording cannot
+    # be told shorter to fit - see upvote.want_parts - so this is a refusal
+    # and not a squeeze.
+    most = min(upvote.PARTS, TIKTOK_PER_DAY, REVIEW_BATCH)
+    if heard_parts > most:
+        log.warning("heard: %s is %d minutes, %d parts of %ds - more than the "
+                    "%d a day can hold (parts %d, tiktok %d, batch %d), and no "
+                    "day will be different. Dropping it.", heard["id"],
+                    round((heard["end"] - heard["start"]) / 60), heard_parts,
+                    upvote.PART_MAX, most, upvote.PARTS, TIKTOK_PER_DAY,
+                    REVIEW_BATCH)
+        upvote.mark_used(heard["id"])
+        heard = None
+    elif heard_parts > 1 and (not may_split or _room() < heard_parts):
+        log.info("heard: %s is %d parts and today has no room for them - "
+                 "it waits, an ordinary story this run", heard["id"],
+                 heard_parts)
+        heard = None
+
     # most posts get rejected as unsuitable, so pull a pool rather than one
     if daily := source.next_daily():
         log.info("daily reserve: %s", daily["id"])
@@ -293,6 +392,19 @@ def _park_one(part: dict | None, may_split: bool) -> tuple[bool, int, int]:
         log.info("horror slot: r/%s %s and %d more to fall back on",
                  horror[0]["sub"], horror[0]["id"], len(horror) - 1)
         posts = horror
+    # ...and then what was harvested by ear, ahead of the pool and behind the
+    # two reserved slots. Ahead of the pool because the audience of the channel
+    # that read it has already sat through it, which is a harder number than
+    # contested() can get out of a post nobody has told yet; behind the slots
+    # because those are one video a day each and a queue of harvested stories
+    # would starve them for as long as it lasts. It returns rather than joining
+    # `posts`: the loop below writes a script, and this story already has one.
+    elif heard:
+        try:
+            return park_heard(heard, heard_parts), 0, 0
+        except Exception:
+            log.exception("failed on harvested %s", heard["id"])
+            return False, 0, 1
     else:
         posts = source.fetch(4)
     if not posts:
@@ -602,6 +714,9 @@ if __name__ == "__main__":
         # exercise the pool path alone
         source.next_daily = lambda: None
         source.next_horror = lambda: []
+        # ...and so would the harvested queue, which reads seen.db and would
+        # make this selftest depend on what a --digest happened to bank
+        upvote.next_story = lambda: None
         make_part = lambda p: rendered.append(p) or Path("stub.mp4")  # noqa: E731
         publish.due = lambda: "only 0.4h since the last draft"
         # nothing is out for review in any of the part cases below, and asking

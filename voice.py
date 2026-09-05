@@ -193,6 +193,26 @@ def _norm(w: str) -> str:
     return re.sub(r"[^\w]", "", w).lower()
 
 
+def model(size: str = ""):
+    """The whisper model, loaded once and shared.
+
+    _align() wants it for TIMES only and `base` is enough for that. upvote.py
+    wants it for the TEXT, which is a different job with a different floor, so
+    it asks for its own size - and a size that is not the cached one gets its
+    own model rather than quietly re-pointing the shared handle.
+    """
+    global _whisper
+    if size and size != WHISPER_SIZE:
+        from faster_whisper import WhisperModel
+        log.info("loading whisper %s (first run downloads it)", size)
+        return WhisperModel(size, device="cpu", compute_type="int8")
+    if _whisper is None:
+        from faster_whisper import WhisperModel
+        log.info("loading whisper %s (first run downloads it)", WHISPER_SIZE)
+        _whisper = WhisperModel(WHISPER_SIZE, device="cpu", compute_type="int8")
+    return _whisper
+
+
 def _align(text: str, mp3_path) -> list[dict]:
     """Our words on whisper's timeline.
 
@@ -200,14 +220,8 @@ def _align(text: str, mp3_path) -> list[dict]:
     and drops punctuation. difflib anchors the parts that do match; the runs
     in between get spread evenly across the gap between anchors.
     """
-    global _whisper
-    if _whisper is None:
-        from faster_whisper import WhisperModel
-        log.info("loading whisper %s (first run downloads it)", WHISPER_SIZE)
-        _whisper = WhisperModel(WHISPER_SIZE, device="cpu", compute_type="int8")
-
-    segments, _ = _whisper.transcribe(str(mp3_path), language=OUTPUT_LANG,
-                                      word_timestamps=True)
+    segments, _ = model().transcribe(str(mp3_path), language=OUTPUT_LANG,
+                                     word_timestamps=True)
     heard = [(w.word, w.start, w.end) for s in segments for w in s.words]
     if not heard:
         raise RuntimeError(f"whisper heard nothing in {mp3_path.name}")
@@ -588,7 +602,7 @@ def speak_body(story: str, name: str, rate: str = RATE, speed: float = FISH_SPEE
 def speak_parts(title: str, body: str, name: str, gap: float = 0.0,
                 rate: str = RATE, speed: float = FISH_SPEED,
                 gender: str = "male", fish_voice: str = "",
-                body_mp3: "Path | None" = None) -> tuple:
+                body_mp3: "Path | None" = None, whole: bool = False) -> tuple:
     """Narrate the title card, the story, then the closing question - one track.
 
     Three takes rather than one, for two different reasons. The title is split
@@ -602,6 +616,9 @@ def speak_parts(title: str, body: str, name: str, gap: float = 0.0,
     to zero and the join is heard as a cut. Default is none - each part's own
     trailing decay and the full stop it ends on supply the beat.
 
+    `whole` marks `body_mp3` as covering all of `body` rather than the story
+    alone; see the note at the split below.
+
     `fish_voice` pins the narrator. Left empty it is drawn per video, which is
     what an ordinary story wants; a story split across several videos passes the
     id it was queued with, or the second half arrives in someone else's voice.
@@ -612,7 +629,17 @@ def speak_parts(title: str, body: str, name: str, gap: float = 0.0,
     """
     # one voice for the whole video - the takes must not swap narrators
     fish_voice = fish_voice or pick_voice(gender)
-    story, cta = script.split_cta(body)
+    # `whole` says the supplied recording covers every word of `body`, closing
+    # question included. That is a harvested story (upvote.py): one continuous
+    # take of somebody reading the whole post, so splitting a question off
+    # here would have the engine read it a SECOND time, in another voice,
+    # seconds after the narrator has already asked it.
+    #
+    # A take picked off an issue is the opposite case and the reason this is a
+    # flag rather than "body_mp3 is not None": that take is the story WITHOUT
+    # the closing question - see main.make_reviewed - and the question has to
+    # be synthesized here exactly as it always was.
+    story, cta = (body.strip(), "") if whole else script.split_cta(body)
     if not cta:
         # Expected for every part of a split story except the last: those end on
         # the cliffhanger and address the viewer nowhere. For an ordinary video

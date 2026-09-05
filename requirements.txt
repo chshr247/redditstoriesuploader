@@ -6,3 +6,11 @@ faster-whisper==1.2.1  # word timings for the fish backend (edge needs none)
 num2words==0.5.14    # цифры -> слова: fish читает "5" как "five"
 pillow==12.1.0       # рисует карточку-пост: ASS умеет только текст в коробке
 pymorphy3==2.0.6     # склонение числительных: "после пяти", не "после пять"
+# upvote.py: the channels' videos and their audio. yt-dlp-ejs is not
+# optional - YouTube signs its media URLs with a challenge the extractor
+# has to solve, and without the solver (plus a JS runtime: node) every
+# media request is a 403 while the metadata listing keeps working.
+# The floor is not decoration: 2026.07.04 answered 403 to every full
+# download even with a valid token, and 2026.08.19 downloads.
+yt-dlp>=2026.08.19
+yt-dlp-ejs

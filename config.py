@@ -416,7 +416,20 @@ TIKTOK_ENABLED = chan_env("TIKTOK_ENABLED", "1").strip().lower() not in (
 # automatically, so the ceiling is not about flooding a feed - it is how many
 # stories a day the pipeline is allowed to spend. Runs where only this is due
 # produce a TikTok-only video; YouTube keeps its own, slower allowance.
-TIKTOK_PER_DAY = int(os.getenv("TIKTOK_PER_DAY", 4))
+#
+# Five since 2026-09-06, and the honest reason is headroom rather than a
+# measurement. It was raised for a 38-minute harvested story that turned out
+# not to exist: the model had lumped one BestofRedditorUpdates post together
+# with four of its updates, and once its prompt was fixed the same video came
+# back as ten separate accounts, the longest of them 9 minutes. Everything
+# measured on these channels fits in four.
+#
+# What is true whatever the number is: a harvested story cannot be rewritten
+# shorter, and a split story has to publish inside one day - see main._room(),
+# a part landing the next morning is a different video to everyone who saw the
+# one before it. So the day's allowance IS the ceiling on how long a harvested
+# story may be, at upvote.PART_MAX each. Four is 32 minutes, five is 40.
+TIKTOK_PER_DAY = int(os.getenv("TIKTOK_PER_DAY", 5))
 # How big the morning batch is, counted in VIDEOS and not in questions. One
 # story at a time was a question every three hours all day, each arriving
 # minutes before its video was due, so an unanswered one held the whole
