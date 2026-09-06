@@ -64,9 +64,10 @@ def _render(title: str, body: str, gender: str, key: str, sub: str,
     # A harvested story's audio is the whole reading, question and all, while
     # a take picked off an issue stops before the closing question. The key
     # says which this is - upvote ids and no others start "yt_".
+    harvested = upvote.heard(key)
     mp3, words, title_end, title_words = voice.speak_parts(
         title, body, name, gender=gender, fish_voice=fish_voice,
-        body_mp3=body_mp3, whole=upvote.heard(key))
+        body_mp3=body_mp3, whole=harvested)
 
     # Word counts only approximate duration - the voice paced 167-214 wpm across
     # runs. Cheaper to re-synthesize slower than to ask the model for more words.
@@ -95,8 +96,11 @@ def _render(title: str, body: str, gender: str, key: str, sub: str,
     # The part number goes in for the card's "Часть N" line, and is read out of
     # the same meta that publish.py captions from - one source, so the card and
     # the caption can never disagree about which part this is.
+    # No music bed under a harvested reading: that mp3 arrives with the source
+    # channel's own track already in it, and ours would be the second one.
     out = render.render(mp3, words, name, title=title, title_end=title_end,
                         key=key, title_words=title_words, sub=sub, gender=gender,
+                        bed=not harvested,
                         part=(meta or {}).get("part", 0)
                         if (meta or {}).get("total", 0) > 1 else 0)
     # publishing runs separately and later, so the text has to survive on disk.

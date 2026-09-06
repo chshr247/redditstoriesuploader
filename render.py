@@ -617,7 +617,7 @@ def _card_chain(idx: int, cards: list[tuple[float, float, Path]],
 def render(mp3, words: list[dict], name: str, bg=None,
            title: str = "", title_end: float = 0, key: str = "",
            title_words: list[dict] | None = None, ad=None, part: int = 0,
-           sub: str = "", gender: str = ""):
+           sub: str = "", gender: str = "", bed: bool = True):
     """Burn subtitles over a background clip and mux the narration.
 
     `key` identifies the STORY rather than the file: out/<id>_en.mp4 and
@@ -626,6 +626,12 @@ def render(mp3, words: list[dict], name: str, bg=None,
 
     `sub` is the subreddit, and it reaches exactly one decision: which music
     folder the bed comes from. A story with no sub gets the ordinary one.
+
+    `bed` is False for a story whose mp3 already carries music of its own - a
+    harvested reading off YouTube, which arrives with the original creator's
+    bed baked in. Laying ours over theirs gives two tracks fighting under one
+    voice. The caller decides, because the caller is the one that knows where
+    the audio came from: main.py already asks upvote.heard(key) for it.
 
     `part` is which video of a split story this is, 0 for an ordinary one. It
     reaches the title card and nothing else.
@@ -639,22 +645,28 @@ def render(mp3, words: list[dict], name: str, bg=None,
     cards = (card.build(title_words or [], title, title_end, name, part)
              if title and title_end > 0 else [])
 
-    scores = _motion(bg)
-    bg_dur = _dur(bg)
-    seek = _seek(bg_dur, dur, bg.name, scores)
-    cut = _cut(bg_dur, dur, title_end, bg.name, scores, seek)
+    # Every video opens on the first frame of its clip. The head is no longer
+    # off limits, nothing is drawn, and -stream_loop below covers a narration
+    # longer than the footage by starting the clip over.
+    #
+    # ponytail: this leaves _motion(), _live(), _seek() and _cut() with no
+    # caller. They are kept whole, and their self-tests with them, because the
+    # only thing standing between here and a live-second draw again is these
+    # two values - put back `scores = _motion(bg)`, `bg_dur = _dur(bg)` and the
+    # two calls that used them.
+    seek, cut = 0.0, None
 
     # 720p sources get upscaled ~2.7x to cover 1080 wide, so lanczos over the
     # default bilinear is a visible win for one flag. setsar guards against
-    # clips with non-square pixels. Every background is mirrored; hflip sits
-    # before subtitles so the footage flips and the burnt-in subtitles do not.
-    # Whatever writing the SOURCE carries does flip - a creator watermark comes
-    # out backwards, which is the one thing that makes the mirroring obvious.
+    # clips with non-square pixels. The footage is NOT mirrored: hflip was here
+    # to make one clip serve twice without reading as the same shot, and it
+    # flipped whatever writing the source carried - a creator watermark came
+    # out backwards, which was the one thing that made the mirroring obvious.
     # See DOCS.ru.md.
     # fps is pinned per branch rather than left to -r: concat below refuses to
     # join streams that disagree about it, and with one branch it costs nothing.
     chain = (f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
-             f"crop={W}:{H},setsar=1,hflip,fps={FPS}")
+             f"crop={W}:{H},setsar=1,fps={FPS}")
     # the banner goes on last, over the burnt-in subtitles and over the title
     # card, so whatever it was paid for is never half-covered by either
     last = "base" if ad else "v"
@@ -706,7 +718,7 @@ def render(mp3, words: list[dict], name: str, bg=None,
         spoken, audio = "[said]", "[said]"
         aidx += 1
 
-    music = _pick_music(key, sub)
+    music = _pick_music(key, sub) if bed else None
     music_in = []
     if music:
         # -stream_loop, because a 90 second bed under a 2 minute horror story
