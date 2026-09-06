@@ -11,6 +11,7 @@ as overlays. That is the only place a frame is built outside ffmpeg.
 import hashlib
 import json
 import logging
+import os
 import random
 import re
 import statistics
@@ -30,6 +31,24 @@ FONT_SIZE = 110
 POP_MS = 120               # scale-up duration of a word appearing
 HOLD_MAX = 0.18            # how long a card may outlive its own audio
 SKIP_HEAD = 30.0           # seconds of every background clip that are off limits
+
+# --- encoder ceiling ---
+# TikTok re-encodes everything, so the job here is to hand its encoder a clean
+# source rather than a big one. crf 18 under a 12 Mbit/s cap is the band its
+# web uploader transcodes most gently; above the cap the extra bits never reach
+# a viewer, and x264 spends render time making them anyway.
+#
+# This ceiling is five times the old one, and the old one was not timidity: on
+# 2026-08-03 a 1.4 min render at 7.1 Mbit/s came to 72 MB, and over a 0.75
+# Mbit/s uplink that is thirteen minutes of upload which did not survive them -
+# the only file that got through was the smallest. High-motion footage at crf
+# 18 will sit near the cap, so budget roughly 1.5 MB per second of video and
+# expect uploads to take proportionally longer.
+# If renders stop reaching TikTok, VIDEO_MAXRATE=2500k and VIDEO_CRF=26 restore
+# exactly what shipped before, no code change and no redeploy.
+CRF = os.getenv("VIDEO_CRF", "18")
+MAXRATE = os.getenv("VIDEO_MAXRATE", "12M")
+BUFSIZE = os.getenv("VIDEO_BUFSIZE", "24M")     # 2x maxrate, x264's usual pairing
 PROBE_FPS = 4              # frames sampled per second when mapping a clip's motion
 HOOK_WINDOW = 3            # seconds a seek is judged on: the hook, and nothing after it
 MOTION_DIR = BG_DIR / ".motion"   # one json per clip, next to the footage it describes
@@ -698,22 +717,22 @@ def render(mp3, words: list[dict], name: str, bg=None,
         *music_in,
         "-filter_complex", video,
         "-map", "[v]", "-map", audio, "-t", f"{dur:.3f}", "-r", str(FPS),
-        # The ceiling is the point, not the CRF. crf 23 alone let high-motion
-        # backgrounds run to 7.1 Mbit/s - a 1.4 min video came out 72 MB - and
-        # the upload is the constraint here: measured 2026-08-03 over a slow
-        # link at 0.75 Mbit/s, 72 MB is thirteen minutes on one connection and
-        # it did not survive them; the only file that got through was the
-        # smallest.
-        # maxrate/bufsize cap the peak without touching resolution - 1080x1920
-        # is kept whole - and bring the same clip to 26.9 MB, five minutes.
-        # TikTok re-encodes everything anyway, so the bits above this ceiling
-        # were never going to reach a viewer.
-        # preset medium rather than veryfast because at a CAPPED bitrate the
-        # preset is what buys quality: same 26.9 MB, SSIM 0.965 against 0.955,
-        # for about 30 seconds more per render.
-        "-c:v", "libx264", "-preset", "medium", "-crf", "26",
-        "-maxrate", "2500k", "-bufsize", "5000k",
-        "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p",
+        # The ceiling is the point, not the CRF - see CRF/MAXRATE above for why
+        # this one is where it is, and how to put it back if the upload cannot
+        # carry it.
+        # preset slow rather than veryfast because at a CAPPED bitrate the
+        # preset is what buys quality: at the old 2500k ceiling medium held
+        # SSIM 0.965 against veryfast's 0.955 for about 30 seconds per render,
+        # and slow is the next step up the same curve.
+        # profile/level and faststart are TikTok's own upload spec: high@4.2,
+        # yuv420p, moov atom in front. A file that already matches it gives
+        # their encoder nothing to "fix" on the way in, and faststart is what
+        # lets the web uploader read the header before the last byte lands.
+        "-c:v", "libx264", "-preset", "slow", "-crf", CRF,
+        "-profile:v", "high", "-level", "4.2",
+        "-maxrate", MAXRATE, "-bufsize", BUFSIZE,
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
         str(out.name),
     ]
     # run inside OUT_DIR: the subtitles filter chokes on Windows drive colons
