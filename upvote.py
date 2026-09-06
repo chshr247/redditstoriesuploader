@@ -130,6 +130,20 @@ MAX_SEGMENTS = int(os.getenv("UPVOTE_MAX_SEGMENTS", 2200))
 # sixth part is a part that cannot go out. Raising PARTS without raising
 # config.TIKTOK_PER_DAY buys nothing at all.
 PART_MAX = int(os.getenv("UPVOTE_PART_SEC", 480))
+# ...and the ceiling on a WHOLE story, past which it is not published at all.
+#
+# It exists because a post and its updates are one story now (see the split
+# prompt), and a chain can run to the length of the video: wEgnl93S-bw is a
+# man, his wife's affair, and updates 2 through 11 - 73 minutes end to end,
+# ten parts, which is two days of the channel spent on one account. Half an
+# hour is the most a single story may take, and a longer one is skipped
+# whole rather than published in a size nobody asked for or hacked back into
+# pieces that each open on "thanks for the advice".
+#
+# Enforced in code and deliberately NOT told to the model: asked to keep a
+# story under a length, it would go back to answering one long chain as
+# several stories, which is the thing the prompt just stopped it doing.
+STORY_MAX = int(os.getenv("UPVOTE_STORY_SEC", 1800))
 PARTS = int(os.getenv("UPVOTE_MAX_PARTS", 5))
 # TikTok's own limit on one video, and the last word whatever the two above
 # say. Parts are cut on the model's turns rather than on a stopwatch, so an
@@ -690,6 +704,13 @@ def _parse_split(raw: str, segs: list[dict]) -> tuple[list[dict], list[str]]:
             log.info("story %d is %.0fs, under the %ds floor - dropping it",
                      k, sec, MIN_SEC)
             continue
+        if sec > STORY_MAX:
+            # Dropped for the same reason and in the same way: too long to
+            # publish is as unusable as too short to, and a fault would only
+            # ask the model to lie about where the story ends.
+            log.info("story %d is %.0f min, past the %d-minute ceiling - "
+                     "dropping it", k, sec / 60, STORY_MAX // 60)
+            continue
         # Cuts are held RELATIVE to the story, because that is the only
         # numbering that survives: the story is stored on its own and its
         # segments are renumbered from zero when it is. A cut outside the
@@ -1245,6 +1266,20 @@ if __name__ == "__main__":
         ok2, f = _parse_split('[{"first":0,"last":1}]', segs)
         assert ok2 == [] and not f, (ok2, f)
         # an empty answer is a result, not a fault
+        # ...and the ceiling above it drops a story the same way. 20 segments
+        # of 10s is 200s, so the fixture is measured against a low ceiling.
+        _real_max = STORY_MAX
+        try:
+            globals()["STORY_MAX"] = 100
+            okc, f = _parse_split('[{"first":0,"last":19,"sub":"x","title":"T"}]',
+                                  segs)
+            assert okc == [] and not f, (okc, f)
+            globals()["STORY_MAX"] = 300
+            okc, f = _parse_split('[{"first":0,"last":19,"sub":"x","title":"T"}]',
+                                  segs)
+            assert len(okc) == 1 and not f, (okc, f)
+        finally:
+            globals()["STORY_MAX"] = _real_max
         assert _parse_split("[]", segs) == ([], [])
         assert _parse_split("not json at all", segs)[1], "garbage must fault"
 
