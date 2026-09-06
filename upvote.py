@@ -998,6 +998,30 @@ def _bounds(segs: list[dict], cuts: list[int], n: int) -> "list[tuple] | None":
     return out
 
 
+# What the end of a sentence looks like at the end of a whisper segment. The
+# closing quote and bracket are there because Russian punctuation puts them
+# AFTER the full stop, and a segment ending «...сказала она.» is a sentence end
+# by every reading except a naive endswith(".").
+_SENTENCE_END = re.compile(r'[.!?…]["»)\]]*\s*$')
+
+
+def _sentence_cuts(segs: list[dict]) -> list[int]:
+    """Every segment index that begins a new SENTENCE, as fallback cut points.
+
+    The model's turns are the good cuts and these are the safe ones: a story
+    whose turns are all bunched at the front used to be told in one video of
+    everything, or dropped for running past PART_CEILING. Cutting mid-scene is
+    worse than cutting on a turn and better than not publishing - and _bounds()
+    picks the one nearest the even division either way, so the fallback lands
+    on the sentence closest to the middle rather than just anywhere.
+
+    Index `c` is where a part STARTS, so it is the segment after the one that
+    ended the sentence - which is what _bounds() means by a cut.
+    """
+    return [i for i in range(1, len(segs))
+            if _SENTENCE_END.search(segs[i - 1]["text"] or "")]
+
+
 def split_parts(story_id: str, n: int = 1) -> list:
     """The story as up to `n` videos: [(title, body), ...], verbatim.
 
@@ -1017,6 +1041,13 @@ def split_parts(story_id: str, n: int = 1) -> list:
 
     for want in range(max(1, n), 0, -1):
         if bounds := _bounds(segs, cuts, want):
+            break
+        # No turn of the model's leaves parts of a usable length at this
+        # count. Fall back to sentence ends before giving up a part: a cut
+        # mid-scene costs less than the video that is never made.
+        if bounds := _bounds(segs, _sentence_cuts(segs), want):
+            log.info("%s: no usable turn for %d parts - cutting on the "
+                     "sentence nearest each division instead", story_id, want)
             break
     if want < n:
         log.info("%s: asked for %d parts, the story breaks into %d",
@@ -1281,6 +1312,16 @@ if __name__ == "__main__":
         assert _bounds(segs, [3], 2) is None
         assert _bounds(segs, [], 2) is None
         assert _bounds(segs, [4, 10, 16], 3) is None
+        # ...and where the model marked no usable turn, a sentence end serves.
+        # Every third segment closes one, so the cuts sit at 1, 4, 7...
+        _talk = [{**x, "text": x["text"] + ("." if x["i"] % 3 == 0 else "")}
+                 for x in segs]
+        assert _sentence_cuts(_talk) == [1, 4, 7, 10, 13, 16, 19]
+        assert _bounds(_talk, _sentence_cuts(_talk), 2) == [(0, 9), (10, 19)]
+        # the closing quote comes AFTER the full stop in Russian
+        assert _sentence_cuts([{"text": '- Уходи, - сказала она."'},
+                               {"text": "x"}]) == [1]
+        assert _sentence_cuts([{"text": "и тогда"}, {"text": "x"}]) == []
 
         # The half that has to survive a process boundary: which stretch of
         # which recording a part is, found again from the part's key alone.
@@ -1333,6 +1374,18 @@ if __name__ == "__main__":
         assert want_parts(_mid, PART_CEILING) == 1, "and it still fits one video"
         _long = {"start": 0.0, "end": (PART_CEILING + 60) * VOICE_SPEEDUP}
         assert want_parts(_long, PART_CEILING) == 2, "past the ceiling it does not"
+
+        # The whole fallback through split_parts: a story the model marked
+        # nowhere to cut still comes back as the two videos that were asked
+        # for, rather than as one long one.
+        with _db() as db:
+            db.execute(
+                "INSERT INTO yt_story(vid, n, sub, title, body, start, end,"
+                " views, ts, segs, cuts) VALUES ('v3',0,'x','T3','b',0,200,1,"
+                "0,?,'[]')", (json.dumps(_talk),))
+        _w = split_parts("yt_v3_0", 2)
+        assert len(_w) == 2, _w
+        assert _w[1][1].startswith("line 10"), _w[1][1][:20]
         print("upvote ok")
     elif a.harvest is not None:
         print(f"{harvest(a.harvest)} new videos")
