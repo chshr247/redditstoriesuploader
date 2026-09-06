@@ -380,6 +380,23 @@ def _channels() -> list[str]:
 # one about a runtime nobody installed.
 _JS = ["--js-runtimes", "node"] if shutil.which("node") else []
 
+# A signed-in session, for the runs that need one. A PO token answers the URL
+# challenge; it does NOT answer "Sign in to confirm you are not a bot", which
+# is what YouTube shows a datacentre IP - measured on this repo's runner
+# 2026-09-06, three downloads out of three refused in under two seconds while
+# the same videos resolved from the desk without a cookie in sight.
+#
+# Netscape cookies.txt, the only format yt-dlp reads. Empty or missing means
+# no cookie is passed at all, which is the right default: an anonymous
+# download from a residential IP works, and a cookie file is an ACCOUNT - if
+# YouTube decides the traffic is abusive, the account wearing it is the one
+# that answers for it. Treat whatever fills this like a password: it is a
+# live session, it outlives a password change, and only signing out of all
+# devices revokes it.
+_COOKIES = os.getenv("UPVOTE_COOKIES", "")
+_COOKIE_ARGS = (["--cookies", _COOKIES]
+                if _COOKIES and Path(_COOKIES).is_file() else [])
+
 
 def _ytdlp(*args: str) -> str:
     """yt-dlp, or a clear word about why it is not here.
@@ -390,8 +407,8 @@ def _ytdlp(*args: str) -> str:
     installed for the interpreter that is running this.
     """
     try:
-        r = subprocess.run([sys.executable, "-m", "yt_dlp", *_JS, *args], check=True,
-                           capture_output=True, text=True)
+        r = subprocess.run([sys.executable, "-m", "yt_dlp", *_JS, *_COOKIE_ARGS,
+                            *args], check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
         if "No module named" in (e.stderr or ""):
             raise RuntimeError("yt-dlp is not installed - pip install yt-dlp")

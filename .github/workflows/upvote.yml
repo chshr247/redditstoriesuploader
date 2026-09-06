@@ -89,6 +89,26 @@ jobs:
       - name: Install dependencies
         run: pip install -q -r requirements.txt
 
+      # A signed-in YouTube session, OPTIONAL and off until the secret exists.
+      # Without one a runner is shown "Sign in to confirm you are not a bot"
+      # and every download fails in under two seconds, PO token or not - that
+      # challenge is about the IP, not the URL signature. With one the harvest
+      # runs here instead of only on the desk.
+      #
+      # The secret holds a Netscape cookies.txt. It is an ACCOUNT and not a
+      # setting: whoever can change a workflow in this repo can read it, and
+      # a password change does not revoke it - only signing out of all devices
+      # does. No secret means no cookie file and the anonymous path, which is
+      # exactly what ran before this step existed.
+      - name: Write the YouTube cookie file
+        env:
+          COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+        run: |
+          [ -n "$COOKIES" ] || { echo "no cookie secret - downloading anonymously"; exit 0; }
+          echo "$COOKIES" > "$RUNNER_TEMP/cookies.txt"
+          chmod 600 "$RUNNER_TEMP/cookies.txt"
+          echo "UPVOTE_COOKIES=$RUNNER_TEMP/cookies.txt" >> "$GITHUB_ENV"
+
       - name: Harvest and digest
         run: |
           python upvote.py --harvest "$HARVEST"
