@@ -1027,15 +1027,27 @@ def _bounds(segs: list[dict], cuts: list[int], n: int) -> "list[tuple] | None":
     part under the floor, and the caller then asks for one part fewer: a story
     with its turns bunched at the front is a story told in two videos, not
     three, and that beats a third video eight seconds long.
+
+    EVEN IN TIME, not in segment count, and the difference is not academic.
+    Whisper cuts a segment on speech, so their lengths run from a word to a
+    sentence, and a story's segments are nowhere near uniform: on
+    N09wqiI_O4w story 1 the cut at segment 403 of 866 - 47% of the way
+    through the list - is 620 seconds into 1008, 62% of the way through the
+    tape. Divided by index that story came out 620s + 287s + 100s, which is
+    exactly the "two of four minutes and one of forty seconds" this paragraph
+    promises not to do; its first part ran 10.3 minutes, past the ten a video
+    may be, and main.park_heard burned the whole story over it (2026-09-06).
     """
     if n <= 1:
         return [(0, len(segs) - 1)]
+    span = segs[-1]["end"] - segs[0]["start"]
     picked: list[int] = []
     for k in range(1, n):
         free = [c for c in cuts if c not in picked]
         if not free:
             return None
-        picked.append(min(free, key=lambda c: abs(c - k * len(segs) / n)))
+        want = segs[0]["start"] + k * span / n
+        picked.append(min(free, key=lambda c: abs(segs[c]["start"] - want)))
     edges = [0, *sorted(picked), len(segs)]
     out = [(a, b - 1) for a, b in zip(edges, edges[1:])]
     if any(a > b or segs[b]["end"] - segs[a]["start"] < MIN_SEC
@@ -1372,6 +1384,17 @@ if __name__ == "__main__":
         assert _bounds(segs, [3], 2) is None
         assert _bounds(segs, [], 2) is None
         assert _bounds(segs, [4, 10, 16], 3) is None
+        # Even in TIME. These segments are not uniform - five of 100s then
+        # five of 20s - so the halfway SEGMENT (5) and the halfway SECOND
+        # (300s, segment 3) are different cuts, and only one of them splits
+        # the story in two. Dividing by index picks 500s + 100s.
+        _uneven = [{"i": i, "start": s0, "end": s0 + d, "text": f"line {i}"}
+                   for i, (s0, d) in enumerate(
+                       [(i * 100.0, 100.0) for i in range(5)]
+                       + [(500.0 + i * 20.0, 20.0) for i in range(5)])]
+        assert _bounds(_uneven, [3, 5], 2) == [(0, 2), (3, 9)]
+        assert _uneven[2]["end"] - _uneven[0]["start"] == 300.0
+        assert _uneven[9]["end"] - _uneven[3]["start"] == 300.0
         # ...and where the model marked no usable turn, a sentence end serves.
         # Every third segment closes one, so the cuts sit at 1, 4, 7...
         _talk = [{**x, "text": x["text"] + ("." if x["i"] % 3 == 0 else "")}
