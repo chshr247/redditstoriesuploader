@@ -38,17 +38,26 @@ SKIP_HEAD = 30.0           # seconds of every background clip that are off limit
 # web uploader transcodes most gently; above the cap the extra bits never reach
 # a viewer, and x264 spends render time making them anyway.
 #
-# This ceiling is five times the old one, and the old one was not timidity: on
-# 2026-08-03 a 1.4 min render at 7.1 Mbit/s came to 72 MB, and over a 0.75
-# Mbit/s uplink that is thirteen minutes of upload which did not survive them -
-# the only file that got through was the smallest. High-motion footage at crf
-# 18 will sit near the cap, so budget roughly 1.5 MB per second of video and
-# expect uploads to take proportionally longer.
-# If renders stop reaching TikTok, VIDEO_MAXRATE=2500k and VIDEO_CRF=26 restore
-# exactly what shipped before, no code change and no redeploy.
+# The cap was 12M for one afternoon and that was one afternoon too many. The
+# first part rendered under it - yt_N09wqiI_O4w_1_p1, 243 seconds - came out
+# 347 MB, sitting at 11.4 Mbit/s, exactly where crf 18 lands on this footage.
+# The upload is the constraint and always was: measured 2026-08-03 over this
+# uplink at 0.75 Mbit/s, 72 MB was thirteen minutes and did not survive them -
+# the only file that got through was the smallest. 347 MB there is an hour of
+# uploading against a poster that runs hourly.
+#
+# 5M is the middle the two measurements leave: roughly 150 MB for that same
+# part, twice the bitrate the channel shipped at for weeks and less than half
+# the upload of the 12M experiment. Budget ~0.6 MB per second of video.
+#
+# If renders still stop reaching TikTok, VIDEO_MAXRATE=2500k and VIDEO_CRF=26
+# restore exactly what shipped before that, no code change and no redeploy -
+# but note that publish.yml passes NONE of these three, so a repo variable
+# does nothing: they are read here, from the environment of whatever runs
+# render.py, and these defaults are the only value CI ever sees.
 CRF = os.getenv("VIDEO_CRF", "18")
-MAXRATE = os.getenv("VIDEO_MAXRATE", "12M")
-BUFSIZE = os.getenv("VIDEO_BUFSIZE", "24M")     # 2x maxrate, x264's usual pairing
+MAXRATE = os.getenv("VIDEO_MAXRATE", "5M")
+BUFSIZE = os.getenv("VIDEO_BUFSIZE", "10M")     # 2x maxrate, x264's usual pairing
 PROBE_FPS = 4              # frames sampled per second when mapping a clip's motion
 HOOK_WINDOW = 3            # seconds a seek is judged on: the hook, and nothing after it
 MOTION_DIR = BG_DIR / ".motion"   # one json per clip, next to the footage it describes
