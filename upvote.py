@@ -67,7 +67,7 @@ from pathlib import Path
 import script
 from config import (DB_PATH, LLM_BASE_URL, MIN_SEC, OPENAI_API_KEY,
                     OUT_DIR, OUTPUT_LANG, PART_SEC, SUBREDDITS,
-                    VOICE_SPEEDUP, chan_file)
+                    SUBREDDITS_HORROR, VOICE_SPEEDUP, chan_file)
 
 log = logging.getLogger("upvote")
 
@@ -158,8 +158,18 @@ PART_CEILING = 600
 # or dropped a story on a coin toss. Asked to pick from the list, the model
 # answers the question the filter is actually asking: is this the kind of
 # story this channel publishes.
-_SUBS_BLOCK = ("The list:\n" + "\n".join(f"  {x}" for x in SUBREDDITS)
-               if SUBREDDITS else
+# Both of the channel's lists, because both are its own. config.py keeps them
+# disjoint so the two Reddit pools cannot rank against each other or take each
+# other's slot - but that separation is about WHERE a story is scraped from,
+# and a recording was not scraped from anywhere. Offering only the ordinary
+# list made the model answer `none` to a story this channel does publish, and
+# the filter below then dropped it: r/Glitch_in_the_Matrix, ggwWdlCb33U #3,
+# 2026-09-07. The sub travels with the story either way, so voice.py still
+# pins the horror narrator and _pick_music still reaches for the horror bed.
+_DIGEST_SUBS = list(SUBREDDITS) + list(SUBREDDITS_HORROR)
+
+_SUBS_BLOCK = ("The list:\n" + "\n".join(f"  {x}" for x in _DIGEST_SUBS)
+               if _DIGEST_SUBS else
                "This channel publishes any subreddit, so name the one it "
                "reads like and never answer none.")
 
@@ -952,8 +962,8 @@ def digest(count: int = 1) -> int:
                 # The topic filter, and it is the sub list rather than a second
                 # opinion: whatever this channel already publishes is what its
                 # audience turned up for. An empty SUBREDDITS means no filter.
-                if SUBREDDITS and s["sub"].lower() not in {
-                        x.lower() for x in SUBREDDITS}:
+                if _DIGEST_SUBS and s["sub"].lower() not in {
+                        x.lower() for x in _DIGEST_SUBS}:
                     log.info("%s #%d is r/%s, not in this channel's subs",
                              vid, n, s["sub"] or "?")
                     continue
