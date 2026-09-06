@@ -1,15 +1,17 @@
 name: upvote harvest
 
 on:
-  schedule:
-    # Before the publishing window: refresh the catalogue and bank three
-    # source videos a day. It used to be one, on the grounds that one long
-    # reading yields several finished stories - which stopped being true
-    # when a post and its updates became ONE story (upvote.STORY_MAX): a
-    # 73-minute chain is now a single story past the half-hour ceiling and
-    # yields NOTHING, and a day whose one video was that leaves the channel
-    # on the reddit fallback. Three is the margin for those.
-    - cron: "17 4 * * *"
+  # NO SCHEDULE, on purpose. The digest cannot run here: YouTube shows a
+  # datacentre IP "sign in to confirm you are not a bot" before it returns any
+  # stream URL, so every download is refused (2026-09-06, three of three, with
+  # the PO token provider in place). A daily run that fails at the only step
+  # that matters is noise, and it also made this workflow a SECOND writer of
+  # seen.db racing the desk over a binary file - which cost more than the
+  # failures did.
+  #
+  # The harvest lives in harvest.cmd on the desk now, whose IP is not blocked.
+  # This is kept for a manual run, and would go back on a schedule the day
+  # cookies, a proxy or a self-hosted runner make CI able to download again.
   workflow_dispatch:
     inputs:
       digest:

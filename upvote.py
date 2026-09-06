@@ -1334,6 +1334,101 @@ def cache_audio() -> int:
     return len(vids)
 
 
+# ------------------------------------------------------------- shared state
+#
+# The stories live in seen.db and the recording lives in the release, and only
+# the second one travels on its own. A desk that digests and does not push the
+# database has banked stories CI will never see - which is why this is here
+# rather than in the .cmd: the push is part of the harvest, not a courtesy
+# after it.
+#
+# The merge is mechanical because the tables have one writer each. `yt` and
+# `yt_story` are written by the harvest and by nothing else; `review`,
+# `parts`, `tiktok` and the rest are written by the publishing side and by
+# nothing else. So the safe move is never "mine or theirs" over the whole
+# file - it is: take THEIR file, put MY two tables into it. A binary rebase
+# cannot do that, which is why an ordinary `git pull --rebase` on this file
+# conflicts every time (four times over on 2026-09-06, by hand).
+
+
+def _git(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
+
+
+def _harvest_rows() -> tuple:
+    """This machine's `yt` and `yt_story`, whole, read before the file moves."""
+    with _db() as db:
+        return ([c[1] for c in db.execute("pragma table_info(yt)")],
+                db.execute("SELECT * FROM yt").fetchall(),
+                [c[1] for c in db.execute("pragma table_info(yt_story)")],
+                db.execute("SELECT * FROM yt_story").fetchall())
+
+
+def _apply_harvest(state: tuple) -> int:
+    """Put those rows into whatever seen.db is on disk now. New rows only.
+
+    `used` is deliberately not overwritten on a story that is already there:
+    the publishing side owns it, and this machine's copy of it is older than
+    whatever CI has just done with the story.
+    """
+    yt_cols, yt_rows, st_cols, st_rows = state
+    with _db() as db:
+        have_yt = {r[0] for r in db.execute("SELECT id FROM yt")}
+        fresh = [r for r in yt_rows if r[0] not in have_yt]
+        db.executemany(f"INSERT INTO yt({','.join(yt_cols)}) VALUES "
+                       f"({','.join('?' * len(yt_cols))})", fresh)
+        # a video this machine has judged or digested, judged or digested here
+        db.executemany("UPDATE yt SET done=max(done, ?), keep=coalesce(?, keep)"
+                       " WHERE id=?",
+                       [(r[yt_cols.index("done")], r[yt_cols.index("keep")], r[0])
+                        for r in yt_rows if r[0] in have_yt])
+        have_st = {(r[0], r[1]) for r in db.execute("SELECT vid, n FROM yt_story")}
+        new = [r for r in st_rows if (r[0], r[1]) not in have_st]
+        db.executemany(f"INSERT INTO yt_story({','.join(st_cols)}) VALUES "
+                       f"({','.join('?' * len(st_cols))})", new)
+    return len(new)
+
+
+def push_state(tries: int = 3) -> bool:
+    """Commit this machine's harvest onto whatever CI has committed since.
+
+    Retried, because losing the race is the ORDINARY outcome and not a fault:
+    publish.yml runs twice an hour and commits seen.db most times it does, and
+    a digest takes twenty minutes. Each try re-reads their file and puts the
+    same rows into it, so a try costs nothing but the round trip.
+    """
+    for attempt in range(1, tries + 1):
+        state = _harvest_rows()
+        _git("checkout", "--", str(DB_PATH))     # this desk's drift is a cache
+        if (r := _git("fetch", "-q", "origin")).returncode:
+            log.error("fetch failed: %s", r.stderr.strip()[:200])
+            return False
+        if (r := _git("merge", "--ff-only", "origin/main")).returncode:
+            log.error("cannot fast-forward to origin/main - this checkout has "
+                      "commits of its own: %s", r.stderr.strip()[:200])
+            return False
+        n = _apply_harvest(state)
+        _git("add", str(DB_PATH))
+        if _git("diff", "--cached", "--quiet", str(DB_PATH)).returncode == 0:
+            log.info("nothing new to push")
+            return True
+        _git("commit", "-q", "-m",
+             f"state: harvest YouTube stories ({OUTPUT_LANG}) [skip ci]")
+        if _git("push").returncode == 0:
+            log.info("pushed %d new story row(s) on try %d", n, attempt)
+            return True
+        log.info("push refused - CI committed first, rebuilding onto theirs")
+        # --mixed and never --hard: this runs unattended in a working copy
+        # that may well have edits in it, and undoing OUR commit is no reason
+        # to throw those away. seen.db is put back by the checkout at the top
+        # of the next try, and the rows go in again from `state`.
+        _git("reset", "-q", "--mixed", "HEAD~1")
+    log.error("still unpushed after %d tries - run it again or merge by hand",
+              tries)
+    return False
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO,
                         format="%(levelname)s %(name)s: %(message)s")
@@ -1345,6 +1440,8 @@ if __name__ == "__main__":
     ap.add_argument("--judge", action="store_true",
                     help="judge the titles harvested but not yet judged")
     ap.add_argument("--show", action="store_true")
+    ap.add_argument("--push-state", action="store_true",
+                    help="commit this machine's harvest onto origin and push")
     ap.add_argument("--cache-audio", action="store_true",
                     help="download missing MP3s for queued stories")
     ap.add_argument("--selftest", action="store_true")
@@ -1595,6 +1692,8 @@ if __name__ == "__main__":
     elif a.judge:
         kept, dropped = judge()
         print(f"{kept} readings, {dropped} something else")
+    elif a.push_state:
+        sys.exit(0 if push_state() else 1)
     elif a.show:
         show()
     elif a.cache_audio:
