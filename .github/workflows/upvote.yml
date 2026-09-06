@@ -41,6 +41,11 @@ jobs:
       SUBREDDITS: ${{ vars.SUBREDDITS }}
       SUBREDDITS_EN: ${{ vars.SUBREDDITS_EN }}
       UPVOTE_CHANNELS: ${{ vars.UPVOTE_CHANNELS || 'upvotefamily:ru,tuchniyzhab:ru' }}
+      # `permissions: contents: write` above lets this job touch a release;
+      # gh still needs the token in the environment to use that right.
+      # Without it --cache-audio banks stories whose recordings never
+      # reach the renderer, which is silent until a render falls over.
+      GH_TOKEN: ${{ github.token }}
       HARVEST: ${{ vars.UPVOTE_HARVEST_LIMIT || '60' }}
       DIGEST: ${{ inputs.digest || vars.UPVOTE_DIGEST_PER_RUN || '3' }}
 

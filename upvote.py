@@ -541,10 +541,83 @@ def judge() -> tuple:
     return kept, dropped
 
 
+# Where a source recording waits between the machine that CAN download it and
+# the machine that renders from it. They are not the same machine any more:
+# YouTube answers a datacentre IP with "sign in to confirm you are not a bot"
+# before it hands over any stream URL, so a GitHub runner cannot fetch a video
+# at all - measured 2026-09-06, three downloads out of three refused in under
+# two seconds with the PO token provider built and in place, while the same
+# videos came down from the desk untouched.
+#
+# So the desk digests and puts the audio in a release; the runner renders and
+# takes it out again. A release rather than the Actions cache because the desk
+# cannot write to that cache, and rather than the repo because these are 20 MB
+# of mp3 per video that no diff should ever carry.
+#
+# ponytail: nothing prunes the release. It grows by one mp3 per digested
+# video, roughly 60 MB a day at three a day. Deleting an asset is not as
+# simple as "the stories are used" - a story is marked used the moment it is
+# PARKED, and its recording is still needed at the render hours later - so the
+# rule would have to read `review` and `parts` as well. Prune by hand until
+# that is worth writing.
+AUDIO_RELEASE = os.getenv("UPVOTE_AUDIO_RELEASE", "source-audio")
+
+
+def _gh_release(*args: str) -> subprocess.CompletedProcess:
+    """gh release, never raising: every caller here has a fallback."""
+    return subprocess.run(["gh", "release", *args], capture_output=True,
+                          text=True, encoding="utf-8", errors="replace")
+
+
+def _release_get(out: Path) -> bool:
+    """Fetch one source mp3 out of the release. False if it is not there.
+
+    False is an ordinary answer and not an error: the release is a shortcut,
+    and a machine that can download the video does not need it.
+    """
+    r = _gh_release("download", AUDIO_RELEASE, "-p", out.name,
+                    "-D", str(out.parent))
+    if r.returncode == 0 and out.exists():
+        log.info("%s: source audio came from the %s release", out.name,
+                 AUDIO_RELEASE)
+        return True
+    return False
+
+
+def _release_put(out: Path) -> None:
+    """Put one source mp3 in the release, creating the release on first use.
+
+    Never fatal. The audio is on this machine either way, and a digest that
+    banked its stories must not be thrown away over an upload - the next
+    --cache-audio picks up whatever did not make it.
+    """
+    r = _gh_release("upload", AUDIO_RELEASE, str(out), "--clobber")
+    if r.returncode:
+        _gh_release("create", AUDIO_RELEASE, "--title", "source audio",
+                    "--notes", "Recordings the harvested stories are cut from."
+                    " Uploaded by upvote.py --cache-audio; not part of a"
+                    " release in the ordinary sense.")
+        r = _gh_release("upload", AUDIO_RELEASE, str(out), "--clobber")
+    if r.returncode:
+        log.warning("%s: could not be put in the %s release - %s", out.name,
+                    AUDIO_RELEASE, r.stderr.strip()[-200:])
+    else:
+        log.info("%s: in the %s release", out.name, AUDIO_RELEASE)
+
+
+def _release_names() -> set:
+    """What the release already holds, so a run uploads only what it must."""
+    r = _gh_release("view", AUDIO_RELEASE, "--json", "assets",
+                    "-q", ".assets[].name")
+    return set(r.stdout.split()) if r.returncode == 0 else set()
+
+
 def _audio(vid: str) -> Path:
     """The video's audio, local. The only step that pulls media."""
     out = OUT_DIR / f"yt_{vid}.mp3"
-    if not out.exists():
+    # The release first, and yt-dlp only if it is not there: the release is
+    # the one source a runner can actually reach.
+    if not out.exists() and not _release_get(out):
         _ytdlp("-x", "--audio-format", "mp3", "--audio-quality", "5",
                "-o", str(OUT_DIR / f"yt_{vid}.%(ext)s"),
                f"https://www.youtube.com/watch?v={vid}")
@@ -1232,12 +1305,21 @@ def show() -> None:
 
 
 def cache_audio() -> int:
-    """Download missing source MP3s for every queued harvested story."""
+    """Every queued story's recording, local AND in the release.
+
+    Run it wherever the download works. The renderer runs somewhere else and
+    only ever reads the release, so a story whose audio never got here is a
+    story that cannot be made - which is exactly what happened to the 13
+    banked on 2026-09-06, digested on the desk and unreachable from CI.
+    """
     with _db() as db:
         vids = [r[0] for r in db.execute(
             "SELECT DISTINCT vid FROM yt_story WHERE used=0 ORDER BY vid")]
+    have = _release_names()
     for vid in vids:
-        _audio(vid)
+        got = _audio(vid)
+        if got.name not in have:
+            _release_put(got)
     return len(vids)
 
 
@@ -1494,7 +1576,11 @@ if __name__ == "__main__":
     elif a.harvest is not None:
         print(f"{harvest(a.harvest)} new videos")
     elif a.digest is not None:
+        # cache_audio() and not a second command to remember: a digest whose
+        # recordings never reached the release banks stories the renderer
+        # cannot use, and the workflow already runs the two back to back.
         print(f"{digest(a.digest)} new stories")
+        print(f"{cache_audio()} source audio files ready")
     elif a.judge:
         kept, dropped = judge()
         print(f"{kept} readings, {dropped} something else")
