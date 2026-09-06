@@ -474,20 +474,6 @@ def queued() -> int:
     return sum(len(json.loads(w)) for (w,) in rows)
 
 
-def split_parked() -> bool:
-    """True when one of the parked stories is already a multi-parter.
-
-    source.multipart_today() cannot answer this: it reads the `parts` table,
-    which is written at the RENDER, and a batch is parked hours before any of
-    it renders. Without this the whole batch would be sized for splitting on
-    the same day and the one-split-a-day rule would mean nothing.
-    """
-    with _db() as db:
-        rows = db.execute("SELECT written FROM review WHERE lang=?",
-                          (OUTPUT_LANG,)).fetchall()
-    return any(len(json.loads(w)) > 1 for (w,) in rows)
-
-
 def _rows() -> list[dict]:
     """Every story of this channel out for a title, in the order they go out.
 
@@ -1213,9 +1199,9 @@ if __name__ == "__main__":
     assert _choose([c(18, OWNER, mine)], OWNER, THREE, 0)[:2] == (mine, [])
 
     # The batch bookkeeping, on a scratch table rather than this channel's rows.
-    # split_parked() is the one with teeth: source.multipart_today() reads the
-    # `parts` table, which is empty until a render, so without this every story
-    # in a morning batch would be sized for splitting on the same day.
+    # queued() is the one with teeth: it counts the batch in SENDS, so a
+    # three-parter costs the day three of them and main._batch_room() stops
+    # asking for more.
     _real_db, _rows_of = _db, [
         ("a", 1, 100.0, "", json.dumps(ONE)),          # unanswered, one part
         ("b", 2, 200.0, "T", json.dumps(ONE)),         # settled, publishes first
@@ -1267,13 +1253,12 @@ if __name__ == "__main__":
         # three issues, but FIVE videos - the three-parter is the whole point
         # of counting the batch in sends rather than in questions
         assert queued() == 5, queued()
-        assert split_parked(), "a parked three-parter is a split in flight"
         # oldest first, because that is the order they render and the order the
         # times quoted on the issues were counted in
         assert [r["post_id"] for r in _rows()] == ["a", "b", "c"]
         assert _rows()[2]["written"] == THREE, "written comes back parsed"
         _mem.execute("DELETE FROM review WHERE post_id='c'")
-        assert not split_parked() and parked() == 2 and queued() == 2
+        assert parked() == 2 and queued() == 2
 
         # Which settled stories still owe the reader a choice of readings, and
         # answered off the table alone - review.yml asks this before it installs

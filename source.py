@@ -904,7 +904,7 @@ def daily_ids() -> list[str]:
 
 def _seen_today() -> set[str]:
     """This channel's post ids marked used today, UTC - the day's boundary the
-    rest of the scheduler already uses (see multipart_today)."""
+    rest of the scheduler already uses."""
     today = datetime.datetime.now(datetime.timezone.utc).date()
     with _db() as db:
         rows = db.execute("SELECT id, ts FROM seen WHERE lang=?",
@@ -1131,21 +1131,6 @@ def fail_part(post_id: str, n: int) -> None:
                   "story so the queue can move on", post_id, n, row[0])
 
 
-def multipart_today() -> bool:
-    """True if a story was already split today.
-
-    One a day. A feed of nothing but two-parters reads as padding, and each
-    part costs an upload slot the ordinary stories need.
-    """
-    today = datetime.datetime.now(datetime.timezone.utc).date()
-    with _db() as db:
-        rows = db.execute("SELECT ts FROM parts WHERE n=1 AND lang=?",
-                          (OUTPUT_LANG,)).fetchall()
-    return any(
-        datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).date() == today
-        for (ts,) in rows)
-
-
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -1266,7 +1251,6 @@ if __name__ == "__main__":
         queue_parts(fake, [("t1", "b1"), ("t2", "b2")], "female", "voice1")
         p = next_part()
         assert (p["n"], p["total"], p["voice"]) == (1, 2, "voice1"), p
-        assert multipart_today(), "a story queued now counts as today's"
         finish_part("_selftest", 1)
         assert next_part()["n"] == 2, "part 2 must wait for part 1"
         # three failures drop the whole story rather than block the queue

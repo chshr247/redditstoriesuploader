@@ -309,15 +309,16 @@ def _park_one(part: dict | None, may_split: bool) -> tuple[bool, int, int]:
                         REVIEW_BATCH)
             upvote.mark_used(heard["id"])
             continue
-        if heard_parts > 1 and (not may_split or _room() < heard_parts):
+        if heard_parts > 1 and not may_split:
             # A day with no room to SPLIT is not a day with no room for the
             # story. PART_MAX is this channel's preferred length; PART_CEILING
             # is what the platform actually refuses, and a recording between
             # the two is a long video rather than an impossible one. Shipping
             # it whole is strictly better than the alternative, which for
             # wEgnl93S-bw story 4 - 9.1 min, inside TikTok's 10 - was never
-            # publishing it at all: _room() is zero unless TikTok is due at
-            # that exact minute, and the batch is written once in the morning.
+            # publishing it at all. The only thing that closes may_split now is
+            # a channel that cannot publish a part, so this branch is rare -
+            # and it is still the right answer when it is reached.
             if upvote.want_parts(heard, upvote.PART_CEILING) == 1:
                 log.info("heard: %s is %d parts and today has no room for them"
                          " - shipping the whole %.1f min recording as one video",
@@ -363,14 +364,12 @@ def _park_one(part: dict | None, may_split: bool) -> tuple[bool, int, int]:
                       left)
             return False, 0, 0
         n = p["parts"]
-        # multipart_today() is deliberately NOT consulted here. It exists to
-        # stop the pool from splitting story after story; the plan already
-        # spaces its multi-parters one to a day, and re-asking would only
-        # stall the order whenever a run drifts across midnight.
-        if n > 1 and (room := _room()) < n:
-            log.warning("plan: %s is %d parts and only %d send(s) are left "
-                        "today - starting it tomorrow rather than letting "
-                        "it straddle the night", p["id"], n, room)
+        # The plan sets its own part counts and they are an ORDER, so the
+        # only thing that overrides one is a channel that cannot publish a
+        # part at all.
+        if n > 1 and not may_split:
+            log.warning("plan: %s is %d parts and this channel cannot publish "
+                        "one right now - starting it when it can", p["id"], n)
             return False, 0, 0
         log.info("plan: r/%s [%d] %d part(s): %s", p["sub"], p["score"], n,
                  p["title"][:60])
@@ -400,7 +399,7 @@ def _park_one(part: dict | None, may_split: bool) -> tuple[bool, int, int]:
 
     skipped = failed = 0
     for p in posts:
-        n = max(1, min(script.part_count(p), _room())) if may_split else 1
+        n = script.part_count(p) if may_split else 1
         log.info("r/%s [%d%s] contested %.2f, %d parts: %s", p["sub"],
                  p["score"], " LOUD" if p["score"] >= LOUD_AT else "",
                  p.get("rank", 0), n, p["title"][:60])
@@ -452,12 +451,19 @@ def top_up(part: dict | None) -> tuple[int, int, int]:
     for _ in range(REVIEW_BATCH):
         if not _batch_room():
             break
-        # One split story in flight at a time, and a parked batch counts:
-        # source.multipart_today() reads the `parts` table, which is not
-        # written until the RENDER, so on its own it would let every story in
-        # a morning batch be sized for splitting.
-        may_split = (not part and not source.multipart_today()
-                     and not review.split_parked())
+        # There used to be a one-split-a-day rule here as well. It is gone by
+        # decision: several split stories may be in flight at once, and
+        # source.next_part() orders the queue by (ts, n), so they publish one
+        # whole story at a time and in part order rather than interleaved.
+        #
+        # What is left is the two things that are not preference. A story
+        # already on air keeps the slot - its middle must not queue behind a
+        # fresh video - and a channel whose TikTok is off must not be handed a
+        # part at all: only a TikTok send clears one, so the queue would never
+        # drain and would hold every later video behind it (measured on the
+        # English channel, 2026-08-04 - four runs, four identical renders of
+        # the same part 1, nothing published).
+        may_split = not part and TIKTOK_ENABLED
         ok, s, f = _park_one(part, may_split)
         skipped, failed = skipped + s, failed + f
         if not ok:
@@ -493,10 +499,11 @@ def _batch_room() -> int:
 
     Counting those parts is deliberately stricter than TikTok is: a part is
     exempt from the daily count once it exists, so the platform would take
-    them on top of the four. The same call _room() already makes, and for the
-    same reason - it caps how much of a day one story may lay claim to, and a
-    run spent on a part publishes nothing to YouTube, which is never offered
-    one.
+    them on top of the four. Counted here anyway, and this is now the ONLY
+    place a story's parts are counted against a day: splitting itself no
+    longer asks what is left of today, so if this did not subtract them a
+    channel with a three-parter on air would still be asked for a full batch
+    on top of it.
 
     NOTE: sent_today() is TikTok's count. On a channel with TikTok off it
     is always zero and YouTube's slower allowance governs, so the batch there
@@ -504,58 +511,6 @@ def _batch_room() -> int:
     """
     return max(0, REVIEW_BATCH - publish.sent_today() - len(publish.pending())
                - review.queued() - source.parts_left())
-
-
-def _room() -> int:
-    """TikTok sends still available to this run.
-
-    Splitting is TikTok's and only TikTok's - YouTube never sees a part, see
-    youtube._split() - so this is the only allowance the decision answers to.
-
-    A split story must not straddle the night: the parts are spaced by hours,
-    and a part 2 landing the next morning is a different video to everyone who
-    saw part 1. So the whole story has to fit in what is left of today.
-
-    Zero when TikTok is not due right now, paused included. Splitting there
-    would queue a part that only publish.upload_next() can clear, so the
-    story's middle would sit in the queue behind a platform that is not
-    running - blocking every later video for as long as that lasts.
-
-    A part is exempt from TikTok's daily count once it exists, so this ceiling
-    is stricter than what the parts will actually be allowed. Deliberately: it
-    caps how much of the day one story may lay claim to, which is the question
-    being asked here.
-
-    What the batch has already claimed comes off it. Stories are parked a day
-    at a time now, and every one of them is a send this day still owes - so
-    sizing a split against the raw allowance would let a three-parter be
-    written on top of three questions already asked, six videos against four.
-
-    A video this run has already rendered comes off it for the same reason -
-    see _batch_room(), which is where that one was actually costing a slot.
-    Only reachable here with REVIEW_BATCH set above TIKTOK_PER_DAY: at the
-    default the two are equal, _batch_room() subtracts strictly more, and the
-    min below always lands on it. Cheap enough to be right in both.
-
-    The tau backend used to be refused here outright, on the grounds that only
-    a send clears a part and on tau the sender is a desk whose seen.db never
-    travels - so CI would re-render part 1 for ever. That stopped being true
-    when the handoff step arrived: publish.handoff() calls _clear_part() on the
-    runner, and CI commits seen.db, so a part is closed by the machine that
-    RENDERED it rather than by the one that sends it. The desk clearing it a
-    second time locally is a no-op nobody reads.
-
-    So splitting works on a locally-posted channel, with one condition that
-    lives outside this file: the poster has to run often enough to honour
-    PART_GAP_HOURS. An hour between a cliffhanger and its answer is the point
-    of splitting; a poster on a three-hour timer turns the second half into a
-    stranger's video. See the timer in VPS.md.
-    """
-    if publish.due():
-        return 0
-    return min(max(0, TIKTOK_PER_DAY - publish.sent_today()
-                   - len(publish.pending()) - review.queued()),
-               _batch_room())
 
 
 def main(count: int = 1, force: bool = False) -> int:
@@ -567,9 +522,9 @@ def main(count: int = 1, force: bool = False) -> int:
     part = source.next_part()
     # Splitting is TikTok's alone and only a TikTok send clears a part, so a
     # queue standing in front of a channel whose TikTok is off never drains.
-    # _room() already refuses to CREATE a split there; this is the other half -
-    # a story split before the pause, or before the channel moved off TikTok
-    # entirely. Left alone it is rendered again on every run and published on
+    # may_split already refuses to CREATE a split there; this is the other
+    # half - a story split before the pause, or before the channel moved off
+    # TikTok entirely. Left alone it is rendered again on every run and published on
     # none of them, and it holds the slot, so the channel makes nothing else.
     # Measured on the English channel, 2026-08-04: four runs, four identical
     # renders of the same part 1, no upload and no new story since.
@@ -709,7 +664,7 @@ if __name__ == "__main__":
         # GitHub about it would put a subprocess and a network call in a test
         # whose whole point is which branch runs
         review.ready, review.ok = lambda: None, lambda: ""
-        review.parked, review.split_parked = lambda: 0, lambda: False
+        review.parked = lambda: 0
         review.queued = lambda: 0
         assert main(1) == 1 and not rendered, "a part must wait for TikTok's clock"
         assert main(1, force=True) == 0 and rendered, "--force renders it anyway"
@@ -723,10 +678,8 @@ if __name__ == "__main__":
         rendered.clear()
         source.next_part = lambda: None
         written = []
-        # "text" included on purpose: part_count() reads it, and whether it is
-        # reached depends on source.multipart_today(), which reads the live
-        # seen.db. A stub without it passes or raises depending on what the
-        # channel published today, which is not something a test may depend on.
+        # "text" included on purpose: part_count() reads it to size the
+        # split, and a stub without it raises rather than answering 1.
         source.fetch = lambda *a: [{"id": "y", "sub": "s", "score": 1,
                                     "title": "t", "text": "x" * 500}]
         globals()["write_and_park"] = lambda p, n=1: written.append(p["id"])
@@ -773,28 +726,31 @@ if __name__ == "__main__":
         assert main(1) == 1 and len(written) * 3 >= REVIEW_BATCH, written
         assert len(written) < REVIEW_BATCH, "a split must cost more than one"
 
-        # The other half of the ceiling, and the one that keeps the total from
-        # overshooting it: the loop above may start a story while ONE slot is
-        # free, so what stops that story from being a three-parter is _room()
-        # coming down as the batch fills. Six sends against an allowance of
-        # four is exactly what that arithmetic is there to refuse.
-        _real_sent, _real_queued = publish.sent_today, review.queued
+        # The ceiling on the DAY, which is now the only one - splitting no
+        # longer answers to what is left of today, so _batch_room() is what
+        # stops a channel with videos still owed from being handed a fresh
+        # batch on top of them. Everything unpublished counts: what has gone
+        # out, what this run rendered, the parked questions, and the parts of
+        # a story already on air.
         try:
             publish.due, publish.sent_today = (lambda: ""), (lambda: 0)
             review.queued = lambda: 0
-            assert _room() == min(TIKTOK_PER_DAY, REVIEW_BATCH), _room()
+            assert _batch_room() == REVIEW_BATCH, _batch_room()
+            # THE ONE THAT MATTERS: two videos still queued is two questions
+            # fewer, not a fresh batch of REVIEW_BATCH on top of them.
+            review.queued = lambda: 2
+            assert _batch_room() == REVIEW_BATCH - 2, _batch_room()
+            review.queued = lambda: 0
             publish.pending = lambda: [Path("stub.mp4")]
-            assert _room() == min(TIKTOK_PER_DAY, REVIEW_BATCH) - 1, _room()
+            assert _batch_room() == REVIEW_BATCH - 1, _batch_room()
             publish.pending = lambda: []
-            review.queued = lambda: REVIEW_BATCH - 1
-            assert _room() == 1, "one slot left means no split fits"
             review.queued = lambda: REVIEW_BATCH
-            assert _room() == 0, "a full batch leaves nothing to split into"
+            assert _batch_room() == 0, "a full batch asks for nothing"
             # and what already went out today counts against it the same way
             review.queued, publish.sent_today = (lambda: 0), (lambda: REVIEW_BATCH)
-            assert _room() == 0, "a spent day leaves nothing to split into"
+            assert _batch_room() == 0, "a spent day asks for nothing"
             publish.sent_today, source.parts_left = (lambda: 0), (lambda: REVIEW_BATCH)
-            assert _room() == 0, "nor does one already split"
+            assert _batch_room() == 0, "nor does one already split"
             source.parts_left = lambda: 0
         finally:
             review.queued = lambda: vids[0]
