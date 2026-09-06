@@ -259,8 +259,16 @@ def _body(post: dict, written: list, critic=None) -> str:
     parts = "\n\n".join(
         (f"**Часть {i}.** " if len(written) > 1 else "") + body
         for i, (_, body) in enumerate(written, 1))
+    # A harvested story has no reddit post behind it - the number is the
+    # SOURCE VIDEO's view count and the id is not a post id, so the redd.it
+    # link built from it is dead. Link the recording instead, at the second
+    # the story starts, and say what the number counts.
+    head = (f"r/{post['sub']} · {post['score']} просмотров · {src}"
+            if (src := upvote.source_url(post["id"]))
+            else f"r/{post['sub']} · {post['score']} · "
+                 f"https://redd.it/{post['id']}")
     return (
-        f"r/{post['sub']} · {post['score']} · https://redd.it/{post['id']}\n\n"
+        f"{head}\n\n"
         f"**Название от модели:**\n\n`{title}`\n\n"
         + _critic(critic)
         + f"{parts}\n\n---\n"

@@ -913,6 +913,23 @@ def heard(story_id: str) -> bool:
     return bool(_KEY.fullmatch(story_id or ""))
 
 
+def source_url(story_id: str) -> str:
+    """The recording this story was cut from, at the second it starts. "" if none.
+
+    For the issue's header, which otherwise offers a redd.it link built from an
+    id that was never a reddit post - "https://redd.it/yt_wEgnl93S-bw_0", a
+    dead link on every harvested story since the first one (2026-09-06). The
+    timestamp is the point: the answer to "is this really one story" is thirty
+    seconds of listening, and this is what makes those thirty seconds one click.
+    """
+    if not (m := _KEY.fullmatch(story_id or "")):
+        return ""
+    with _db() as db:
+        row = db.execute("SELECT start FROM yt_story WHERE vid=? AND n=?",
+                         (m.group(1), int(m.group(2)))).fetchone()
+    return f"https://youtu.be/{m.group(1)}?t={int(row[0])}" if row else ""
+
+
 def _clip(vid: str, start: float, end: float, dest: Path) -> Path:
     """One stretch of a source recording, as its own mp3.
 
@@ -1354,6 +1371,10 @@ if __name__ == "__main__":
         assert split_parts("yt_v1_0", 1) == [("T", " ".join(
             f"line {i}" for i in range(20)))]
         assert narration("yt_v1_0") == ("v1", 0.0, 200.0)
+        # the issue's header links the tape, not a reddit post that never was
+        assert source_url("yt_v1_0") == "https://youtu.be/v1?t=0"
+        assert source_url("1n0abcd") == "", "an ordinary story has no tape"
+        assert source_url("yt_nosuch_0") == "", "nor has one that is not banked"
 
         # A story the caller has to defer must not hide the queue behind it -
         # main._park_one skips a multi-parter on a day with no room for it and
