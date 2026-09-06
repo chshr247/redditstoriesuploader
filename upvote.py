@@ -852,23 +852,30 @@ def digest(count: int = 1) -> int:
     return stored
 
 
-def next_story() -> dict | None:
+def next_story(skip: "set[str] | tuple" = ()) -> dict | None:
     """The best unused story, in the shape the pipeline reads a post in.
 
     `id` is deliberately the same shape source.py hands over - one string that
     identifies the story for `seen` - so nothing downstream has to know this
     one arrived by ear rather than out of the archive.
+
+    `skip` is for a story the caller cannot take RIGHT NOW but which is not
+    spent - a multi-parter on a day with no room for its parts. It stays
+    unused and comes back on a day that has the room; passing it here is how
+    the caller reaches the story behind it instead of giving up on the whole
+    queue over the one at its head.
     """
     with _db() as db:
-        row = db.execute(
+        rows = db.execute(
             "SELECT vid, n, sub, title, body, start, end, views FROM yt_story "
-            "WHERE used=0 ORDER BY views DESC, vid, n LIMIT 1").fetchone()
-    if not row:
-        return None
-    vid, n, sub, title, body, start, end, views = row
-    return {"id": f"yt_{vid}_{n}", "vid": vid, "n": n, "subreddit": sub,
-            "title": title, "selftext": body, "start": start, "end": end,
-            "score": views, "num_comments": 0, "source": "upvote"}
+            "WHERE used=0 ORDER BY views DESC, vid, n").fetchall()
+    for vid, n, sub, title, body, start, end, views in rows:
+        if (key := f"yt_{vid}_{n}") in skip:
+            continue
+        return {"id": key, "vid": vid, "n": n, "subreddit": sub,
+                "title": title, "selftext": body, "start": start, "end": end,
+                "score": views, "num_comments": 0, "source": "upvote"}
+    return None
 
 
 # ------------------------------------------------------------- the recording
@@ -1301,6 +1308,17 @@ if __name__ == "__main__":
         assert split_parts("yt_v1_0", 1) == [("T", " ".join(
             f"line {i}" for i in range(20)))]
         assert narration("yt_v1_0") == ("v1", 0.0, 200.0)
+
+        # A story the caller has to defer must not hide the queue behind it -
+        # main._park_one skips a multi-parter on a day with no room for it and
+        # asks again, so a `skip` that was ignored would hand back the same row
+        # for ever and the loop would never reach the story that DOES fit.
+        with _db() as db:
+            db.execute("INSERT INTO yt_story(vid, n, sub, title, body, start,"
+                       " end, views, ts) VALUES ('v2',0,'x','T2','b',0,60,9,0)")
+        assert next_story()["id"] == "yt_v2_0", "most views leads"
+        assert next_story({"yt_v2_0"})["id"] == "yt_v1_0", "the next one behind it"
+        assert next_story({"yt_v2_0", "yt_v1_0"}) is None, "and then nothing"
         print("upvote ok")
     elif a.harvest is not None:
         print(f"{harvest(a.harvest)} new videos")

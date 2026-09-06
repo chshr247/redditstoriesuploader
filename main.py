@@ -294,7 +294,11 @@ def _park_one(part: dict | None, may_split: bool) -> tuple[bool, int, int]:
     # burned and the next recording is tried in the same slot; one bad cut must
     # not send the day back to the old pipeline while usable recordings wait.
     most = min(upvote.PARTS, TIKTOK_PER_DAY, REVIEW_BATCH)
-    while heard := upvote.next_story():
+    # Stories this slot cannot take but that are not spent - see the multipart
+    # branch below. They stay unused for a day with room; skipping them is how
+    # the queue BEHIND them is reached.
+    deferred: set[str] = set()
+    while heard := upvote.next_story(deferred):
         heard_parts = upvote.want_parts(heard)
         if heard_parts > most:
             log.warning("heard: %s is %d minutes, %d parts of %ds - more than "
@@ -306,9 +310,15 @@ def _park_one(part: dict | None, may_split: bool) -> tuple[bool, int, int]:
             upvote.mark_used(heard["id"])
             continue
         if heard_parts > 1 and (not may_split or _room() < heard_parts):
+            # NOT a fallback: the recordings behind this one are mostly single
+            # parts and fit today perfectly well. Falling back here sent every
+            # slot of every run to reddit from the moment a two-parter reached
+            # the head of the queue (2026-09-06, wEgnl93S-bw story 4, with
+            # seven one-part stories waiting behind it).
             log.info("heard: %s is %d parts and today has no room for them - "
-                     "falling back for this slot", heard["id"], heard_parts)
-            break
+                     "leaving it for a day that has", heard["id"], heard_parts)
+            deferred.add(heard["id"])
+            continue
         try:
             if park_heard(heard, heard_parts):
                 return True, 0, 0
@@ -675,7 +685,7 @@ if __name__ == "__main__":
         source.next_daily = lambda: None
         # ...and so would the harvested queue, which reads seen.db and would
         # make this selftest depend on what a --digest happened to bank
-        upvote.next_story = lambda: None
+        upvote.next_story = lambda *a: None
         make_part = lambda p: rendered.append(p) or Path("stub.mp4")  # noqa: E731
         publish.due = lambda: "only 0.4h since the last draft"
         # nothing is out for review in any of the part cases below, and asking
