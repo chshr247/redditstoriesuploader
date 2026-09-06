@@ -18,10 +18,9 @@ once so the questions arrive together. Answering does not publish anything on
 its own - the gap between sends and the daily allowance are unchanged, and one
 video still goes out per run.
 
-Which story is next is normally source.py's decision. A channel with a plan
-file (config.PLAN_FILE, e.g. plan_ru.md) takes that decision away from it: the
-stories go out in the order written there, one at a time, and the pool is not
-touched until the plan runs out.
+Which story is next is normally upvote.py's decision. The plan file, daily
+reserve and ordinary Reddit pool remain available only when the harvested
+YouTube queue is empty or cannot supply this slot.
 """
 import json
 import logging
@@ -287,15 +286,40 @@ def make_part(p: dict) -> Path:
 def _park_one(part: dict | None, may_split: bool) -> tuple[bool, int, int]:
     """Write ONE story and hand its title to the user. (parked, skipped, failed).
 
-    Where the story comes from is unchanged and still in order: the plan file
-    while a plan is running, then the day's hand-picked reserve, then the
-    horror slot, then the pool. What changed is the caller - this used to be
-    inline in main() and ran once a run; top_up() calls it until the day's
-    batch of questions is full.
+    A harvested YouTube story always leads. The old plan, daily reserve and
+    Reddit pool are fallbacks for a dry, temporarily blocked or failed harvest.
+    top_up() calls this until the day's batch of questions is full.
     """
+    # The recording is the primary source now. Permanently unusable rows are
+    # burned and the next recording is tried in the same slot; one bad cut must
+    # not send the day back to the old pipeline while usable recordings wait.
+    most = min(upvote.PARTS, TIKTOK_PER_DAY, REVIEW_BATCH)
+    while heard := upvote.next_story():
+        heard_parts = upvote.want_parts(heard)
+        if heard_parts > most:
+            log.warning("heard: %s is %d minutes, %d parts of %ds - more than "
+                        "the %d a day can hold (parts %d, tiktok %d, batch %d), "
+                        "and no day will be different. Dropping it.", heard["id"],
+                        round((heard["end"] - heard["start"]) / 60), heard_parts,
+                        upvote.PART_MAX, most, upvote.PARTS, TIKTOK_PER_DAY,
+                        REVIEW_BATCH)
+            upvote.mark_used(heard["id"])
+            continue
+        if heard_parts > 1 and (not may_split or _room() < heard_parts):
+            log.info("heard: %s is %d parts and today has no room for them - "
+                     "falling back for this slot", heard["id"], heard_parts)
+            break
+        try:
+            if park_heard(heard, heard_parts):
+                return True, 0, 0
+            # park_heard marks an uncuttable recording used; try the next one.
+            continue
+        except Exception:
+            log.exception("failed on harvested %s - using the fallback", heard["id"])
+            break
+
     # A plan is an ORDER, so while one is running it is the only source: the
-    # pool below cannot be consulted even as a fallback, because a story taken
-    # from it publishes ahead of the next planned one and the order is gone.
+    # other fallback sources cannot be consulted while it still has rows.
     # A run with nothing to do is the cheaper failure - the plan is finite and
     # the pool is waiting at the end of it.
     if left := source.plan_left():
@@ -336,75 +360,11 @@ def _park_one(part: dict | None, may_split: bool) -> tuple[bool, int, int]:
             log.exception("failed on %s", p["id"])
             return False, 0, 1
 
-    # One band, one call. The loud story used to be read first out of a
-    # band of its own, on a slot of one a day; a year of three subs held
-    # twelve posts above that floor, so the slot was promising daily what
-    # the subs produce monthly. Loudness is a term in contested() now, and
-    # the loud story competes for the top of one list like everything else.
-    # The day's reserved slot comes first: one hand-picked story a day (see
-    # config.DAILY_FILE), and when it has had its slot - or the list is spent
-    # - next_daily() returns None and the pool fills this slot as before.
-    # How many videos a harvested story is, decided here rather than in the
-    # branch below, because a story with nowhere to put its parts has to fall
-    # THROUGH to the pool: its text is fixed, so telling it in one part is not
-    # a shorter video, it is the whole recording in one - past PART_SEC and
-    # past what TikTok accepts. It keeps its place in the queue and waits for
-    # a day with room, and the pool takes this slot meanwhile.
-    heard = upvote.next_story()
-    heard_parts = upvote.want_parts(heard) if heard else 0
-    # Two different answers, and telling them apart is the whole point of this
-    # block. A story with no room TODAY waits for a day that has some. A story
-    # with more parts than a day can EVER hold waits for ever - and since
-    # next_story() hands back one story at a time, the top one, it would sit
-    # at the head of the queue blocking every harvested story behind it, in
-    # silence. So that one is burned.
-    #
-    # The ceiling is the smallest of three, because all three have to give:
-    # how many parts a story may be told in at all, how many videos TikTok
-    # takes in a day, and how many the batch will ask for. A recording cannot
-    # be told shorter to fit - see upvote.want_parts - so this is a refusal
-    # and not a squeeze.
-    most = min(upvote.PARTS, TIKTOK_PER_DAY, REVIEW_BATCH)
-    if heard_parts > most:
-        log.warning("heard: %s is %d minutes, %d parts of %ds - more than the "
-                    "%d a day can hold (parts %d, tiktok %d, batch %d), and no "
-                    "day will be different. Dropping it.", heard["id"],
-                    round((heard["end"] - heard["start"]) / 60), heard_parts,
-                    upvote.PART_MAX, most, upvote.PARTS, TIKTOK_PER_DAY,
-                    REVIEW_BATCH)
-        upvote.mark_used(heard["id"])
-        heard = None
-    elif heard_parts > 1 and (not may_split or _room() < heard_parts):
-        log.info("heard: %s is %d parts and today has no room for them - "
-                 "it waits, an ordinary story this run", heard["id"],
-                 heard_parts)
-        heard = None
-
-    # most posts get rejected as unsuitable, so pull a pool rather than one
+    # The old sources are deliberately only the fallback. The horror slot is
+    # gone; daily reserve falls through to the ordinary Reddit pool.
     if daily := source.next_daily():
         log.info("daily reserve: %s", daily["id"])
         posts = [daily]
-    # ...and after it the horror slot, which is the same bargain again: one
-    # story a day off a pool of its own, and the rest of the day untouched.
-    # Second rather than first because the reserve is hand-picked and finite,
-    # while this one draws from subs that keep producing.
-    elif horror := source.next_horror():
-        log.info("horror slot: r/%s %s and %d more to fall back on",
-                 horror[0]["sub"], horror[0]["id"], len(horror) - 1)
-        posts = horror
-    # ...and then what was harvested by ear, ahead of the pool and behind the
-    # two reserved slots. Ahead of the pool because the audience of the channel
-    # that read it has already sat through it, which is a harder number than
-    # contested() can get out of a post nobody has told yet; behind the slots
-    # because those are one video a day each and a queue of harvested stories
-    # would starve them for as long as it lasts. It returns rather than joining
-    # `posts`: the loop below writes a script, and this story already has one.
-    elif heard:
-        try:
-            return park_heard(heard, heard_parts), 0, 0
-        except Exception:
-            log.exception("failed on harvested %s", heard["id"])
-            return False, 0, 1
     else:
         posts = source.fetch(4)
     if not posts:
@@ -709,11 +669,10 @@ if __name__ == "__main__":
         TIKTOK_ENABLED = True
         source.next_part = lambda: {"post_id": "x", "n": 2, "total": 2}
         source.fetch = lambda *a: []
-        # the reserve and the horror slot are sources of their own and would read
-        # daily_<chan>.md and the live archive; stub them off so these cases
-        # exercise the pool path alone
+        # the daily reserve is a source of its own and would read
+        # daily_<chan>.md; stub it off so these cases exercise the pool path
+        # alone. The horror slot is no longer part of main's source order.
         source.next_daily = lambda: None
-        source.next_horror = lambda: []
         # ...and so would the harvested queue, which reads seen.db and would
         # make this selftest depend on what a --digest happened to bank
         upvote.next_story = lambda: None

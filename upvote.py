@@ -1113,6 +1113,16 @@ def show() -> None:
             print(f"  {r[2]:>9} r/{r[1]:<20} {r[3]:>4.0f}s  {r[0][:50]}")
 
 
+def cache_audio() -> int:
+    """Download missing source MP3s for every queued harvested story."""
+    with _db() as db:
+        vids = [r[0] for r in db.execute(
+            "SELECT DISTINCT vid FROM yt_story WHERE used=0 ORDER BY vid")]
+    for vid in vids:
+        _audio(vid)
+    return len(vids)
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO,
                         format="%(levelname)s %(name)s: %(message)s")
@@ -1124,6 +1134,8 @@ if __name__ == "__main__":
     ap.add_argument("--judge", action="store_true",
                     help="judge the titles harvested but not yet judged")
     ap.add_argument("--show", action="store_true")
+    ap.add_argument("--cache-audio", action="store_true",
+                    help="download missing MP3s for queued stories")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
 
@@ -1299,5 +1311,7 @@ if __name__ == "__main__":
         print(f"{kept} readings, {dropped} something else")
     elif a.show:
         show()
+    elif a.cache_audio:
+        print(f"{cache_audio()} source audio files ready")
     else:
         ap.print_help()

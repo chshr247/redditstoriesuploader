@@ -372,6 +372,16 @@ jobs:
           path: assets/bg
           key: bg-${{ vars.BG_VERSION || 'v1' }}
 
+      # upvote.yml keeps the recordings that digest already downloaded. Restore
+      # them here so a render cuts locally instead of fetching YouTube again.
+      - name: Restore harvested source audio
+        if: steps.gate.outputs.go == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: out/yt_*.mp3
+          key: upvote-audio-read-${{ github.run_id }}-${{ matrix.channel }}
+          restore-keys: upvote-audio-
+
       - name: Fetch background clips
         if: steps.gate.outputs.go == 'true' && steps.bg.outputs.cache-hit != 'true'
         # through the environment, not inlined into the script: a dropbox URL

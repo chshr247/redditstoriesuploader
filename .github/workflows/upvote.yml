@@ -1,0 +1,116 @@
+name: upvote harvest
+
+on:
+  schedule:
+    # Before the publishing window: refresh the catalogue and bank one source
+    # video a day. One long reading usually yields several finished stories.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      digest:
+        description: "Source videos to transcribe"
+        type: number
+        default: 1
+
+# Both workflows write the binary seen.db; serialize them instead of resolving
+# an impossible SQLite merge after either side has already spent the work.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  harvest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    env:
+      # The default source list is Russian. A second ingestion language needs
+      # its own source list and state schema; do not infer it from CHANNELS.
+      OUTPUT_LANG: ${{ vars.UPVOTE_LANG || 'ru' }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+      LLM_MODEL: ${{ vars.LLM_MODEL }}
+      LLM_REASONING: ${{ vars.LLM_REASONING }}
+      LLM_MAX_TOKENS: ${{ vars.LLM_MAX_TOKENS }}
+      SUBREDDITS: ${{ vars.SUBREDDITS }}
+      SUBREDDITS_EN: ${{ vars.SUBREDDITS_EN }}
+      UPVOTE_CHANNELS: ${{ vars.UPVOTE_CHANNELS || 'upvotefamily:ru,tuchniyzhab:ru' }}
+      HARVEST: ${{ vars.UPVOTE_HARVEST_LIMIT || '60' }}
+      DIGEST: ${{ inputs.digest || vars.UPVOTE_DIGEST_PER_RUN || '1' }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+
+      - name: Restore source audio
+        uses: actions/cache/restore@v4
+        with:
+          path: out/yt_*.mp3
+          key: upvote-audio-${{ github.run_id }}
+          restore-keys: upvote-audio-
+
+      - name: Cache the PO token generator
+        id: pot
+        uses: actions/cache@v4
+        with:
+          path: ~/bgutil-ytdlp-pot-provider
+          key: bgutil-${{ hashFiles('requirements.txt') }}
+
+      - name: Build the PO token generator
+        if: steps.pot.outputs.cache-hit != 'true'
+        run: |
+          tag=$(sed -n 's/^bgutil-ytdlp-pot-provider==//p' requirements.txt)
+          git clone -q --depth 1 --branch "$tag" \
+            https://github.com/Brainicism/bgutil-ytdlp-pot-provider \
+            ~/bgutil-ytdlp-pot-provider
+          cd ~/bgutil-ytdlp-pot-provider/server
+          npm install --no-audit --no-fund --silent
+          npx tsc
+          test -f build/generate_once.js
+
+      - name: Install dependencies
+        run: pip install -q -r requirements.txt
+
+      - name: Harvest and digest
+        run: |
+          python upvote.py --harvest "$HARVEST"
+          python upvote.py --digest "$DIGEST"
+          python upvote.py --cache-audio
+          python upvote.py --show
+
+      - name: Save source audio
+        uses: actions/cache/save@v4
+        with:
+          path: out/yt_*.mp3
+          key: upvote-audio-${{ github.run_id }}
+
+      - name: Keep the state file
+        run: |
+          [ -n "$(git status --porcelain seen.db)" ] || { echo "unchanged"; exit 0; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add seen.db
+          git commit -m "state: harvest YouTube stories [skip ci]"
+          for _ in 1 2 3; do
+            git push && exit 0
+            git pull --rebase origin main || {
+              git rebase --abort || true
+              echo "::error::seen.db conflicts with origin/main - reconcile by hand"
+              exit 1
+            }
+          done
+          echo "::error::seen.db still unpushed after 3 tries"
+          exit 1
