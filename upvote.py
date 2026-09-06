@@ -555,11 +555,13 @@ def judge() -> tuple:
 # of mp3 per video that no diff should ever carry.
 #
 # ponytail: nothing prunes the release. It grows by one mp3 per digested
-# video, roughly 60 MB a day at three a day. Deleting an asset is not as
-# simple as "the stories are used" - a story is marked used the moment it is
-# PARKED, and its recording is still needed at the render hours later - so the
-# rule would have to read `review` and `parts` as well. Prune by hand until
-# that is worth writing.
+# video, roughly 60 MB a day at three a day. The rule is not the hard part -
+# cache_audio() already works out which recordings are still wanted, and
+# everything else could go - it is that deletion would run against WHOEVER's
+# seen.db, and this file travels between a desk and a runner that are
+# routinely hours apart. A prune off a stale copy deletes the recording of a
+# story the other machine is about to render. Prune by hand, or teach it to
+# refuse when the db is behind origin.
 AUDIO_RELEASE = os.getenv("UPVOTE_AUDIO_RELEASE", "source-audio")
 
 
@@ -1312,9 +1314,18 @@ def cache_audio() -> int:
     story that cannot be made - which is exactly what happened to the 13
     banked on 2026-09-06, digested on the desk and unreachable from CI.
     """
+    # NOT just the queued ones. A story is marked used the moment it is
+    # PARKED, and its recording is wanted hours later at the render - so
+    # `used=0` alone skips exactly the story being made right now. What is
+    # still needed is: queued, plus anything sitting in `review`, plus any
+    # part not yet published. Lang is deliberately ignored - a recording
+    # wanted by any channel is a recording that stays.
     with _db() as db:
         vids = [r[0] for r in db.execute(
-            "SELECT DISTINCT vid FROM yt_story WHERE used=0 ORDER BY vid")]
+            "SELECT DISTINCT vid FROM yt_story WHERE used=0 "
+            "UNION SELECT vid FROM yt_story WHERE 'yt_'||vid||'_'||n IN ("
+            "  SELECT post_id FROM review"
+            "  UNION SELECT post_id FROM parts WHERE done=0) ORDER BY vid")]
     have = _release_names()
     for vid in vids:
         got = _audio(vid)
