@@ -1367,12 +1367,23 @@ def _git(*args: str) -> subprocess.CompletedProcess:
 
 
 def _harvest_rows() -> tuple:
-    """This machine's `yt` and `yt_story`, whole, read before the file moves."""
-    with _db() as db:
-        return ([c[1] for c in db.execute("pragma table_info(yt)")],
-                db.execute("SELECT * FROM yt").fetchall(),
-                [c[1] for c in db.execute("pragma table_info(yt_story)")],
-                db.execute("SELECT * FROM yt_story").fetchall())
+    """This machine's `yt` and `yt_story`, whole, read before the file moves.
+
+    CLOSED explicitly, and that is the point of the try/finally rather than a
+    bare `with`: sqlite3's context manager ends the TRANSACTION and leaves the
+    handle open, and on Windows an open handle is enough to make the caller's
+    `git checkout` of this very file fail with "unable to unlink old". See
+    push_state() for what that silently cost.
+    """
+    db = _db()
+    try:
+        with db:
+            return ([c[1] for c in db.execute("pragma table_info(yt)")],
+                    db.execute("SELECT * FROM yt").fetchall(),
+                    [c[1] for c in db.execute("pragma table_info(yt_story)")],
+                    db.execute("SELECT * FROM yt_story").fetchall())
+    finally:
+        db.close()
 
 
 def _apply_harvest(state: tuple) -> int:
@@ -1410,7 +1421,18 @@ def push_state(tries: int = 3) -> bool:
     """
     for attempt in range(1, tries + 1):
         state = _harvest_rows()
-        _git("checkout", "--", str(DB_PATH))     # this desk's drift is a cache
+        # this desk's drift is a cache - CHECKED, because when this fails the
+        # run does the opposite of its job. git cannot replace a file another
+        # process holds open, and on Windows it says so with "unable to unlink
+        # old" and exit 255; unchecked, the desk then pushed its whole stale
+        # seen.db - its `review`, `parts`, `tiktok` and `uploaded` over CI's
+        # newer ones - and _apply_harvest reported 0 new rows because it was
+        # looking at our own file. Silent on 2026-09-07, harmless only because
+        # CI happened to have committed nothing in the hour.
+        if (r := _git("checkout", "--", str(DB_PATH))).returncode:
+            log.error("cannot take CI's %s back, something holds it open: %s",
+                      DB_PATH.name, r.stderr.strip()[:200])
+            return False
         if (r := _git("fetch", "-q", "origin")).returncode:
             log.error("fetch failed: %s", r.stderr.strip()[:200])
             return False
