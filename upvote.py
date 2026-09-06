@@ -116,13 +116,14 @@ MAX_SEGMENTS = int(os.getenv("UPVOTE_MAX_SEGMENTS", 2200))
 # the story's, not the channel's, and these say how much of it the channel
 # will take.
 #
-# Five parts of eight minutes is HEADROOM and not a measurement. It was set
-# for a 38-minute story that turned out to be an artefact of an earlier
-# prompt - the model had run one post together with four of its updates, and
-# answers the same video as ten separate accounts now, the longest 9 minutes.
-# Nothing harvested so far needs more than two parts. The numbers are here so
-# that a genuinely long reading is published rather than dropped; if they are
-# ever lowered, main._park_one drops what no longer fits, loudly.
+# Five parts of eight minutes is HEADROOM and it is load-bearing again. A
+# post and its updates are ONE story with cuts on the update markers (see
+# the split prompt), because an update told as its own video opens by
+# thanking an audience for advice that video never showed. That is the
+# right call for the viewer and it is what makes forty minutes reachable:
+# the wife-affair chain on wEgnl93S-bw is 29 minutes over four parts. The
+# ceiling above it is main._park_one, which drops - loudly - anything
+# needing more parts than a day of videos can hold.
 #
 # The real ceiling is the smaller of this and the DAY's allowance, and it is
 # applied in main._park_one: a split story publishes inside one day, so a
@@ -229,14 +230,21 @@ Answer with JSON only, a list of objects:
                 sections and leave a twenty-minute first act.
 
                 And do NOT answer a long story as several stories to satisfy
-                this. A new story starts ONLY where the narrator announces one
-                - an update marker ("Update 4", "Обновление", "Апдейт второй,
-                через три дня"), or a fresh greeting to the readers, or a
-                plain change of who is talking and about what. Everything
-                between two such announcements is one account by one person,
-                however many minutes it runs, and it is ONE story with cuts in
-                it. If you find yourself ending a story where the narrator
-                simply carried on talking, that is a cut, not a story.
+                this. A new story starts ONLY where a DIFFERENT person's
+                account begins - a plain change of who is talking and about
+                what. An update by the same narrator is NOT that, however
+                it is announced - "Update 4", "Обновление", "Апдейт второй,
+                через три дня", or a fresh greeting to the readers.
+                All of it is the same person still telling the same story, so
+                it is a CUT - and the best kind there is, because it is
+                exactly where the audience came back for more. Told as its
+                own story it is broken: a video that opens "thank you all for
+                the advice" for viewers who were never shown what the advice
+                was about is a video nobody can follow. So everything from
+                the first word to the last update is ONE story with cuts in
+                it, however many minutes it runs. If you find yourself ending
+                a story where the same narrator simply carried on talking,
+                that is a cut, not a story.
 
 A story shorter than %d seconds is not a story, it is a fragment - leave it
 out. If the video contains no complete story at all, answer exactly: []
