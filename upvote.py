@@ -950,8 +950,13 @@ def _row(story_id: str):
     return (vid, n, row) if row else None
 
 
-def want_parts(story: dict) -> int:
+def want_parts(story: dict, cap: int = 0) -> int:
     """Videos this story is worth, by how long its recording PLAYS for.
+
+    `cap` overrides PART_MAX, and there is exactly one caller for it:
+    main._park_one asking whether a story it cannot split today would fit in
+    ONE video at PART_CEILING - the platform's limit, where PART_MAX is only
+    this channel's preference.
 
     Plays, not runs: the track is sped up on its way out (config.VOICE_SPEEDUP,
     1.25 on the English channel), so a six-minute recording is a five-minute
@@ -964,7 +969,7 @@ def want_parts(story: dict) -> int:
     comes back and the caller refuses the story instead of squeezing it.
     """
     played = (story["end"] - story["start"]) / VOICE_SPEEDUP
-    return max(1, math.ceil(played / PART_MAX))
+    return max(1, math.ceil(played / (cap or PART_MAX)))
 
 
 def _bounds(segs: list[dict], cuts: list[int], n: int) -> "list[tuple] | None":
@@ -1319,6 +1324,15 @@ if __name__ == "__main__":
         assert next_story()["id"] == "yt_v2_0", "most views leads"
         assert next_story({"yt_v2_0"})["id"] == "yt_v1_0", "the next one behind it"
         assert next_story({"yt_v2_0", "yt_v1_0"}) is None, "and then nothing"
+
+        # ...and the other half of that branch: PART_MAX is the length this
+        # channel PREFERS, PART_CEILING is the one the platform enforces, so a
+        # recording between them is one long video rather than nothing.
+        _mid = {"start": 0.0, "end": (PART_MAX + PART_CEILING) / 2 * VOICE_SPEEDUP}
+        assert want_parts(_mid) == 2, "over PART_MAX it wants splitting"
+        assert want_parts(_mid, PART_CEILING) == 1, "and it still fits one video"
+        _long = {"start": 0.0, "end": (PART_CEILING + 60) * VOICE_SPEEDUP}
+        assert want_parts(_long, PART_CEILING) == 2, "past the ceiling it does not"
         print("upvote ok")
     elif a.harvest is not None:
         print(f"{harvest(a.harvest)} new videos")

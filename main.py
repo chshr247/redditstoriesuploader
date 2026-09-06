@@ -310,15 +310,32 @@ def _park_one(part: dict | None, may_split: bool) -> tuple[bool, int, int]:
             upvote.mark_used(heard["id"])
             continue
         if heard_parts > 1 and (not may_split or _room() < heard_parts):
-            # NOT a fallback: the recordings behind this one are mostly single
-            # parts and fit today perfectly well. Falling back here sent every
-            # slot of every run to reddit from the moment a two-parter reached
-            # the head of the queue (2026-09-06, wEgnl93S-bw story 4, with
-            # seven one-part stories waiting behind it).
-            log.info("heard: %s is %d parts and today has no room for them - "
-                     "leaving it for a day that has", heard["id"], heard_parts)
-            deferred.add(heard["id"])
-            continue
+            # A day with no room to SPLIT is not a day with no room for the
+            # story. PART_MAX is this channel's preferred length; PART_CEILING
+            # is what the platform actually refuses, and a recording between
+            # the two is a long video rather than an impossible one. Shipping
+            # it whole is strictly better than the alternative, which for
+            # wEgnl93S-bw story 4 - 9.1 min, inside TikTok's 10 - was never
+            # publishing it at all: _room() is zero unless TikTok is due at
+            # that exact minute, and the batch is written once in the morning.
+            if upvote.want_parts(heard, upvote.PART_CEILING) == 1:
+                log.info("heard: %s is %d parts and today has no room for them"
+                         " - shipping the whole %.1f min recording as one video",
+                         heard["id"], heard_parts,
+                         (heard["end"] - heard["start"]) / 60)
+                heard_parts = 1
+            else:
+                # Genuinely too long for one video. NOT a fallback: the
+                # recordings behind this one are mostly single parts and fit
+                # today perfectly well. Falling back here sent every slot of
+                # every run to reddit from the moment a two-parter reached the
+                # head of the queue (2026-09-06, wEgnl93S-bw story 4, with
+                # seven one-part stories waiting behind it).
+                log.info("heard: %s is %d parts and today has no room for "
+                         "them - leaving it for a day that has",
+                         heard["id"], heard_parts)
+                deferred.add(heard["id"])
+                continue
         try:
             if park_heard(heard, heard_parts):
                 return True, 0, 0
