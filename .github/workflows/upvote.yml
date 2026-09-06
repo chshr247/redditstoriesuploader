@@ -2,8 +2,13 @@ name: upvote harvest
 
 on:
   schedule:
-    # Before the publishing window: refresh the catalogue and bank one source
-    # video a day. One long reading usually yields several finished stories.
+    # Before the publishing window: refresh the catalogue and bank three
+    # source videos a day. It used to be one, on the grounds that one long
+    # reading yields several finished stories - which stopped being true
+    # when a post and its updates became ONE story (upvote.STORY_MAX): a
+    # 73-minute chain is now a single story past the half-hour ceiling and
+    # yields NOTHING, and a day whose one video was that leaves the channel
+    # on the reddit fallback. Three is the margin for those.
     - cron: "17 4 * * *"
   workflow_dispatch:
     inputs:
@@ -37,7 +42,7 @@ jobs:
       SUBREDDITS_EN: ${{ vars.SUBREDDITS_EN }}
       UPVOTE_CHANNELS: ${{ vars.UPVOTE_CHANNELS || 'upvotefamily:ru,tuchniyzhab:ru' }}
       HARVEST: ${{ vars.UPVOTE_HARVEST_LIMIT || '60' }}
-      DIGEST: ${{ inputs.digest || vars.UPVOTE_DIGEST_PER_RUN || '1' }}
+      DIGEST: ${{ inputs.digest || vars.UPVOTE_DIGEST_PER_RUN || '3' }}
 
     steps:
       - uses: actions/checkout@v4
