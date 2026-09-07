@@ -196,8 +196,10 @@ Reddit. The transcript is numbered by segment, each line "N [start-end] text".
 Find where each story begins and ends. Ignore the channel's own intro, outro,
 sponsor reads, and any "like and subscribe" talk - those belong to no story.
 The video opens by naming the show and the episode number ("<show name>, выпуск
-номер 27"), and may name it again between stories. That line is the CHANNEL
-speaking, not the story: the first story starts on the line after it.
+номер 27"), and hands over to every story after the first one the same way -
+"Следующая история", "И переходим к следующей истории", "И последняя на сегодня
+история". That line is the CHANNEL speaking, not the story: it belongs to no
+story, and the story starts on the words after it.
 
 A video of this length holds SEVERAL stories - commonly five to ten, one every
 two to four minutes. List every one of them. Stopping after the first story or
@@ -221,9 +223,14 @@ Answer with JSON only, a list of objects:
                 lose.
   starts      - the first three or four words of the story, copied exactly
                 from `first`'s segment. They are how the announcement is told
-                from the story when one segment holds both. Leave it "" when
-                the segment already opens with the story, which is the usual
-                case - only the first story of a video normally needs it.
+                from the story when one segment holds both, and MOST stories
+                need them: the channel hands over to the next story in the
+                same breath as its first line. Leave it "" only when the
+                segment really does open on the story's own words.
+                Those words are usually the story's title read aloud - the
+                title IS its opening line, so quote from the START of it.
+                Quoting from somewhere after it cuts the hook off the story,
+                and that is worse than leaving the announcement in.
   first, last - segment numbers, inclusive. They must not overlap between
                 stories, and must run in increasing order. `last` may never be
                 larger than the highest segment number in the transcript - if a
@@ -750,6 +757,24 @@ def _plain(word: str) -> str:
     return re.sub(r"[^\w]", "", word).lower()
 
 
+# The channel handing over between stories - "Следующая история", "И переходим
+# к следующей истории", "И последняя на сегодня история". The model is told to
+# quote past it in `starts` and does not: of 85 stories harvested up to
+# 2026-09-07 it left five announcements whole and cut two of them off one word
+# in ("к следующей истории." at the head of the story). The phrases are a
+# closed set, so they are cut here rather than asked for again.
+_INTRO = re.compile(
+    r"^\W*(?:(?:и|а|ну|итак)\W+)*(?:(?:мы\s+)?переход\w*\s+)?(?:к\s+)?"
+    r"(?:следующ|последн|очередн|перв|нов)\w*(?:\s+(?:на\s+)?сегодня)?"
+    r"\s+истори\w*(?:\s+(?:на\s+)?сегодня)?\W*", re.I)
+
+
+def _intro_words(words: list[dict]) -> int:
+    """How many words at the head of `words` are the channel's hand-over."""
+    m = _INTRO.match(" ".join(w["w"] for w in words))
+    return min(len(m.group(0).split()), len(words)) if m else 0
+
+
 def _numbered(segs: list[dict]) -> str:
     """The transcript as the model reads it, and how far it runs.
 
@@ -846,30 +871,50 @@ def _parse_split(raw: str, segs: list[dict]) -> tuple[list[dict], list[str]]:
         # it answered 5 on one run and 4 on the next, and the 4 left "27" -
         # the tail of "выпуск номер 27" - at the head of the video
         # (N09wqiI_O4w, 2026-09-06). Quoting it got right both times.
-        head, cut = dict(segs[a]), ""
-        if starts := str(it.get("starts") or "").strip():
-            words = head.get("words") or []
+        head, cut, words, at = dict(segs[a]), "", segs[a].get("words") or [], 0
+        title = str(it.get("title") or "").strip()
+        if (starts := str(it.get("starts") or "").strip()) and words:
             want = [_plain(w) for w in starts.split() if _plain(w)]
             said = [_plain(w["w"]) for w in words]
             at = next((i for i in range(1, len(said) - len(want) + 1)
                        if said[i:i + len(want)] == want), 0) if want else 0
-            if at:
-                head["start"] = words[at]["start"]
-                cut = " ".join(w["w"] for w in words[:at])
-                head["text"] = " ".join(w["w"] for w in words[at:])
-                log.info("story %d: %d word(s) of channel intro trimmed, "
-                         "it starts %.1fs in", k, at, head["start"])
-            else:
+            if at and _plain("".join(w["w"] for w in words[:at])) in _plain(title):
+                # Not the channel talking: the model quoted from inside the
+                # story's own title, which is the line it opens on. Trimming
+                # to there takes the hook off the front of the story - four
+                # times in 85 stories, "Я мудак, потому что" ahead of "не
+                # накормил младшего брата" (q81nGUspiYY, 2026-09-07).
+                log.info("story %d: %r is the story's own title, not an "
+                         "intro - not trimming", k, starts[:40])
+                at = 0
+            elif not at:
                 # Found at the head already, or not found at all - either way
-                # there is nothing to cut, and cutting on a guess would take
-                # the story's own opening words with it.
+                # there is nothing to cut on the model's word, and cutting on
+                # a guess would take the story's own opening words with it.
                 log.info("story %d: nothing to trim before %r", k, starts[:40])
+        # Whatever the model said, the hand-over is cut on its own shape - it
+        # is what the model misses most often, and it reads the same every time.
+        # Four times in five it is a segment of its own, so the whole segment
+        # goes; on a single-segment story there is nothing to fall through to.
+        at += _intro_words(words[at:]) if a < b else 0
+        if at:
+            cut = " ".join(w["w"] for w in words[:at])
+            head["text"] = " ".join(w["w"] for w in words[at:])
+            # An emptied segment is left in place, not dropped: `cuts` are
+            # indices into this list and removing one would move every cut in
+            # the story. It is given no width and the story starts on the next.
+            head["start"] = (words[at]["start"] if at < len(words)
+                             else segs[a + 1]["start"])
+            if not head["text"]:
+                head["end"] = head["start"]
+            log.info("story %d: %d word(s) of channel intro trimmed, "
+                     "it starts %.1fs in", k, at, head["start"])
         # Applied per SEGMENT and not to the joined text: the segments are
         # what is stored, and a part's body is built back out of them.
         teller = str(it.get("teller") or "").strip().lower()[:1]
         story = [{**x, "text": agreed(x["text"], teller)}
                  for x in (head, *segs[a + 1:b + 1])]
-        body = " ".join(x["text"] for x in story)
+        body = " ".join(x["text"] for x in story if x["text"])
 
         # The show's name, handed back as the story's TITLE. The model leaks
         # it on the very story it has just told us where to cut the
@@ -880,7 +925,6 @@ def _parse_split(raw: str, segs: list[dict]) -> tuple[list[dict], list[str]]:
         # else is known exactly too. The opening sentence takes its place,
         # which is what the runs that got it right answered anyway - and the
         # user retitles it on the issue either way.
-        title = str(it.get("title") or "").strip()
         if cut and _plain(title) and _plain(title) in _plain(cut):
             title = re.split(r"(?<=[.!?])\s", body.strip())[0][:90]
             log.info("story %d was titled %r, which is the channel's own show "
@@ -1229,7 +1273,7 @@ def split_parts(story_id: str, n: int = 1) -> list:
                  story_id, n, want)
 
     parts = [{"start": segs[a]["start"], "end": segs[b]["end"],
-              "body": " ".join(x["text"] for x in segs[a:b + 1])}
+              "body": " ".join(x["text"] for x in segs[a:b + 1] if x["text"])}
              for a, b in bounds]
     with _db() as db:
         db.execute("UPDATE yt_story SET parts=? WHERE vid=? AND n=?",
@@ -1677,6 +1721,55 @@ if __name__ == "__main__":
             ' "sub":"x","title":"T"}]', spoken)
         assert not f and ok5[0]["start"] == 0.0, ok5[0]
         assert ok5[0]["body"].startswith("Шоу выпуск"), ok5[0]["body"][:40]
+
+        # The hand-over between stories, which the model leaves in as often as
+        # not - cut on its own shape, with the story's start moved off it so
+        # the tape does not say it either.
+        def _spoken(first: str) -> list:
+            return [{"i": 0, "start": 0.0, "end": float(len(first.split())),
+                     "text": first,
+                     "words": [{"w": w, "start": i * 1.0, "end": i * 1.0 + 1.0}
+                               for i, w in enumerate(first.split())]},
+                    *[{"i": i, "start": 100.0 + i, "end": 101.0 + i,
+                       "text": f"line {i}", "words": []} for i in range(1, 20)]]
+
+        for said, kept, at in [
+                ("И переходим к следующей истории. Жена захотела", "Жена", 5),
+                ("Следующая история, решил выяснять", "решил", 2),
+                ("И последняя история на сегодня. Девушка шутила", "Девушка", 5),
+                ("И последняя на сегодня история. Хотите знать", "Хотите", 5),
+                ("к следующей истории. Жена захотела", "Жена", 3)]:
+            okh, f = _parse_split(
+                '[{"first":0,"last":19,"sub":"x","title":"T"}]', _spoken(said))
+            assert not f, (said, f)
+            assert okh[0]["body"].startswith(kept), (said, okh[0]["body"][:40])
+            assert okh[0]["start"] == float(at), (said, okh[0]["start"])
+        # Four hand-overs in five are a whole segment of their own. The
+        # segment stays in the list, empty, so the cuts still point where they
+        # did - and the story starts on the one after it.
+        alone = _spoken("И переходим к следующей истории.")
+        ok9, f = _parse_split(
+            '[{"first":0,"last":19,"sub":"x","title":"T"}]', alone)
+        assert not f, f
+        assert ok9[0]["body"].startswith("line 1"), ok9[0]["body"][:40]
+        assert ok9[0]["start"] == 101.0, ok9[0]["start"]     # segment 1's start
+        assert ok9[0]["segs"][0]["text"] == "", ok9[0]["segs"][0]
+        assert len(ok9[0]["segs"]) == 20, len(ok9[0]["segs"])
+        # ...and a story that opens on a word from that vocabulary is not one
+        first = _spoken("Первая работа и моя итальянская забастовка")
+        okh, _ = _parse_split('[{"first":0,"last":19,"sub":"x","title":"T"}]',
+                              first)
+        assert okh[0]["body"].startswith("Первая работа"), okh[0]["body"][:40]
+        assert okh[0]["start"] == 0.0, okh[0]
+
+        # The other way the head is lost: the model quotes `starts` from
+        # inside the story's own title, and the trim takes the hook with it.
+        aita = _spoken("Я мудак потому что не накормил младшего брата Мама")
+        ok8, f = _parse_split(
+            '[{"first":0,"last":19,"sub":"x","starts":"не накормил младшего",'
+            ' "title":"Я мудак, потому что не накормил младшего брата"}]', aita)
+        assert not f and ok8[0]["start"] == 0.0, ok8[0]
+        assert ok8[0]["body"].startswith("Я мудак потому что"), ok8[0]["body"][:40]
 
         # the storyteller's own verbs, put into the gender the model read off
         # the story - whisper hears the ending as a coin toss
