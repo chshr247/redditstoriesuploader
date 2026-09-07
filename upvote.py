@@ -1250,7 +1250,17 @@ def narration(key: str) -> "Path | None":
     """
     m = _KEY.fullmatch(key or "")
     got = _row(key) if m else None
-    if not got or not got[2][3]:
+    if not got:
+        return None
+    if not got[2][3]:
+        # Loud, because the fallback is otherwise silent: the video renders in
+        # a TTS voice under subtitles taken off the tape, and nothing in the
+        # log says the recording went unused. confirm() drops the ranges on
+        # purpose and says so on its way out; anything else that lands here is
+        # a story parked without split_parts(), and this is where it surfaces.
+        # 48 of them did on 2026-09-07, one already published in Fish's voice.
+        log.warning("%s: harvested, but the row carries no recorded split - "
+                    "reading it aloud instead of using the tape", key)
         return None
     parts = json.loads(got[2][3])
     n = int(m.group(3) or 1)
