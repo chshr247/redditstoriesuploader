@@ -116,20 +116,35 @@ MAX_SEGMENTS = int(os.getenv("UPVOTE_MAX_SEGMENTS", 2200))
 # the story's, not the channel's, and these say how much of it the channel
 # will take.
 #
-# Five parts of eight minutes is HEADROOM and it is load-bearing again. A
-# post and its updates are ONE story with cuts on the update markers (see
-# the split prompt), because an update told as its own video opens by
-# thanking an audience for advice that video never showed. That is the
-# right call for the viewer and it is what makes forty minutes reachable:
-# the wife-affair chain on wEgnl93S-bw is 29 minutes over four parts. The
-# ceiling above it is main._park_one, which drops - loudly - anything
-# needing more parts than a day of videos can hold.
+# Five parts is HEADROOM and it is load-bearing. A post and its updates are
+# ONE story with cuts on the update markers (see the split prompt), because
+# an update told as its own video opens by thanking an audience for advice
+# that video never showed. That is the right call for the viewer and it is
+# what makes half an hour reachable: the wife-affair chain on wEgnl93S-bw is
+# 29 minutes. The ceiling above it is main._park_one, which drops - loudly -
+# anything needing more parts than a day of videos can hold.
 #
 # The real ceiling is the smaller of this and the DAY's allowance, and it is
 # applied in main._park_one: a split story publishes inside one day, so a
 # sixth part is a part that cannot go out. Raising PARTS without raising
 # config.TIKTOK_PER_DAY buys nothing at all.
-PART_MAX = int(os.getenv("UPVOTE_PART_SEC", 480))
+#
+# The length itself was 480 until 2026-09-07, chosen against the platform's
+# ten-minute limit rather than against anybody watching. An eight-minute part
+# is a duration a viewer reads off the scrubber in the first seconds and
+# leaves on, and at 480 most of the queue went out as ONE video - eighteen of
+# twenty-four unused stories, the longest of them ten minutes. 270 puts the
+# longest part in that queue at 4:24 instead of 8, costs four extra renders
+# across the whole queue, and drops nothing: the queue's two longest stories
+# (14.9 min) come to four parts, which is what a day holds.
+#
+# What it DOES narrow is the far end. The most a story may run is this times
+# main._park_one's `most`, which is 4 on the workflow's TIKTOK_PER_DAY - so
+# the effective ceiling is 18 minutes, not the 30 STORY_MAX still allows, and
+# a chain between the two is now dropped where 480 would have taken it.
+# Nothing in the queue is there yet. If the log starts naming such stories,
+# this is the number that let them in, not STORY_MAX.
+PART_MAX = int(os.getenv("UPVOTE_PART_SEC", 270))
 # ...and the ceiling on a WHOLE story, past which it is not published at all.
 #
 # It exists because a post and its updates are one story now (see the split
