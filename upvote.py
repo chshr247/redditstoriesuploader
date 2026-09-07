@@ -1548,7 +1548,19 @@ def _apply_desk(state: dict) -> int:
             recut = []
             if st_rows:
                 i_body, i_segs = st_cols.index("body"), st_cols.index("segs")
+                # ...and never under a story that is MID-FLIGHT. Its part 1 is
+                # already out and cut from the ranges in this row; moving them
+                # now means part 2 does not continue where part 1 stopped, or -
+                # if the count changed - confirm() drops the tape and half a
+                # story ships in a synthesized voice. A story with parts still
+                # pending belongs to the publishing side until they are sent.
+                try:
+                    flight = {r[0] for r in db.execute(
+                        "SELECT DISTINCT post_id FROM parts WHERE done=0")}
+                except sqlite3.OperationalError:   # a file with no parts table
+                    flight = set()
                 recut = [r for r in st_rows if (r[0], r[1]) in have_st
+                         and f"yt_{r[0]}_{r[1]}" not in flight
                          and (r[i_body], r[i_segs]) != have_st[(r[0], r[1])][2:]]
                 mine = [c for c in st_cols if c not in ("vid", "n", "used")]
                 db.executemany(
@@ -2002,6 +2014,27 @@ if __name__ == "__main__":
                           " WHERE vid='v9'").fetchone()
         assert _got[:4] == ("Тело", 12.5, '[{"t": 1}]', '[{"body": "новое"}]'), _got
         assert _got[4] == 1, "used came back from this desk's staler row"
+        # ...but not under a story that is MID-FLIGHT. Part 1 of yt_v7_0 is out
+        # and part 2 is cut from the ranges in that row: moving them now means
+        # part 2 does not carry on where part 1 stopped.
+        _c.execute("INSERT INTO yt_story(vid, n, sub, title, body, start, end,"
+                   " views, ts, segs, cuts, parts, used) VALUES"
+                   " ('v7',0,'x','T','старое тело',0,99,1,0,'[]','[]',"
+                   "'[{\"body\": \"часть 1\"}]',1)")
+        _c.execute("INSERT INTO parts(post_id, n, done, lang)"
+                   " VALUES ('yt_v7_0',2,0,?)", (OUTPUT_LANG,))
+        _c.commit(); _c.close()
+        _state["yt_story"] = (_st_cols, [
+            ("v7", 0, "x", "T", "новое тело", 5.0, 99.0, 1, 0, '[{"t": 2}]',
+             "[]", '[{"body": "другая часть 1"}]', 1)])
+        _real_path, globals()["DB_PATH"] = DB_PATH, _theirs
+        try:
+            assert _apply_desk(_state) == 0, "a story mid-flight was recut"
+        finally:
+            globals()["DB_PATH"] = _real_path
+        _c = sqlite3.connect(_theirs)
+        assert _c.execute("SELECT body FROM yt_story WHERE vid='v7'"
+                          ).fetchone()[0] == "старое тело", "part 2 lost its cut"
         _c.close(); _theirs.unlink(missing_ok=True)
 
         print("upvote ok")
