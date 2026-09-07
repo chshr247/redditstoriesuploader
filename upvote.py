@@ -1477,11 +1477,12 @@ def _desk_rows() -> dict:
 
 
 def _apply_desk(state: dict) -> int:
-    """Put those rows into whatever seen.db is on disk now. New rows only.
+    """Put those rows into whatever seen.db is on disk now.
 
-    `used` is deliberately not overwritten on a story that is already there:
-    the publishing side owns it, and this machine's copy of it is older than
-    whatever CI has just done with the story.
+    New stories, and the ones this desk has SPLIT AGAIN since - see the note
+    on that below. `used` is deliberately not overwritten on a story that is
+    already there: the publishing side owns it, and this machine's copy of it
+    is older than whatever CI has just done with the story.
 
     The parts and tiktok halves are one-way in the same spirit. A part goes
     done and never comes back, and a tiktok row is inserted only where CI has
@@ -1507,11 +1508,33 @@ def _apply_desk(state: dict) -> int:
                            " WHERE id=?",
                            [(r[yt_cols.index("done")], r[yt_cols.index("keep")], r[0])
                             for r in yt_rows if r[0] in have_yt])
-            have_st = {(r[0], r[1])
-                       for r in db.execute("SELECT vid, n FROM yt_story")}
+            have_st = {(r[0], r[1]): r for r in
+                       db.execute("SELECT vid, n, body, segs FROM yt_story")}
             new = [r for r in st_rows if (r[0], r[1]) not in have_st]
             db.executemany(f"INSERT INTO yt_story({','.join(st_cols)}) VALUES "
                            f"({','.join('?' * len(st_cols))})", new)
+            # A story RE-SPLIT on this desk. Inserting new rows is not enough:
+            # the split is written HERE and nowhere else, so with only an
+            # INSERT the checkout at the top of push_state() throws every
+            # recut away and the run then reports "nothing new to push" - it
+            # ate the hand-over trim on all eleven stories that were already
+            # harvested when it shipped (2026-09-07). Only rows whose text
+            # actually differs are touched, and `used` is still left alone for
+            # the reason above. `parts` travels with the recut rather than
+            # being held back with `used`: it is the story cut into videos,
+            # and a recording split on text this row no longer has is worse
+            # than none - split_parts() writes it again at the next render.
+            recut = []
+            if st_rows:
+                i_body, i_segs = st_cols.index("body"), st_cols.index("segs")
+                recut = [r for r in st_rows if (r[0], r[1]) in have_st
+                         and (r[i_body], r[i_segs]) != have_st[(r[0], r[1])][2:]]
+                mine = [c for c in st_cols if c not in ("vid", "n", "used")]
+                db.executemany(
+                    f"UPDATE yt_story SET {','.join(c + '=?' for c in mine)} "
+                    "WHERE vid=? AND n=?",
+                    [(*(r[st_cols.index(c)] for c in mine), r[0], r[1])
+                     for r in recut])
 
             # A part this desk has sent. Without this line CI keeps handing the
             # same part to next_part() every tick, rebuilds it, uploads it as
@@ -1530,7 +1553,7 @@ def _apply_desk(state: dict) -> int:
                            f"VALUES ({','.join('?' * len(tk_cols))})", tk_rows)
     finally:
         db.close()
-    return len(new)
+    return len(new) + len(recut)
 
 
 def push_state(tries: int = 3) -> bool:
@@ -1574,8 +1597,8 @@ def push_state(tries: int = 3) -> bool:
         _git("commit", "-q", "-m",
              f"state: harvest YouTube stories ({OUTPUT_LANG}) [skip ci]")
         if _git("push").returncode == 0:
-            log.info("pushed %d new story row(s) and this desk's sends on try %d",
-                     n, attempt)
+            log.info("pushed %d harvested story row(s) and this desk's sends "
+                     "on try %d", n, attempt)
             return True
         log.info("push refused - CI committed first, rebuilding onto theirs")
         # --mixed and never --hard: this runs unattended in a working copy
@@ -1924,6 +1947,31 @@ if __name__ == "__main__":
                           ).fetchone()[0] == "theirs", "CI's tiktok row was overwritten"
         assert _c.execute("SELECT publish_id FROM tiktok WHERE file='b.mp4'"
                           ).fetchone()[0] == "ours", "this desk's send never arrived"
+        # ...and a story SPLIT AGAIN on this desk reaches CI's copy too. It
+        # did not until 2026-09-07, so push_state() threw away every recut and
+        # said "nothing new to push" while doing it. `used` still stays CI's.
+        _c.execute("INSERT INTO yt_story(vid, n, sub, title, body, start, end,"
+                   " views, ts, segs, cuts, parts, used) VALUES"
+                   " ('v9',0,'x','T','И переходим к следующей истории. Тело',"
+                   "10.0,99.0,1,0,'[]','[]','[{\"body\": \"старое\"}]',1),"
+                   " ('v8',0,'x','T','не тронуто',0,9,1,0,'[]','[]',NULL,1)")
+        _c.commit(); _c.close()
+        _st_cols = ["vid", "n", "sub", "title", "body", "start", "end",
+                    "views", "ts", "segs", "cuts", "parts", "used"]
+        _state["yt_story"] = (_st_cols, [
+            ("v9", 0, "x", "T", "Тело", 12.5, 99.0, 1, 0, '[{"t": 1}]', "[]",
+             '[{"body": "новое"}]', 0),
+            ("v8", 0, "x", "T", "не тронуто", 0, 9, 1, 0, "[]", "[]", None, 0)])
+        _real_path, globals()["DB_PATH"] = DB_PATH, _theirs
+        try:
+            assert _apply_desk(_state) == 1, "the recut was not counted"
+        finally:
+            globals()["DB_PATH"] = _real_path
+        _c = sqlite3.connect(_theirs)
+        _got = _c.execute("SELECT body, start, segs, parts, used FROM yt_story"
+                          " WHERE vid='v9'").fetchone()
+        assert _got[:4] == ("Тело", 12.5, '[{"t": 1}]', '[{"body": "новое"}]'), _got
+        assert _got[4] == 1, "used came back from this desk's staler row"
         _c.close(); _theirs.unlink(missing_ok=True)
 
         print("upvote ok")
