@@ -1307,6 +1307,30 @@ def _clear_part(meta: dict) -> None:
                  meta["post_id"])
 
 
+def _story_out(meta: dict, state: str) -> bool:
+    """Is this send the LAST video of its story, and is it really out?
+
+    Two conditions, and both were already written down here as reasons NOT to
+    close an issue - see the caption note in upload_next(). This is where they
+    stop holding.
+
+    Really out: only where the video went straight to the profile. On the api
+    backend a send makes a DRAFT that sits in the app until somebody taps
+    publish, and the open issue is what says so; closing there would file the
+    job as done while it is still waiting for a tap. `state` carries that -
+    tau reports POSTED, the api backend reports whatever the inbox says.
+
+    The last one: an issue is one CASE - the title asked for, answered, and
+    every part of the story sent - so a three-parter must not close on its
+    first video. Read off the meta rather than counting the queue, because the
+    queue is per channel and this question is about one story.
+    """
+    if state != "POSTED":
+        return False
+    total = meta.get("total", 0)
+    return total <= 1 or meta.get("part") == total
+
+
 def _tell_ci() -> None:
     """Carry this send into the repository, so CI stops rebuilding it.
 
@@ -1405,6 +1429,11 @@ def upload_next(direct: bool = False, private: bool = True,
     # job still to do and open an issue asking for it.
     if not direct and state != "FAILED" and TIKTOK_BACKEND == "api":
         print("\nCAPTION:\n" + caption(title, body=meta.get("body", "")) + "\n")
+    if _story_out(meta, state):
+        import review
+        review.shut(meta.get("issue", 0),
+                    f"Опубликовано: {mp4.name}. Вопросов по этой истории "
+                    f"больше нет.")
     return pid
 
 
@@ -1838,6 +1867,17 @@ if __name__ == "__main__":
             "uipost.js stopped printing the marker post.ps1 greps for")
         assert "NOT_LOGGED_IN" in _ps1.read_text("utf-8"), (
             "post.ps1 stopped greping for uipost.js's login-wall marker")
+
+    # An issue closes on the last video of its story and only where the video
+    # really went out. Both halves have already been got wrong once: a draft
+    # counted as published, and a three-parter filed as done on its part 1.
+    assert _story_out({}, "POSTED")                                  # not split
+    assert _story_out({"total": 1, "part": 1}, "POSTED")
+    assert _story_out({"total": 3, "part": 3}, "POSTED")             # the last
+    assert not _story_out({"total": 3, "part": 1}, "POSTED")         # the first
+    assert not _story_out({"total": 3, "part": 2}, "POSTED")         # the middle
+    assert not _story_out({"total": 1, "part": 1}, "SEND_TO_USER_INBOX")
+    assert not _story_out({"total": 1, "part": 1}, "FAILED")
 
     print("chunking, caption, allowance and status logic ok", file=sys.stderr)
 

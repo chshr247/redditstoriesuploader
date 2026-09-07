@@ -973,6 +973,27 @@ def rendered(post_id: str) -> None:
                    (post_id, OUTPUT_LANG))
 
 
+def shut(issue: int, note: str) -> None:
+    """Close one issue by NUMBER, with a last word on it.
+
+    By number and not by post_id, because the two callers reach it from
+    opposite ends. close() below still has the row and takes the number off
+    it; publish.py has only the number, since rendered() dropped the row the
+    moment the video was built - and the row going is exactly what `rendered`
+    means. See its docstring for why the ISSUE outlives it.
+
+    Never fatal: an issue that stays open is a nuisance, a send that reports
+    itself failed because of one is a video published twice.
+    """
+    if not issue:
+        return
+    try:
+        _gh("issue", "close", str(issue),
+            "--comment", f"{note}\n\n{MARK}:closed -->")
+    except Exception:
+        log.warning("could not close issue #%d", issue, exc_info=True)
+
+
 def close(post_id: str, note: str) -> None:
     """Dropped - there will be no video, so nothing else will ever close it."""
     with _db() as db:
@@ -981,8 +1002,7 @@ def close(post_id: str, note: str) -> None:
         db.execute("DELETE FROM review WHERE post_id=? AND lang=?",
                    (post_id, OUTPUT_LANG))
     if row:
-        _gh("issue", "close", str(row[0]),
-            "--comment", f"{note}\n\n{MARK}:closed -->")
+        shut(row[0], note)
 
 
 if __name__ == "__main__":
