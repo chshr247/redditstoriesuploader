@@ -1031,13 +1031,26 @@ def queue_parts(post: dict, parts: list[tuple[str, str]], gender: str,
     stitched together. `issue` travels for the same reason - the parts are one
     story, told under one title chosen in one place, and their captions belong
     back in that place.
+
+    `done` and `tries` belong to the row that is already there and are the two
+    columns this never writes over. It used to REPLACE them with zeros, and the
+    caller re-enters here: main.make_reviewed() queues the parts and then
+    renders part 1, and a render that raises leaves the review row behind - so
+    the next tick calls this again. With the zeros, fail_part()'s count went
+    back to 0 in the same tick that raised it, MAX_TRIES could never be
+    reached, drop_parts() never ran, and a part that could not be rendered held
+    the only render slot for ever while nothing else went out.
     """
     now = time.time()
     with _db() as db:
         db.executemany(
-            "INSERT OR REPLACE INTO parts(post_id, n, total, title, body, "
+            "INSERT INTO parts(post_id, n, total, title, body, "
             "gender, voice, sub, ts, done, tries, lang, issue) "
-            "VALUES (?,?,?,?,?,?,?,?,?,0,0,?,?)",
+            "VALUES (?,?,?,?,?,?,?,?,?,0,0,?,?) "
+            "ON CONFLICT(post_id, n, lang) DO UPDATE SET "
+            "total=excluded.total, title=excluded.title, body=excluded.body, "
+            "gender=excluded.gender, voice=excluded.voice, "
+            "sub=excluded.sub, ts=excluded.ts, issue=excluded.issue",
             [(post["id"], i, len(parts), title, body, gender, voice, post["sub"],
               now, OUTPUT_LANG, issue)
              for i, (title, body) in enumerate(parts, 1)])
@@ -1257,6 +1270,21 @@ if __name__ == "__main__":
         for _ in range(MAX_TRIES):
             fail_part("_selftest", 2)
         assert next_part() is None, "a hopeless story must not hold the queue"
+        # ...and queueing the same story again does NOT un-do that verdict.
+        # main.make_reviewed() comes back through here after a failed render,
+        # and while this reset `done` and `tries` the count could never reach
+        # MAX_TRIES and the story held the render slot for ever.
+        queue_parts(fake, [("t1", "b1"), ("t2", "b2")], "female", "voice1")
+        assert next_part() is None, "a dropped story came back on re-queue"
+        with _db() as db:
+            kept = db.execute("SELECT tries FROM parts WHERE post_id='_selftest'"
+                              " AND n=2 AND lang=?", (OUTPUT_LANG,)).fetchone()
+        assert kept[0] == MAX_TRIES, f"the retry count was reset to {kept[0]}"
+        # a re-queue still carries the text and the title across
+        with _db() as db:
+            db.execute("UPDATE parts SET done=0, tries=0 WHERE post_id='_selftest'")
+        queue_parts(fake, [("t1", "b1 rewritten"), ("t2", "b2")], "female", "v2")
+        assert next_part()["body"] == "b1 rewritten", "a re-queue must update text"
         with _db() as db:
             db.execute("DELETE FROM parts WHERE post_id='_selftest'")
 

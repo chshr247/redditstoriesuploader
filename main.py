@@ -248,7 +248,16 @@ def make_reviewed(r: dict) -> Path:
     if len(written) > 1:
         source.queue_parts(post, written, r["gender"], fish_voice,
                            issue=r["issue"])
-        out = make_part(source.next_part())
+        if not (nxt := source.next_part()):
+            # Every part is done or was given up on by fail_part(), and the
+            # review row is the only thing still pointing here. It goes now:
+            # queue_parts() no longer un-does that verdict, so without this the
+            # row would bring the run back to a spent story on every tick and
+            # spend the render slot on nothing.
+            review.rendered(post["id"])
+            raise RuntimeError(f"{post['id']}: no part left to render - the "
+                               f"story was dropped, the review row goes too")
+        out = make_part(nxt)
     else:
         # The score travels with the file: youtube.py decides by band and the
         # post is out of reach by then - seen.db keeps it per story, not per
