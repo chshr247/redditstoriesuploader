@@ -878,12 +878,19 @@ def _parse_split(raw: str, segs: list[dict]) -> tuple[list[dict], list[str]]:
             said = [_plain(w["w"]) for w in words]
             at = next((i for i in range(1, len(said) - len(want) + 1)
                        if said[i:i + len(want)] == want), 0) if want else 0
-            if at and _plain("".join(w["w"] for w in words[:at])) in _plain(title):
+            ate = _plain("".join(w["w"] for w in words[:at]))
+            if at and len(ate) >= 6 and _plain(title).startswith(ate):
                 # Not the channel talking: the model quoted from inside the
                 # story's own title, which is the line it opens on. Trimming
                 # to there takes the hook off the front of the story - four
                 # times in 85 stories, "Я мудак, потому что" ahead of "не
                 # накормил младшего брата" (q81nGUspiYY, 2026-09-07).
+                #
+                # A PREFIX of the title and long enough to be one. _plain()
+                # drops the spaces, so a one-word cut tested with `in` matched
+                # anything: "И" is "и", and "и" is inside almost every Russian
+                # title there is - which refused the trim on the strength of
+                # nothing at all.
                 log.info("story %d: %r is the story's own title, not an "
                          "intro - not trimming", k, starts[:40])
                 at = 0
@@ -1807,6 +1814,15 @@ if __name__ == "__main__":
             ' "title":"Я мудак, потому что не накормил младшего брата"}]', aita)
         assert not f and ok8[0]["start"] == 0.0, ok8[0]
         assert ok8[0]["body"].startswith("Я мудак потому что"), ok8[0]["body"][:40]
+        # ...and that guard does NOT fire on a cut too short to mean anything.
+        # _plain() drops the spaces, so "И" is "и" and "и" is inside almost
+        # every Russian title - which used to refuse the trim on nothing.
+        lead = _spoken("И На работе закрыли глаза сегодня")
+        ok10, f = _parse_split(
+            '[{"first":0,"last":19,"sub":"x","starts":"На работе закрыли",'
+            ' "title":"Инфлюенсер и программа тренировок"}]', lead)
+        assert not f and ok10[0]["start"] == 1.0, ok10[0]
+        assert ok10[0]["body"].startswith("На работе"), ok10[0]["body"][:40]
 
         # the storyteller's own verbs, put into the gender the model read off
         # the story - whisper hears the ending as a coin toss
