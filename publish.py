@@ -1307,6 +1307,33 @@ def _clear_part(meta: dict) -> None:
                  meta["post_id"])
 
 
+def _tell_ci() -> None:
+    """Carry this send into the repository, so CI stops rebuilding it.
+
+    finish_part() writes on whichever machine PUBLISHED, and on this setup that
+    is never the machine that built the file: CI renders, the desk posts. Left
+    here the flag never crosses, CI's copy keeps the part pending, next_part()
+    hands it back every tick and the same video is rendered for ever - eleven
+    times between 22:54 and 02:46 on 2026-09-07, for a part that went out at
+    16:15 the day before.
+
+    Skipped on a runner, which needs none of it: the workflow commits seen.db
+    itself at the end of the job, and a push from here would only race it.
+
+    Never fatal. A send that happened is worth more than the bookkeeping about
+    it, and the daily harvest pushes the same rows again anyway - this only
+    makes the news travel in minutes instead of a day.
+    """
+    if os.getenv("GITHUB_ACTIONS"):
+        return
+    try:
+        import upvote
+        upvote.push_state()
+    except Exception:
+        log.warning("could not tell CI about this send - it may rebuild the "
+                    "part until the next harvest push", exc_info=True)
+
+
 def upload_next(direct: bool = False, private: bool = True,
                 force: bool = False) -> str | None:
     """Send one video, if today's allowance still has room for it.
@@ -1351,6 +1378,7 @@ def upload_next(direct: bool = False, private: bool = True,
                    " backend) VALUES (?,?,?,?,?)",
                    (mp4.name, pid, time.time(), CHANNEL, TIKTOK_BACKEND))
     _clear_part(meta)
+    _tell_ci()
     # Printed BEFORE the caption and never after it: the workflow reads from the
     # CAPTION line to the end of this output and takes the last line as the id,
     # so anything added below would land in the issue body.

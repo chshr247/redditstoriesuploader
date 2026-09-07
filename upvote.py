@@ -1366,8 +1366,20 @@ def _git(*args: str) -> subprocess.CompletedProcess:
                           encoding="utf-8", errors="replace")
 
 
-def _harvest_rows() -> tuple:
-    """This machine's `yt` and `yt_story`, whole, read before the file moves.
+def _desk_rows() -> dict:
+    """Everything this machine knows that CI cannot work out for itself.
+
+    The harvest, and - since 2026-09-07 - what the desk has PUBLISHED. Those
+    two belong together because they fail the same way: a row written here and
+    never carried over is a job CI does again. The harvest half only wasted the
+    transcription; the publish half wasted eleven renders of one video in four
+    hours, because finish_part() marks a part on whichever machine sent it, and
+    on this setup that is never the machine that built it. See the parts note
+    in _apply_desk().
+
+    Keyed rather than positional: this grew from two tables to four, and the
+    same reasoning the tiktok INSERT uses applies here - a fifth entry must not
+    silently land where the fourth was read.
 
     CLOSED explicitly, and that is the point of the try/finally rather than a
     bare `with`: sqlite3's context manager ends the TRANSACTION and leaves the
@@ -1375,44 +1387,89 @@ def _harvest_rows() -> tuple:
     `git checkout` of this very file fail with "unable to unlink old". See
     push_state() for what that silently cost.
     """
+    cols = lambda t: [c[1] for c in db.execute(f"pragma table_info({t})")]
     db = _db()
     try:
         with db:
-            return ([c[1] for c in db.execute("pragma table_info(yt)")],
-                    db.execute("SELECT * FROM yt").fetchall(),
-                    [c[1] for c in db.execute("pragma table_info(yt_story)")],
-                    db.execute("SELECT * FROM yt_story").fetchall())
+            return {
+                "yt": (cols("yt"), db.execute("SELECT * FROM yt").fetchall()),
+                "yt_story": (cols("yt_story"),
+                             db.execute("SELECT * FROM yt_story").fetchall()),
+                # done only. A part this desk has NOT sent says nothing about
+                # one CI may have sent since, and clearing it here on the
+                # strength of a stale copy would lose the story's middle.
+                "parts_done": db.execute(
+                    "SELECT post_id, n, lang FROM parts WHERE done=1").fetchall(),
+                "tiktok": (cols("tiktok"),
+                           db.execute("SELECT * FROM tiktok").fetchall()),
+            }
     finally:
         db.close()
 
 
-def _apply_harvest(state: tuple) -> int:
+def _apply_desk(state: dict) -> int:
     """Put those rows into whatever seen.db is on disk now. New rows only.
 
     `used` is deliberately not overwritten on a story that is already there:
     the publishing side owns it, and this machine's copy of it is older than
     whatever CI has just done with the story.
+
+    The parts and tiktok halves are one-way in the same spirit. A part goes
+    done and never comes back, and a tiktok row is inserted only where CI has
+    none - both machines write that table and neither's copy is a truth about
+    the other's sends.
+
+    CLOSED explicitly, for _desk_rows()'s reason and one more: push_state()
+    retries, and the second try opens with `git checkout -- seen.db` - which
+    on Windows cannot replace a file this function still holds open. Caught by
+    the self-test below, having been missed here when _desk_rows() was fixed.
     """
-    yt_cols, yt_rows, st_cols, st_rows = state
-    with _db() as db:
-        have_yt = {r[0] for r in db.execute("SELECT id FROM yt")}
-        fresh = [r for r in yt_rows if r[0] not in have_yt]
-        db.executemany(f"INSERT INTO yt({','.join(yt_cols)}) VALUES "
-                       f"({','.join('?' * len(yt_cols))})", fresh)
-        # a video this machine has judged or digested, judged or digested here
-        db.executemany("UPDATE yt SET done=max(done, ?), keep=coalesce(?, keep)"
-                       " WHERE id=?",
-                       [(r[yt_cols.index("done")], r[yt_cols.index("keep")], r[0])
-                        for r in yt_rows if r[0] in have_yt])
-        have_st = {(r[0], r[1]) for r in db.execute("SELECT vid, n FROM yt_story")}
-        new = [r for r in st_rows if (r[0], r[1]) not in have_st]
-        db.executemany(f"INSERT INTO yt_story({','.join(st_cols)}) VALUES "
-                       f"({','.join('?' * len(st_cols))})", new)
+    yt_cols, yt_rows = state["yt"]
+    st_cols, st_rows = state["yt_story"]
+    db = _db()
+    try:
+        with db:
+            have_yt = {r[0] for r in db.execute("SELECT id FROM yt")}
+            fresh = [r for r in yt_rows if r[0] not in have_yt]
+            db.executemany(f"INSERT INTO yt({','.join(yt_cols)}) VALUES "
+                           f"({','.join('?' * len(yt_cols))})", fresh)
+            # a video this machine has judged or digested, judged or digested here
+            db.executemany("UPDATE yt SET done=max(done, ?), keep=coalesce(?, keep)"
+                           " WHERE id=?",
+                           [(r[yt_cols.index("done")], r[yt_cols.index("keep")], r[0])
+                            for r in yt_rows if r[0] in have_yt])
+            have_st = {(r[0], r[1])
+                       for r in db.execute("SELECT vid, n FROM yt_story")}
+            new = [r for r in st_rows if (r[0], r[1]) not in have_st]
+            db.executemany(f"INSERT INTO yt_story({','.join(st_cols)}) VALUES "
+                           f"({','.join('?' * len(st_cols))})", new)
+
+            # A part this desk has sent. Without this line CI keeps handing the
+            # same part to next_part() every tick, rebuilds it, uploads it as
+            # another artifact, and nothing ever clears it - measured
+            # 2026-09-07, eleven identical renders of yt_N09wqiI_O4w_1_p1
+            # between 22:54 and 02:46, for a video published at 16:15 the day
+            # before. max() rather than a plain 1, so a part CI cleared first
+            # is not un-cleared by this desk's staler row.
+            db.executemany("UPDATE parts SET done=max(done, 1) "
+                           "WHERE post_id=? AND n=? AND lang=?",
+                           state["parts_done"])
+            # OR IGNORE, not OR REPLACE: both machines write this table and
+            # CI's row for a file is the one its own send made.
+            tk_cols, tk_rows = state["tiktok"]
+            db.executemany(f"INSERT OR IGNORE INTO tiktok({','.join(tk_cols)}) "
+                           f"VALUES ({','.join('?' * len(tk_cols))})", tk_rows)
+    finally:
+        db.close()
     return len(new)
 
 
 def push_state(tries: int = 3) -> bool:
-    """Commit this machine's harvest onto whatever CI has committed since.
+    """Commit what this machine did onto whatever CI has committed since.
+
+    The harvest AND the sends - see _desk_rows() for why the two travel
+    together. publish.py calls this after every send for the second half; the
+    daily harvest calls it for the first.
 
     Retried, because losing the race is the ORDINARY outcome and not a fault:
     publish.yml runs twice an hour and commits seen.db most times it does, and
@@ -1420,13 +1477,13 @@ def push_state(tries: int = 3) -> bool:
     same rows into it, so a try costs nothing but the round trip.
     """
     for attempt in range(1, tries + 1):
-        state = _harvest_rows()
+        state = _desk_rows()
         # this desk's drift is a cache - CHECKED, because when this fails the
         # run does the opposite of its job. git cannot replace a file another
         # process holds open, and on Windows it says so with "unable to unlink
         # old" and exit 255; unchecked, the desk then pushed its whole stale
         # seen.db - its `review`, `parts`, `tiktok` and `uploaded` over CI's
-        # newer ones - and _apply_harvest reported 0 new rows because it was
+        # newer ones - and _apply_desk reported 0 new rows because it was
         # looking at our own file. Silent on 2026-09-07, harmless only because
         # CI happened to have committed nothing in the hour.
         if (r := _git("checkout", "--", str(DB_PATH))).returncode:
@@ -1440,7 +1497,7 @@ def push_state(tries: int = 3) -> bool:
             log.error("cannot fast-forward to origin/main - this checkout has "
                       "commits of its own: %s", r.stderr.strip()[:200])
             return False
-        n = _apply_harvest(state)
+        n = _apply_desk(state)
         _git("add", str(DB_PATH))
         if _git("diff", "--cached", "--quiet", str(DB_PATH)).returncode == 0:
             log.info("nothing new to push")
@@ -1448,7 +1505,8 @@ def push_state(tries: int = 3) -> bool:
         _git("commit", "-q", "-m",
              f"state: harvest YouTube stories ({OUTPUT_LANG}) [skip ci]")
         if _git("push").returncode == 0:
-            log.info("pushed %d new story row(s) on try %d", n, attempt)
+            log.info("pushed %d new story row(s) and this desk's sends on try %d",
+                     n, attempt)
             return True
         log.info("push refused - CI committed first, rebuilding onto theirs")
         # --mixed and never --hard: this runs unattended in a working copy
@@ -1712,6 +1770,44 @@ if __name__ == "__main__":
         _w = split_parts("yt_v3_0", 2)
         assert len(_w) == 2, _w
         assert _w[1][1].startswith("line 10"), _w[1][1][:20]
+
+        # _apply_desk carries the SENDS, not only the harvest. The check is
+        # what the re-render loop cost: a part this desk finished must come
+        # back done in CI's copy, a part CI already finished must not be
+        # un-done by our staler row, and a tiktok row CI has must win.
+        _theirs = Path(DB_PATH).with_name("_selftest_theirs.db")
+        _theirs.unlink(missing_ok=True)
+        _c = sqlite3.connect(_theirs)
+        _c.executescript(
+            "CREATE TABLE parts(post_id TEXT, n INT, done INT DEFAULT 0,"
+            " lang TEXT, PRIMARY KEY(post_id, n, lang));"
+            "CREATE TABLE tiktok(file TEXT PRIMARY KEY, publish_id TEXT,"
+            " ts REAL, channel TEXT, backend TEXT);"
+            "INSERT INTO parts VALUES ('p',1,0,'ru'),('p',2,1,'ru');"
+            "INSERT INTO tiktok VALUES ('a.mp4','theirs',1,'ru','api');")
+        _c.commit(); _c.close()
+        _state = {"yt": (["id"], []), "yt_story": (["vid", "n"], []),
+                  # ours: part 1 sent here, part 2 stale at 0
+                  "parts_done": [("p", 1, "ru")],
+                  "tiktok": (["file", "publish_id", "ts", "channel", "backend"],
+                             [("a.mp4", "ours", 2, "ru", "tau"),
+                              ("b.mp4", "ours", 3, "ru", "tau")])}
+        _real_path, globals()["DB_PATH"] = DB_PATH, _theirs
+        try:
+            _apply_desk(_state)
+        finally:
+            globals()["DB_PATH"] = _real_path
+        _c = sqlite3.connect(_theirs)
+        assert _c.execute("SELECT done FROM parts WHERE n=1").fetchone()[0] == 1, \
+            "a part this desk sent did not reach CI's copy"
+        assert _c.execute("SELECT done FROM parts WHERE n=2").fetchone()[0] == 1, \
+            "a part CI had already cleared was un-cleared"
+        assert _c.execute("SELECT publish_id FROM tiktok WHERE file='a.mp4'"
+                          ).fetchone()[0] == "theirs", "CI's tiktok row was overwritten"
+        assert _c.execute("SELECT publish_id FROM tiktok WHERE file='b.mp4'"
+                          ).fetchone()[0] == "ours", "this desk's send never arrived"
+        _c.close(); _theirs.unlink(missing_ok=True)
+
         print("upvote ok")
     elif a.harvest is not None:
         print(f"{harvest(a.harvest)} new videos")
