@@ -1128,8 +1128,22 @@ def _clip(vid: str, start: float, end: float, dest: Path) -> Path:
     transcription. It is fetched again if it is gone, which costs one download
     and is the difference between a story that renders and one that cannot.
     """
+    # The name is keyed on the story and the part, and both survive a re-split
+    # that moves this range - so a clip left over from the older cut answers to
+    # the same name. Its LENGTH is what says which cut it is, and cutting again
+    # costs one ffmpeg pass against publishing the wrong stretch of tape.
+    want = end + PAD - max(0.0, start)
     if dest.exists():
-        return dest
+        import voice
+        try:
+            got = voice.duration(dest)
+        except Exception:                          # unreadable is as good as wrong
+            got = -1.0
+        if abs(got - want) <= 1.0:
+            return dest
+        log.info("%s runs %.1fs where this range wants %.1fs - cutting it again",
+                 dest.name, got, want)
+        dest.unlink()
     src = OUT_DIR / f"yt_{vid}.mp3"
     if not src.exists():
         log.info("%s: the source audio is gone, fetching it again", vid)

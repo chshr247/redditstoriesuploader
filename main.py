@@ -277,11 +277,30 @@ def make_reviewed(r: dict) -> Path:
     return out
 
 
+def _made_from(mp4: Path, body: str) -> bool:
+    """Is the file on disk the video this text renders to?
+
+    The NAME cannot answer it. out/<story>_p<n>.mp4 is keyed on the story and
+    the part number, and both survive a re-split that changes every word inside
+    them - so a part 1 left over from an older cut carries the right name and
+    the wrong video. The sidecar _render() writes carries the text the file was
+    actually made from, and that is what is asked.
+
+    No sidecar is a no: it costs one render, and the alternative is publishing
+    a file nothing can vouch for.
+    """
+    try:
+        was = json.loads(mp4.with_suffix(".meta.json").read_text("utf-8"))
+    except (OSError, ValueError):
+        return False
+    return was.get("body") == script.plain(body)
+
+
 def make_part(p: dict) -> Path:
     """Render one already-written part of a split story."""
     key = f"{p['post_id']}_p{p['n']}"
     out = OUT_DIR / f"{chan_file(key)}.mp4"
-    if out.exists():
+    if out.exists() and _made_from(out, p["body"]):
         # only reachable when out/ outlived the failure, i.e. locally. Re-voicing
         # a part that is already on disk costs a TTS call for nothing.
         log.info("%s already rendered, reusing it", out.name)
@@ -655,6 +674,19 @@ if __name__ == "__main__":
         dur = iter([70.0])
         make_reviewed({**_row, "voice": ""})
         assert heard == ["picked"], heard
+
+        # A part is reused off disk only while the file is the one this text
+        # renders to. The name says nothing: a re-split keeps the story id and
+        # the part number and changes every word between them.
+        _mp4 = OUT_DIR / "_selftest_made.mp4"
+        _mp4.write_bytes(b"")
+        _side = _mp4.with_suffix(".meta.json")
+        _side.write_text(json.dumps({"body": script.plain("b1")}), "utf-8")
+        assert _made_from(_mp4, "b1"), "the file it was made from was refused"
+        assert not _made_from(_mp4, "b1 recut"), "a stale part was reused"
+        _side.unlink()
+        assert not _made_from(_mp4, "b1"), "a file with no sidecar vouched for itself"
+        _mp4.unlink()
 
         # The part is rendered in the run that can send it, and in no other:
         # nothing else clears it, and a run spent on a part publishes nothing
