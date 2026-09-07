@@ -1088,9 +1088,18 @@ def sent_today() -> int:
 #
 # It is a ROLLING 24 hours, where our count is a UTC calendar day: three drafts
 # at 23:00 and three at 01:00 never break a daily count of three and are six
-# inside one rolling day. And it is TikTok's rule, so nothing on our side gets
-# to bypass it - not --force, and not the part exemption that lets the middle of
-# a split story past the daily count.
+# inside one rolling day.
+#
+# And it is TikTok's rule rather than a lever of ours, which is exactly why
+# nothing here enforces it any more: _warn_cap() says the window is full and
+# sends anyway, because a file refused at this point is already rendered and
+# dies with the runner. So the two things that get past the DAILY count get
+# past this one too - --force, and the part exemption in _due_part() that lets
+# the middle of a split story out on a day whose allowance is spent. The second
+# is the one to watch since UPVOTE_PART_SEC came down to 270: most stories are
+# two videos now, so a day of four ordinary drafts plus the parts of a split
+# story clears five inside a rolling window regularly. What that costs is in
+# _warn_cap(): TikTok answers normally and the draft never arrives.
 #
 # An api-backend rule, and only that: tau drives the web endpoints and posts
 # straight to the profile, so there is no inbox and nothing pending in one.
