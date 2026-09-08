@@ -67,14 +67,46 @@ TOPICS_RU = [
      ["#семья", "#родители", "#родственники"]),
     (r"\bдет[иейя]|ребён|ребен|малыш|подрост|коляск|садик|детсад",
      ["#дети", "#родители", "#воспитание"]),
+    # доллар and чаевые are here because the stories are American told in
+    # Russian: over the 87 in the review issues to 2026-09-08, "доллар" is said
+    # in 20 of them and "рубль" in none. A money bucket that only knows roubles
+    # is a money bucket that misses a fifth of the feed.
     (r"деньг|рубл|\bдолг|кредит|зарплат|\bсчёт|\bсчет|ипотек|копил|"
-     r"накоплен|тысяч|потрат|занял|верн[иу] деньги",
+     r"накоплен|тысяч|потрат|занял|верн[иу] деньги|доллар|\bевро\b|чаевы|"
+     r"наличн|\bчек[аеиу]?\b",
      ["#деньги", "#долги", "#жадность", "#жмот"]),
     (r"наследств|завещан|нотариус|наследник|\bдол[юя] в квартир",
      ["#наследство", "#завещание", "#родственники"]),
     (r"начальник|\bработ|офис|коллег|увол|собеседован|\bсмен[ауы]|"
-     r"директор|подчинён|подчинен",
-     ["#работа", "#начальник", "#коллеги", "#офис"]),
+     r"директор|подчинён|подчинен|сотрудник|менеджер|руководств|компани|"
+     r"\bкадр[оыа]|\bhr\b",
+     ["#работа", "#начальник", "#коллеги", "#офис", "#увольнение"]),
+    # r/MaliciousCompliance is 26 of the last 87 stories and it has one subject:
+    # somebody is handed a rule and follows it exactly. None of the words that
+    # subject is made of had a bucket, so every one of those videos was going
+    # out under #работа plus two tags off the generic pile.
+    #
+    # "буквально" is deliberately NOT here even though the genre is built on it:
+    # it is also ordinary Russian filler and it was firing on half the feed.
+    # правил[аоуы] rather than \bправил, or "правильно" brings the whole bucket
+    # along with it.
+    (r"\bправил[аоуы]\b|\bправилам|инструкц|регламент|распоряжен|предписан|"
+     r"\bприказ[ауе]?\b|\bпо уставу\b|политик[аиеу] компании|\bпо инструкции\b",
+     ["#правила", "#бюрократия", "#абсурд"]),
+    # The other half of a work story, and the half the stories turn on: the
+    # leave that was refused, the shift nobody would cover, the overtime.
+    # \bсмен is left to the bucket above rather than repeated here - one stem
+    # in two buckets makes both fire and neither dominate.
+    (r"отпуск|отгул|переработ|сверхуроч|больничн|\bграфик[еуа]?\b|подработ",
+     ["#переработки", "#отпуск", "#работа"]),
+    # Where a petty-revenge story ends up often enough to be its own topic, and
+    # only the words that are unambiguous. "заявление" is out - it is as often
+    # a request for leave as it is a police report - and so is "штраф", which
+    # the #авто bucket already owns and means a parking ticket nine times in
+    # ten.
+    (r"полиц|\bсуд[аеыу]?\b|адвокат|\bюрист|\bиск[еуа]?\b|прокурор|"
+     r"роспотребнадзор|трудов[ао][йя] инспекци",
+     ["#полиция", "#суд", "#закон"]),
     # "квартир" is deliberately NOT here. It is said in every second family
     # story - the flat is where they happen - and it was putting #соседи on a
     # story whose only neighbour was the mother-in-law. A topic has to be named
@@ -96,8 +128,17 @@ TOPICS_RU = [
      ["#здоровье", "#врачи", "#больница"]),
     (r"машин|\bавто|гаи|дтп|парков|водител|штраф|гибдд",
      ["#авто", "#дорога", "#парковка"]),
-    (r"кафе|ресторан|официант|заказ|доставк|магазин|касс|продавец|курьер",
-     ["#сервис", "#клиенты", "#магазин"]),
+    # "клиент" was missing from a bucket whose second tag is #клиенты - it is
+    # said in 34 of the last 87 stories and reached this bucket in none of them,
+    # because a story can be entirely about a client without ever saying касса.
+    (r"кафе|ресторан|официант|заказ|доставк|магазин|касс|продавец|курьер|"
+     r"клиент|покупател|посетител|\bхамств|\bнахал",
+     ["#сервис", "#клиенты", "#магазин", "#хамство"]),
+    # Friends are the third party in these stories after family and work, and
+    # they had no bucket at all. \bдруг\b is left out: "друг друга" means each
+    # other and says nothing about anybody's friends.
+    (r"\bдрузь|\bподруг|\bприятел|\bдружб|лучший друг",
+     ["#друзья", "#дружба", "#общение"]),
     # The horror slot, and the stems are deliberately the narrow ones. Жутк,
     # страшн, ночью and шаги are the words the genre is made of and they are
     # also ordinary Russian - a family row is жуткий and a drunk husband comes
@@ -201,9 +242,16 @@ GENERIC = {
            "#storytelling", "#people", "#fyp", "#amithewrongone", "#whosright"],
 }
 
-# Three matched plus two generic. All five matched reads as a tag wall for one
+# Four matched plus one generic. All five matched reads as a tag wall for one
 # topic and loses the broad feeds; all five generic is where we started.
-MATCHED = 3
+#
+# Three until 2026-09-08. The count is of TAGS and not of buckets, and the
+# dominant bucket contributes two of them, so three meant exactly two topics
+# reached the caption and the other two slots went to the generic pile - over
+# the 87 stories in the review issues, 83 of them went out carrying two of
+# #рекомендации, #ктоправ, #изжизни. Four is one of those traded for a tag that
+# names something in the video, measured on the same 87.
+MATCHED = 4
 HEAD = 2        # how many tags at the front of a bucket count as its centre
 
 
@@ -293,6 +341,44 @@ if __name__ == "__main__":
     assert not (set(blank) & TOPIC_TAGS["ru"]), blank
     boss = pick("Начальник заставил меня выйти в выходной", "Директор давил.", lang="ru")
     assert not (set(boss) & set(bucket("отношения"))), f"unearned topic tag: {boss}"
+
+    # The buckets added on 2026-09-08 for what the feed actually is now - the
+    # last 87 review issues are 26 MaliciousCompliance, 23 AmItheAsshole and 21
+    # pettyrevenge, and the rules, the refused leave and the police report had
+    # no bucket between them. Each is checked with the story words it is made
+    # of, and the two that are one letter away from ordinary Russian are checked
+    # for NOT firing on it.
+    rules = pick("Мне сказали соблюдать инструкцию до буквы",
+                 "Начальник выдал регламент. Я выполнил все правила дословно.",
+                 lang="ru")
+    assert hit(rules, "инструкц"), rules
+    right = pick("Я всё сделал правильно", "Она правильно посчитала сдачу.", lang="ru")
+    assert not hit(right, "инструкц"), f"правильно reached the rules bucket: {right}"
+
+    leave = pick("Отпуск мне не подписали", "Я взял отгул и отработал сверхурочно.",
+                 lang="ru")
+    assert hit(leave, "отпуск"), leave
+
+    cops = pick("Соседка вызвала полицию из-за моей машины",
+                "Я пошёл к юристу, потом подал иск.", lang="ru")
+    assert hit(cops, "полиц"), cops
+
+    mates = pick("Подруга позвала меня на свадьбу и выставила счёт",
+                 "Мои друзья сказали, что я перегнул.", lang="ru")
+    assert hit(mates, "подруг"), mates
+    each = pick("Они спорили друг с другом", "Мы посмотрели друг на друга.", lang="ru")
+    assert not hit(each, "подруг"), f"друг друга reached the friends bucket: {each}"
+
+    # A client is a client whether or not anybody said касса.
+    client = pick("Клиентка потребовала скидку и позвала менеджера",
+                  "Покупатель хамил, посетитель снимал на телефон.", lang="ru")
+    assert hit(client, "официант"), client
+
+    # Dollars, because the stories are American: "рубль" is said in none of the
+    # last 87 and "доллар" in twenty.
+    usd = pick("Она осталась должна мне 400 долларов",
+               "Я оставил чаевые наличными и забрал чек.", lang="ru")
+    assert hit(usd, "деньг"), usd
 
     # and two uploads of the same video must not carry identical text
     same = {" ".join(pick("Сосед прислал счёт на 80000", "Соседка затопила нас.",
