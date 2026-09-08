@@ -912,8 +912,7 @@ if __name__ == "__main__":
     # three are arithmetic every render depends on, so they are checked with the
     # engine stubbed out rather than by listening to a demo: no title is ever
     # synthesized, the card's length is the cover and not a narration, and the
-    # story's first word lands at the front of the track behind nothing but the
-    # whoosh.
+    # story's first word opens the track with nothing whatsoever in front of it.
     _real = (speak, speak_body, duration, subprocess.run)
     _asked = []
 
@@ -927,7 +926,7 @@ if __name__ == "__main__":
                                          {"word": "b", "start": 0.4, "end": 0.9}]
 
     globals()["speak"], globals()["speak_body"] = _fake_speak, _fake_body
-    globals()["duration"] = lambda f: 0.7 if str(f) == str(SFX) else 10.0
+    globals()["duration"] = lambda f: 10.0
     subprocess.run = lambda *a, **k: None
     try:
         _, _w, _tend, _tw = speak_parts(
@@ -940,8 +939,13 @@ if __name__ == "__main__":
         f"the title is being narrated again: {_asked}"
     assert _tend == COVER_SEC, _tend
     assert _tw == [], "a cover has no word timings - card.py draws one still"
-    assert _w[0]["start"] == 0.7, \
-        f"the story must open the track behind the whoosh alone, not {_w[0]}"
+    # Nothing leads the story any more - see config.SFX for why the whoosh and
+    # its 0.7 seconds of wordless track were taken out. Put a file back there
+    # and this is the line that says the pause came back with it.
+    assert not SFX.exists(), \
+        f"{SFX.name} is back, and with it a wordless {duration(SFX):.1f}s in front"
+    assert _w[0]["start"] == 0.0, \
+        f"the story must open the track, with nothing in front of it: {_w[0]}"
     print("cover card and story-first track ok")
 
     # full-length narration on purpose: pace on a two-sentence clip is not

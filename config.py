@@ -621,6 +621,13 @@ AD_DIR = ROOT / "assets" / "ad"
 # file means no whoosh and no delay - the video is simply the way it was.
 # Trim it to the audible part before dropping it in: its length IS the pause in
 # front of the story, so a second of trailing silence is a second of nothing.
+#
+# THE FILE IS GONE ON PURPOSE since 2026-09-08 and this is not a broken asset.
+# It was 0.7 seconds at the loudest point of the whole video - measured -4.5 dB
+# peak against -9.4 dB for the narration behind it - with no word spoken and no
+# word on screen, spent out of the three seconds TikTok decides on. The story
+# opens the track at zero now. Dropping a file back here restores every bit of
+# it, including the pause, and voice.py's self-test fails until that is meant.
 SFX = ROOT / "assets" / "whoosh.mp3"
 # Background music, one subdirectory per mood: horror/ for the scary slot,
 # simple/ for everything else. Empty or missing means no music, the same way an
