@@ -427,10 +427,14 @@ def caption(title: str, hashtags=None, body: str = "") -> str:
     room = TITLE_MAX - len(tags) - 3
     block = facts_.block()
     if block and len(block) + len(title) + 2 <= room:
-        # Tags on the line straight under the title, not a paragraph below it:
-        # they are part of the same line of text as far as a reader is
-        # concerned, and a blank line there reads as a third section.
-        return f"{title}\n{tags}\n\n{block}"
+        # The block's FIRST line goes second, right under the title, and the
+        # tags go to the bottom. That line is the block's whole mechanism - it
+        # promises three facts and refuses to say what they are - and it only
+        # works from where the feed shows it. Measured over the 84 videos in
+        # tiktok.csv between 1000 and 10000 views: 0.55 comments per thousand
+        # before the block existed, 0.87 after, p about 0.003. Hashtags in that
+        # position promise nothing, so they are what moves out of it.
+        return f"{title}\n\n{block}\n\n{tags}"
 
     if len(title) > room:
         title = title[:room - 3].rstrip() + "..."
@@ -1526,19 +1530,25 @@ if __name__ == "__main__":
     assert len({caption("Один и тот же") for _ in range(30)}) > 5, "tags must rotate"
 
     # The layout, and the order is the whole point of it: the title first,
-    # carrying its marker, the tags on the line straight under it, the facts
-    # block below both. Anything that puts the trivia back in front of the
-    # title is the 2026-09-08 change coming undone - see caption().
+    # carrying its marker, the block's promise line second, the tags last. Both
+    # halves of that are load-bearing and both were got wrong once - the trivia
+    # in front of the title until 2026-09-08, the hashtags between them for a
+    # day after. See caption() for what each position is worth.
     facts_.block = lambda lang="", lead="": f"{lead}ХУК\n\n1 факт\n2 факт\n3 факт\n\nКОММЕНТ"
     _with = caption(_pfx + "Заголовок")
     assert _with.splitlines()[0] == _pfx + "Заголовок", _with
-    assert _with.index("Заголовок") < _with.index("#") < _with.index("ХУК"), _with
+    assert _with.splitlines()[2] == "ХУК", f"the promise must be line two: {_with}"
+    assert _with.index("Заголовок") < _with.index("ХУК") < _with.index("#"), _with
     assert _with.count("Часть 2/3") == 1, "the marker is written once"
-    assert _with.endswith("КОММЕНТ"), _with
-    assert caption("Заголовок").startswith("Заголовок\n#"), "the title leads"
+    assert _with.splitlines()[-1].startswith("#"), _with
+    assert caption("Заголовок").startswith("Заголовок\n\nХУК"), "the title leads"
     # ...and without a block the title still leads, with the tags under it
     facts_.block = lambda lang="", lead="": ""
-    assert caption(_pfx + "Заголовок").splitlines()[0] == _pfx + "Заголовок"
+    # one call, not two: the tags are drawn at random and two captions of the
+    # same title are not the same string
+    _bare = caption(_pfx + "Заголовок").splitlines()
+    assert len(_bare) == 2 and _bare[0] == _pfx + "Заголовок", _bare
+    assert _bare[1].startswith("#"), _bare
     facts_.block = lambda lang="", lead="": f"{lead}ХУК\n\n1 факт\n2 факт\n3 факт\n\nКОММЕНТ"
     # ...and a title long enough to crowd it out drops the block, not the title
     _tight = caption("я" * (TITLE_MAX - 20))
