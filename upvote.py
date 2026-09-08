@@ -1916,10 +1916,11 @@ if __name__ == "__main__":
                     help="transcribe N videos and split them into stories")
     ap.add_argument("--judge", action="store_true",
                     help="judge the titles harvested but not yet judged")
-    ap.add_argument("--proofread", nargs="?", type=int, const=1, default=None,
+    ap.add_argument("--reproof", nargs="?", type=int, const=1, default=None,
                     metavar="N",
-                    help="put back what whisper misheard in N already-banked "
-                         "stories (only ones not parked on an issue)")
+                    help="go back over N already-banked stories and put back "
+                         "what whisper misheard (only ones not parked on an "
+                         "issue). New stories are proofread by --digest itself")
     ap.add_argument("--show", action="store_true")
     ap.add_argument("--push-state", action="store_true",
                     help="commit this machine's harvest onto origin and push")
@@ -2456,8 +2457,8 @@ if __name__ == "__main__":
         # cannot use, and the workflow already runs the two back to back.
         print(f"{digest(a.digest)} new stories")
         print(f"{cache_audio()} source audio files ready")
-    elif a.proofread is not None:
-        print(f"{reproof(a.proofread)} stories corrected")
+    elif a.reproof is not None:
+        print(f"{reproof(a.reproof)} stories corrected")
     elif a.judge:
         kept, dropped = judge()
         print(f"{kept} readings, {dropped} something else")
