@@ -163,8 +163,9 @@ def videos(fields: str = "id,title,create_time,view_count,like_count,"
 
 
 # "Часть 1/2 - " and "Часть 1/2. ", the two shapes the part marker has led a
-# published caption in. Looser than _PART below, which matches what
-# part_prefix() glued onto a title; this one reads the caption back off TikTok.
+# published caption in. Deliberately loose: it reads captions back off TikTok,
+# including the ones sent while the facts block led and the marker rode in on
+# its line.
 _MARKER = re.compile(r"^\W*(?:%s)\s*\d+\s*/\s*\d+\s*[-.—]*\s*"
                      % "|".join(map(re.escape, set(PART_WORD.values()))), re.I)
 
@@ -390,26 +391,25 @@ def part_prefix(meta: dict) -> str:
     return f"{word} {meta['part']}/{meta['total']} - "
 
 
-# The part marker as caption() finds it: already glued to the front of the
-# title by the caller, because that is where part_prefix() puts it. It has to
-# come back off to lead the caption on its own line - see the note there.
-_PART = re.compile(r"^(?:%s)\s+\d+/\d+\s+-\s+"
-                   % "|".join(sorted(map(re.escape, set(PART_WORD.values())))))
-
-
 def caption(title: str, hashtags=None, body: str = "") -> str:
-    """Facts block, title and tags matched to the video, inside TikTok's limit.
+    """Title and its tags, then the facts block, inside TikTok's limit.
 
-    Two lines show before the fold, and they are spent on the facts block from
-    facts.py rather than on the title. That is deliberate and it is the whole
-    point of the block: the title is already burned onto the title card the
-    viewer is looking at, so repeating it here buys nothing, while a line that
-    promises three facts buys the seconds someone spends reading them - seconds
-    the video is still playing. The title stays underneath, where it is worth
-    keeping for the words in it.
+    The title leads, and the two lines that show before the fold are it and its
+    hashtags. Until 2026-09-08 the facts block from facts.py led instead, on the
+    grounds that "the title is already burned onto the title card the viewer is
+    looking at" - which stopped being true on 2026-09-05, when the card became a
+    COVER held for voice.COVER_SEC, five frames. The title was then in no place
+    at all: not on screen long enough to read, and under 400-odd characters of
+    someone else's trivia in the caption.
 
-    The part marker is the exception and still leads: someone who landed on
-    part 2 has to learn that from the feed, not by tapping "ещё".
+    That trivia is also what the caption told TikTok the video was about. A
+    story about an open marriage went out described as the Empire State
+    Building's stairs and eyeless deep-sea fish, and got shown to whoever wants
+    those - who do not stay for the story. The block still earns its seconds, so
+    it keeps its place; it just no longer speaks first.
+
+    The part marker needs no handling here: part_prefix() already glued it to
+    the front of the title, which is now the front of the caption.
 
     Tags come from tags.py rather than from a shuffled flat pool - see the note
     in youtube.description_for(). `body` is what lets them match on more than
@@ -419,31 +419,22 @@ def caption(title: str, hashtags=None, body: str = "") -> str:
             else random.sample(list(hashtags), min(5, len(hashtags))))
     tags = " ".join(pool[:5])
     title = title.strip()
-    marker = _PART.match(title)
-    mark = ""
-    if marker:
-        # Moved, not copied: left on the title as well it reads twice in one
-        # caption, and the second one is the copy nobody meant to send.
-        mark = marker.group(0).strip(" -")
-        title = title[marker.end():]
 
     # The block is the first thing dropped if the text will not fit. It is 400
     # characters of someone else's trivia; the title and the tags are what the
     # video is about, and TITLE_MAX is 2200, so this branch is a guard rather
     # than something that happens.
     room = TITLE_MAX - len(tags) - 3
-    block = facts_.block(lead=f"{mark}. " if mark else "")
+    block = facts_.block()
     if block and len(block) + len(title) + 2 <= room:
         # Tags on the line straight under the title, not a paragraph below it:
         # they are part of the same line of text as far as a reader is
-        # concerned, and a blank line there reads as a fourth section.
-        return f"{block}\n\n{title}\n{tags}"
+        # concerned, and a blank line there reads as a third section.
+        return f"{title}\n{tags}\n\n{block}"
 
-    lead = f"{mark}\n\n" if mark else ""
-    room -= len(lead)
     if len(title) > room:
         title = title[:room - 3].rstrip() + "..."
-    return f"{lead}{title}\n{tags}"
+    return f"{title}\n{tags}"
 
 
 def _plan(size: int) -> list[tuple[int, int]]:
@@ -1529,24 +1520,25 @@ if __name__ == "__main__":
     assert part_prefix({"part": 2, "total": 3}) == "Часть 2/3 - "
     _long = caption(_pfx + "я" * 3000)
     assert len(_long) <= TITLE_MAX, len(_long)
-    # the marker leads on its own line now, so it is the first line and not a
-    # prefix of one - what must not happen is a long title swallowing it
-    assert _long.splitlines()[0] == _pfx.strip(" -"), _long[:80]
+    # a long title is trimmed from the tail, so the marker it was glued to
+    # survives at the head of the first line
+    assert _long.startswith(_pfx), _long[:80]
     assert len({caption("Один и тот же") for _ in range(30)}) > 5, "tags must rotate"
 
-    # With a block: the marker rides on the hook's line, the title sits under
-    # the block and the tags on the line straight below it. That order and
-    # those blank lines are the whole layout.
+    # The layout, and the order is the whole point of it: the title first,
+    # carrying its marker, the tags on the line straight under it, the facts
+    # block below both. Anything that puts the trivia back in front of the
+    # title is the 2026-09-08 change coming undone - see caption().
     facts_.block = lambda lang="", lead="": f"{lead}ХУК\n\n1 факт\n2 факт\n3 факт\n\nКОММЕНТ"
     _with = caption(_pfx + "Заголовок")
-    assert _with.splitlines()[0] == "Часть 2/3. ХУК", _with
-    assert _with.index("ХУК") < _with.index("Заголовок") < _with.index("#"), _with
-    assert _with.count("Часть 2/3") == 1, "the marker is moved, not copied"
-    assert _with.endswith("\nЗаголовок\n" + _with.splitlines()[-1]), _with
-    assert caption("Заголовок").startswith("ХУК"), "no marker, the hook leads"
-    # ...and without a block the marker still has to lead, on its own line
+    assert _with.splitlines()[0] == _pfx + "Заголовок", _with
+    assert _with.index("Заголовок") < _with.index("#") < _with.index("ХУК"), _with
+    assert _with.count("Часть 2/3") == 1, "the marker is written once"
+    assert _with.endswith("КОММЕНТ"), _with
+    assert caption("Заголовок").startswith("Заголовок\n#"), "the title leads"
+    # ...and without a block the title still leads, with the tags under it
     facts_.block = lambda lang="", lead="": ""
-    assert caption(_pfx + "Заголовок").splitlines()[0] == "Часть 2/3"
+    assert caption(_pfx + "Заголовок").splitlines()[0] == _pfx + "Заголовок"
     facts_.block = lambda lang="", lead="": f"{lead}ХУК\n\n1 факт\n2 факт\n3 факт\n\nКОММЕНТ"
     # ...and a title long enough to crowd it out drops the block, not the title
     _tight = caption("я" * (TITLE_MAX - 20))
