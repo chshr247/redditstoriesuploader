@@ -1269,9 +1269,25 @@ def reproof(count: int = 1) -> int:
         if not fixed:
             continue
         with _db() as db:
-            db.execute("UPDATE yt_story SET segs=?, body=? WHERE vid=? AND n=?",
-                       (json.dumps(story["segs"], ensure_ascii=False),
-                        story["body"], vid, n))
+            # `parts IS NULL` again, on the WRITE and not only on the read that
+            # chose this row. The two are a database apart - push_state() pulls
+            # CI's file in between on a long run - and a row parked in that gap
+            # must not take the new words: parts would be rebuilt from them at
+            # the next split while review.written still holds the old ones, and
+            # confirm() reads that as a narration rewritten by hand. Measured
+            # on a copy of seen.db, 2026-09-09: proofread-then-park keeps the
+            # tape, and so does proofread-under-a-parked-row on its own, but
+            # proofread-then-RESPLIT drops it and the story goes out in Fish's
+            # voice. This clause is what makes that sequence unreachable.
+            n_rows = db.execute(
+                "UPDATE yt_story SET segs=?, body=? "
+                "WHERE vid=? AND n=? AND parts IS NULL",
+                (json.dumps(story["segs"], ensure_ascii=False),
+                 story["body"], vid, n)).rowcount
+        if not n_rows:
+            log.warning("yt_%s_%d was parked while it was being proofread - "
+                        "leaving it on the words it was parked with", vid, n)
+            continue
         done += 1
     log.info("%d of %d free row(s) proofread, %d changed",
              min(len(rows), max(count, 0)), len(rows), done)
@@ -2371,6 +2387,58 @@ if __name__ == "__main__":
         # "фундамент" is not "фондамент": the table may only fire on the whole
         # word it was written for.
         assert _known("залили фундамент") == "залили фундамент"
+
+        # reproof() may only move the words under a story NOBODY has parked.
+        # The sequence this refuses, measured on a copy of seen.db 2026-09-09:
+        # a proofread row that is later re-split rebuilds `parts` from the new
+        # words while review.written still holds the old ones, confirm() reads
+        # the difference as a narration rewritten by hand, and the story goes
+        # out in Fish's voice instead of the tape's. Proofreading before the
+        # park is safe and is the only thing allowed here.
+        _p = Path(OUT_DIR) / "_selftest_reproof.db"
+        _p.unlink(missing_ok=True)
+        _c = sqlite3.connect(_p)
+        _c.executescript(
+            "CREATE TABLE yt_story(vid TEXT, n INT, sub TEXT, title TEXT,"
+            " body TEXT, start REAL, end REAL, views INT, ts REAL,"
+            " used INT DEFAULT 0, segs TEXT, cuts TEXT, parts TEXT,"
+            " PRIMARY KEY(vid, n));"
+            "CREATE TABLE parts(post_id TEXT, n INT, done INT, lang TEXT);"
+            "CREATE TABLE review(post_id TEXT, lang TEXT);")
+        _seg = json.dumps([{"start": 0.0, "end": 1.0, "text": "Абдейт первый"}])
+        for _v, _parts in (("free", None), ("cut", '[{"body": "x"}]')):
+            _c.execute("INSERT INTO yt_story(vid, n, body, views, used, segs,"
+                       " parts) VALUES (?,0,'старое тело',1,0,?,?)",
+                       (_v, _seg, _parts))
+        _c.execute("INSERT INTO yt_story(vid, n, body, views, used, segs, parts)"
+                   " VALUES ('parked',0,'старое тело',1,0,?,NULL)", (_seg,))
+        _c.execute("INSERT INTO review VALUES ('yt_parked_0','ru')")
+        _c.commit(); _c.close()
+
+        _was, _asked = DB_PATH, []
+        globals()["DB_PATH"] = _p
+        _real_pr = _proofread
+        globals()["_proofread"] = lambda segs: (
+            _asked.append(segs[0]["text"]) or segs[0].update(text="Апдейт первый")
+            or 1)
+        try:
+            assert reproof(99) == 1, "exactly the one free row may be rewritten"
+        finally:
+            globals()["DB_PATH"], globals()["_proofread"] = _was, _real_pr
+        _c = sqlite3.connect(_p)
+        _rows = dict(_c.execute("SELECT vid, body FROM yt_story"))
+        _c.close()
+        try:
+            _p.unlink(missing_ok=True)
+        except OSError:
+            # _db() hands back a connection and never closes it - the whole
+            # module works that way - so Windows can still be holding this.
+            # Leaving a scratch file behind beats failing a test that passed.
+            pass
+        assert _rows["free"] == "Апдейт первый", _rows
+        assert _rows["cut"] == "старое тело", "a story already cut was rewritten"
+        assert _rows["parked"] == "старое тело", \
+            "a story parked on an issue was rewritten - it will lose its tape"
 
         # An empty segment is never sent and so can never come back changed -
         # _parse_split() leaves it in place so the cuts still point where they
