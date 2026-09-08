@@ -1554,11 +1554,28 @@ def _apply_desk(state: dict) -> int:
                 # if the count changed - confirm() drops the tape and half a
                 # story ships in a synthesized voice. A story with parts still
                 # pending belongs to the publishing side until they are sent.
-                try:
-                    flight = {r[0] for r in db.execute(
-                        "SELECT DISTINCT post_id FROM parts WHERE done=0")}
-                except sqlite3.OperationalError:   # a file with no parts table
-                    flight = set()
+                #
+                # A story PARKED ON AN ISSUE is mid-flight for the same reason,
+                # and asking `parts` alone never saw it: a single-video story
+                # has no row there at all. review.written was written from the
+                # OLD cut and confirm() compares the two at the render, so
+                # moving the text under it reads as a narration rewritten by
+                # hand - the tape is dropped and the story is read aloud.
+                # yt_Zk7zfGDnZEM_1 went out that way (parked 2026-09-07 01:28,
+                # recut 23:54 the same night, published in Fish's voice on
+                # 09-08), with three more queued behind it. rendered() deletes
+                # the row, so this set drains on its own. Same pair
+                # cache_audio() asks about, and for the same reason.
+                #
+                # Asked table by table: a file missing one of them must still
+                # be guarded by the other.
+                flight = set()
+                for q in ("SELECT post_id FROM parts WHERE done=0",
+                          "SELECT post_id FROM review"):
+                    try:
+                        flight |= {r[0] for r in db.execute(q)}
+                    except sqlite3.OperationalError:   # no such table here
+                        pass
                 recut = [r for r in st_rows if (r[0], r[1]) in have_st
                          and f"yt_{r[0]}_{r[1]}" not in flight
                          and (r[i_body], r[i_segs]) != have_st[(r[0], r[1])][2:]]
@@ -1966,6 +1983,7 @@ if __name__ == "__main__":
             " lang TEXT, PRIMARY KEY(post_id, n, lang));"
             "CREATE TABLE tiktok(file TEXT PRIMARY KEY, publish_id TEXT,"
             " ts REAL, channel TEXT, backend TEXT);"
+            "CREATE TABLE review(post_id TEXT, lang TEXT);"
             "INSERT INTO parts VALUES ('p',1,0,'ru'),('p',2,1,'ru');"
             "INSERT INTO tiktok VALUES ('a.mp4','theirs',1,'ru','api');")
         _c.commit(); _c.close()
@@ -2035,6 +2053,28 @@ if __name__ == "__main__":
         _c = sqlite3.connect(_theirs)
         assert _c.execute("SELECT body FROM yt_story WHERE vid='v7'"
                           ).fetchone()[0] == "старое тело", "part 2 lost its cut"
+        # ...nor under a story PARKED ON AN ISSUE, which has no `parts` row to
+        # be found by: yt_v6_0 is one video waiting on its title, and the text
+        # confirm() will check it against is the one already in `review`.
+        _c.execute("INSERT INTO yt_story(vid, n, sub, title, body, start, end,"
+                   " views, ts, segs, cuts, parts, used) VALUES"
+                   " ('v6',0,'x','T','старое тело',0,99,1,0,'[]','[]',"
+                   "'[{\"body\": \"как в review\"}]',1)")
+        _c.execute("INSERT INTO review(post_id, lang) VALUES ('yt_v6_0', ?)",
+                   (OUTPUT_LANG,))
+        _c.commit(); _c.close()
+        _state["yt_story"] = (_st_cols, [
+            ("v6", 0, "x", "T", "новое тело", 5.0, 99.0, 1, 0, '[{"t": 2}]',
+             "[]", '[{"body": "перекроено"}]', 1)])
+        _real_path, globals()["DB_PATH"] = DB_PATH, _theirs
+        try:
+            assert _apply_desk(_state) == 0, "a story on an issue was recut"
+        finally:
+            globals()["DB_PATH"] = _real_path
+        _c = sqlite3.connect(_theirs)
+        assert _c.execute("SELECT body FROM yt_story WHERE vid='v6'"
+                          ).fetchone()[0] == "старое тело", \
+            "the tape moved under a story already parked on an issue"
         _c.close(); _theirs.unlink(missing_ok=True)
 
         print("upvote ok")
