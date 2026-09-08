@@ -57,7 +57,6 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-import facts as facts_        # `facts` is the local variable in caption()
 import source
 import tags as tags_          # `tags` is the local variable in caption()
 from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL,
@@ -392,24 +391,33 @@ def part_prefix(meta: dict) -> str:
 
 
 def caption(title: str, hashtags=None, body: str = "") -> str:
-    """Title and its tags, then the facts block, inside TikTok's limit.
+    """The title and its tags, inside TikTok's limit. Nothing else.
 
-    The title leads, and the two lines that show before the fold are it and its
-    hashtags. Until 2026-09-08 the facts block from facts.py led instead, on the
-    grounds that "the title is already burned onto the title card the viewer is
-    looking at" - which stopped being true on 2026-09-05, when the card became a
-    COVER held for voice.COVER_SEC, five frames. The title was then in no place
-    at all: not on screen long enough to read, and under 400-odd characters of
-    someone else's trivia in the caption.
+    The facts block from facts.py was in here from 2026-08-12 to 2026-09-09 and
+    is OFF rather than deleted - facts.py is whole, and putting the block back
+    is one call. What it was and why it went, so the next person does not have
+    to rediscover both:
 
-    That trivia is also what the caption told TikTok the video was about. A
-    story about an open marriage went out described as the Empire State
-    Building's stairs and eyeless deep-sea fish, and got shown to whoever wants
-    those - who do not stay for the story. The block still earns its seconds, so
-    it keeps its place; it just no longer speaks first.
+    It was three pieces of trivia and a line promising them, and it led the
+    caption. The reasoning was that the title was already burned onto the card
+    the viewer was looking at, so the visible lines were free - which stopped
+    being true on 2026-09-05, when the card became a COVER held for
+    voice.COVER_SEC, five frames. From then the title was nowhere: not on screen
+    long enough to read, and under 400-odd characters of someone else's trivia
+    here. That trivia was also what the caption told TikTok the video was about,
+    and a story about an open marriage went out described as the Empire State
+    Building's stairs and eyeless deep-sea fish.
+
+    It was not free to drop, and the number is worth keeping: over the 84 videos
+    in tiktok.csv between 1000 and 10000 views, comments went 0.55 per thousand
+    before the block to 0.87 after, p about 0.003. That is the whole case for it
+    - and it is not clean, because 2026-08-12 is also the day the story picking
+    was rebuilt (pool harvest, score bands, the live reddit API), so some of the
+    0.87 belongs to better stories. Settling it properly means an A/B, not
+    another look at this window.
 
     The part marker needs no handling here: part_prefix() already glued it to
-    the front of the title, which is now the front of the caption.
+    the front of the title, which is the front of the caption.
 
     Tags come from tags.py rather than from a shuffled flat pool - see the note
     in youtube.description_for(). `body` is what lets them match on more than
@@ -419,23 +427,7 @@ def caption(title: str, hashtags=None, body: str = "") -> str:
             else random.sample(list(hashtags), min(5, len(hashtags))))
     tags = " ".join(pool[:5])
     title = title.strip()
-
-    # The block is the first thing dropped if the text will not fit. It is 400
-    # characters of someone else's trivia; the title and the tags are what the
-    # video is about, and TITLE_MAX is 2200, so this branch is a guard rather
-    # than something that happens.
     room = TITLE_MAX - len(tags) - 3
-    block = facts_.block()
-    if block and len(block) + len(title) + 2 <= room:
-        # The block's FIRST line goes second, right under the title, and the
-        # tags go to the bottom. That line is the block's whole mechanism - it
-        # promises three facts and refuses to say what they are - and it only
-        # works from where the feed shows it. Measured over the 84 videos in
-        # tiktok.csv between 1000 and 10000 views: 0.55 comments per thousand
-        # before the block existed, 0.87 after, p about 0.003. Hashtags in that
-        # position promise nothing, so they are what moves out of it.
-        return f"{title}\n\n{block}\n\n{tags}"
-
     if len(title) > room:
         title = title[:room - 3].rstrip() + "..."
     return f"{title}\n{tags}"
@@ -1503,13 +1495,10 @@ if __name__ == "__main__":
     assert len(p) == 5 and p[0] == (0, 9_999_999) and p[-1] == (40_000_000, 54_099_999)
     assert sum(e - s + 1 for s, e in p) == 54_100_000, "chunks must cover the file"
     assert all(a[1] + 1 == b[0] for a, b in zip(p, p[1:])), "gap between chunks"
-    # These run before every CLI command, including in CI, so the facts block
-    # is stubbed rather than fetched: caption() would otherwise make a dozen
-    # calls to a third-party API and one to the model per invocation, and a
-    # self-test that needs the network is a self-test that fails for weather.
-    # facts.py tests the real thing against its own stubs.
-    _real_block = facts_.block
-    facts_.block = lambda lang="", lead="": ""
+    # No stubbing here any more: caption() reaches nothing but tags.py, which is
+    # regexes and a dice roll. It used to call the facts block, which meant a
+    # dozen requests to a third-party API and one to the model on every CLI
+    # command in CI - if the block ever comes back, so does the stub.
     assert caption("Короткий").splitlines()[0] == "Короткий"
     assert len(caption("x" * 3000)) <= TITLE_MAX
 
@@ -1529,37 +1518,26 @@ if __name__ == "__main__":
     assert _long.startswith(_pfx), _long[:80]
     assert len({caption("Один и тот же") for _ in range(30)}) > 5, "tags must rotate"
 
-    # The layout, and the order is the whole point of it: the title first,
-    # carrying its marker, the block's promise line second, the tags last. Both
-    # halves of that are load-bearing and both were got wrong once - the trivia
-    # in front of the title until 2026-09-08, the hashtags between them for a
-    # day after. See caption() for what each position is worth.
-    facts_.block = lambda lang="", lead="": f"{lead}ХУК\n\n1 факт\n2 факт\n3 факт\n\nКОММЕНТ"
-    _with = caption(_pfx + "Заголовок")
-    assert _with.splitlines()[0] == _pfx + "Заголовок", _with
-    assert _with.splitlines()[2] == "ХУК", f"the promise must be line two: {_with}"
-    assert _with.index("Заголовок") < _with.index("ХУК") < _with.index("#"), _with
-    assert _with.count("Часть 2/3") == 1, "the marker is written once"
-    assert _with.splitlines()[-1].startswith("#"), _with
-    assert caption("Заголовок").startswith("Заголовок\n\nХУК"), "the title leads"
-    # ...and without a block the title still leads, with the tags under it
-    facts_.block = lambda lang="", lead="": ""
-    # one call, not two: the tags are drawn at random and two captions of the
-    # same title are not the same string
+    # The whole layout now: two lines, the title carrying its marker and the
+    # tags under it. One call, not two - the tags are drawn at random, so two
+    # captions of the same title are not the same string.
     _bare = caption(_pfx + "Заголовок").splitlines()
     assert len(_bare) == 2 and _bare[0] == _pfx + "Заголовок", _bare
     assert _bare[1].startswith("#"), _bare
-    facts_.block = lambda lang="", lead="": f"{lead}ХУК\n\n1 факт\n2 факт\n3 факт\n\nКОММЕНТ"
-    # ...and a title long enough to crowd it out drops the block, not the title
-    _tight = caption("я" * (TITLE_MAX - 20))
-    assert len(_tight) <= TITLE_MAX and "ХУК" not in _tight, len(_tight)
+    # Nothing stands between the title and the feed - see caption() for what was
+    # there until 2026-09-09 and what it cost. _headline() reads a title back
+    # out of a caption by cutting at the last 👇, which finds nothing to cut
+    # here and everything to cut in the captions already published, so this is
+    # also what keeps that working.
+    assert "\U0001f447" not in caption("Заголовок"), "the caption is title and tags"
+    assert _headline(caption(_pfx + "Заголовок")) == "Заголовок", \
+        _headline(caption(_pfx + "Заголовок"))
     # The body is matched too, not just the title - it is where most of the
     # topic words are, and passing it is the whole reason caption() takes it.
     # Fixtures in this channel's language: caption() reads its own buckets.
     _TOPIC = {"ru": "Свекровь въехала в квартиру.",
               "en": "My mother-in-law moved into the apartment."}[CHANNEL]
     assert set(caption("Заголовок", body=_TOPIC).split()) & tags_.TOPIC_TAGS[CHANNEL]
-    facts_.block = _real_block
 
     # A spent allowance stops an ordinary video and never a part: the inbox
     # must not end up holding the middle of a story with no beginning.
