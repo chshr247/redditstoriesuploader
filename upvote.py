@@ -52,6 +52,7 @@ confusing part. Three things together fix it, and any two of them do not:
     2026.08.19 downloads. See the floor in requirements.txt.
 """
 import argparse
+import difflib
 import json
 import logging
 import math
@@ -347,6 +348,67 @@ and by its own first words:
 
 An empty list is a valid answer - it means every video here is a reading.
 """
+
+PROOF_SYSTEM = """\
+You are given numbered lines of a Russian transcript that a speech recogniser
+produced from a recording of somebody reading a story aloud. The RECORDING is
+right; the transcript is only what the machine thought it heard. These lines
+are shown as subtitles over that same recording, so every one of them has to
+say what the narrator actually said.
+
+Put back the words that were misheard. Nothing else.
+
+A word was misheard when the line as written is not Russian - "гаистично",
+"тростовый фонд", "их-то сожжи", "сорву большойку" - or is Russian that cannot
+mean anything where it stands: "Я ему дачка" for "я мудачка", "красные флаки"
+for "красные флаги", "И изменено" where the reader said the English word EDIT.
+Replace it with the word the narrator must have said: the one that SOUNDS like
+what was written and belongs in that sentence. If you cannot tell what was
+said, leave the line alone - a wrong guess is worse than a wrong word, because
+the viewer can hear which one it was.
+
+Leave everything else exactly as it stands:
+- Do not rewrite for style, grammar, word order or length.
+- Do not add anything and do not cut anything, however clumsy it reads. This
+  is somebody talking; clumsy is not an error.
+- Do not touch punctuation or capitalisation, except what the corrected word
+  itself needs.
+- A name you do not recognise is a name, not a mishearing. Leave it.
+- Most lines have nothing wrong with them. Copy those out unchanged.
+
+Answer with the same lines, the same numbers, in the same order, one per line,
+written "N text" - every line you were given and no others. No commentary, no
+JSON, no markdown.
+"""
+
+# How far a line may move and still be a correction rather than a rewrite,
+# measured with difflib on the letters alone. "тростовый" -> "трастовый" in a
+# thirty-word line scores about 0.99; a line reworded for style lands well
+# under this. Below it the ORIGINAL is kept, because the tape says the original
+# and the subtitles are laid over the tape - see confirm().
+PROOF_MIN = 0.80
+# The mishearings this channel produces over and over, fixed before the model
+# is asked anything - the same call _INTRO makes, for the same reason: a closed
+# set is cheaper and steadier in code than in a prompt, and the model is worst
+# exactly here. Measured over the 93 stories banked to 2026-09-09; asked to fix
+# "Я ему дачка" it answered "Я ему дала что" twice out of two.
+#
+# Nothing goes in this table that is not BOTH recurring and unambiguous. The
+# open-ended tail - "сорву большойку", "гаистично", "их-то сожжи" - is the
+# model's job and cannot be a table at all: 574 of the 652 unrecognised words
+# in that corpus occur exactly once.
+_MISHEARD = [
+    # "я мудачка" (r/AmItheAsshole, said in the first line of half of them)
+    (re.compile(r"\bя\s+ему\s+дачка\b", re.I), "я мудачка"),
+    # "апдейт" - the channel's word for the update half of a story
+    (re.compile(r"\b[аоу]бдейт?\b", re.I), "апдейт"),
+    (re.compile(r"\bтростов", re.I), "трастов"),
+    (re.compile(r"\bфундом\b", re.I), "фондом"),
+    (re.compile(r"\bредит\b", re.I), "реддит"),
+]
+# ...and a model doing that to a fifth of a story is not proofreading it. That
+# is an answer worth asking for again rather than accepting line by line.
+PROOF_MAX_REJECT = 0.2
 
 # One call reads this many titles. A channel's whole harvest fits in two or
 # three of them - the titles are one line each, so this is thousands of tokens
@@ -972,6 +1034,108 @@ def _split(segs: list[dict]) -> list[dict]:
         temperature=0)
 
 
+def _known(text: str) -> str:
+    """The recurring mishearings put back, capitalisation and all.
+
+    The patterns are written lower-case and matched case-insensitively, because
+    every one of these turns up mid-sentence and at the head of one - "Абдейт
+    первый" opens a paragraph. What the tape says does not change with the
+    capital, so the replacement takes its case from the words it replaces.
+    """
+    def _cased(m: re.Match, to: str) -> str:
+        was = m.group(0)
+        return to.capitalize() if was[:1].isupper() else to
+
+    for pat, to in _MISHEARD:
+        text = pat.sub(lambda m, t=to: _cased(m, t), text)
+    return text
+
+
+def _parse_proof(raw: str, want: dict) -> tuple[tuple[dict, list], list[str]]:
+    """Model answer -> ({index: corrected}, [indexes left alone]), plus faults.
+
+    Every line is checked against the one it claims to correct, because this is
+    the one stage that can put words on screen that the recording never says.
+    A line that moved further than PROOF_MIN is not corrected - it is kept as
+    heard, silently and per line, since one over-eager sentence is not worth a
+    second call for the whole story. A fifth of them is.
+    """
+    got, faults = {}, []
+    for line in raw.splitlines():
+        # "12 текст", and the separators a model reaches for on its own
+        if m := re.match(r"\s*(\d+)\s*[.):\]]?\s+(.*)$", line):
+            if (i := int(m.group(1))) in want:
+                got[i] = m.group(2).strip()
+    if missing := sorted(set(want) - set(got)):
+        faults.append(f"lines {missing[:8]} are missing from your answer - "
+                      f"every line you were given must come back")
+    fixed, kept = {}, []
+    for i, new in got.items():
+        old = want[i]
+        ratio = difflib.SequenceMatcher(None, _plain(old), _plain(new)).ratio()
+        if not new or ratio < PROOF_MIN:
+            kept.append(i)
+        elif new != old:
+            fixed[i] = new
+    if kept and len(kept) > PROOF_MAX_REJECT * len(want):
+        faults.append(f"{len(kept)} of {len(want)} lines came back rewritten "
+                      f"rather than corrected - change only misheard words")
+    return (fixed, kept), faults
+
+
+def _proofread(segs: list[dict]) -> int:
+    """Put back what whisper misheard, per segment and in place. -> how many.
+
+    Per SEGMENT and not over the joined text, for the reason agreed() is
+    applied per segment too: the segments are what is stored, and a part's body
+    is built back out of them by split_parts().
+
+    Empty segments are not sent and not expected back - _parse_split() empties
+    the one it trims the channel's hand-over out of and leaves it in place, so
+    the cuts still point where they did.
+    """
+    # The closed set first, so the model is never asked about the words it
+    # gets wrong most reliably - see _MISHEARD.
+    known = 0
+    for s in segs:
+        if (fixed := _known(s["text"])) != s["text"]:
+            s["text"] = fixed
+            known += 1
+
+    want = {i: s["text"] for i, s in enumerate(segs) if s["text"].strip()}
+    if not want:
+        return known
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is empty - fill in .env")
+    from openai import OpenAI
+    client = OpenAI(api_key=OPENAI_API_KEY, base_url=LLM_BASE_URL or None)
+    fixed, kept = script._ask(
+        client, PROOF_SYSTEM, "\n".join(f"{i} {t}" for i, t in want.items()),
+        lambda raw: _parse_proof(raw, want),
+        keep="Keep the lines you already had right.",
+        temperature=0)
+    for i, new in fixed.items():
+        log.debug("proofread %d: %r -> %r", i, segs[i]["text"][:60], new[:60])
+        segs[i]["text"] = new
+    if kept:
+        log.info("%d line(s) came back changed too far to be a correction and "
+                 "are kept as heard", len(kept))
+    return len(fixed) + known
+
+
+def proofread(story: dict) -> int:
+    """Correct one story's segments and rebuild its body from them.
+
+    The body is joined exactly the way _parse_split() joins it, because that is
+    what split_parts() will do to these same segments later - the two must not
+    be able to disagree about what the story says.
+    """
+    n = _proofread(story["segs"])
+    if n:
+        story["body"] = " ".join(x["text"] for x in story["segs"] if x["text"])
+    return n
+
+
 def digest(count: int = 1) -> int:
     """Transcribe up to `count` un-read videos and bank the stories in them.
 
@@ -1033,6 +1197,20 @@ def digest(count: int = 1) -> int:
                     log.info("%s #%d is r/%s, not in this channel's subs",
                              vid, n, s["sub"] or "?")
                     continue
+                # Before the row is written and therefore before anything reads
+                # it: the text banked here is what gets parked, what the user
+                # is asked about on the issue, and what confirm() compares at
+                # the render. Correcting it later means moving words under a
+                # story somebody has already answered for.
+                #
+                # A failure banks the story as heard, which is what every row
+                # before 2026-09-09 is: a worse video than a proofread one and
+                # a far better one than no video.
+                try:
+                    log.info("%s #%d: %d line(s) put back", vid, n, proofread(s))
+                except Exception:
+                    log.exception("%s #%d: could not be proofread, banking it "
+                                  "as whisper heard it", vid, n)
                 db.execute(
                     "INSERT OR REPLACE INTO yt_story(vid, n, sub, title, body,"
                     " start, end, views, ts, segs, cuts)"
@@ -1047,6 +1225,57 @@ def digest(count: int = 1) -> int:
                  "y" if kept == 1 else "ies", len(stories))
         stored += kept
     return stored
+
+
+def reproof(count: int = 1) -> int:
+    """Proofread stories banked before digest() started doing it. -> changed.
+
+    Only rows nothing is holding. A story parked on an issue, or with parts
+    still waiting to go out, has already had its text read: review.written was
+    written from these words and confirm() compares the two at the render, so
+    moving them now reads as a narration rewritten by hand - the tape is
+    dropped and the story ships in a synthesized voice. That is not a
+    hypothetical, it is how yt_Zk7zfGDnZEM_1 went out on 2026-09-08. Same guard
+    _apply_desk() uses against its own recut, asked table by table for the same
+    reason: a file missing one of them must still be guarded by the other.
+
+    Most-watched first, matching the order next_story() will reach them in, so
+    a run that only gets through part of the backlog fixes the part that ships
+    first.
+    """
+    with _db() as db:
+        flight = set()
+        for q in ("SELECT post_id FROM parts WHERE done=0",
+                  "SELECT post_id FROM review"):
+            try:
+                flight |= {r[0] for r in db.execute(q)}
+            except sqlite3.OperationalError:      # no such table here
+                pass
+        rows = [r for r in db.execute(
+            "SELECT vid, n, segs FROM yt_story WHERE used=0 AND parts IS NULL"
+            " ORDER BY views DESC") if f"yt_{r[0]}_{r[1]}" not in flight]
+
+    done = 0
+    for vid, n, segs in rows[:max(count, 0)]:
+        story = {"segs": json.loads(segs or "[]"), "body": ""}
+        if not story["segs"]:
+            continue
+        try:
+            fixed = proofread(story)
+        except Exception:
+            log.exception("yt_%s_%d: could not be proofread, leaving it", vid, n)
+            continue
+        log.info("yt_%s_%d: %d line(s) put back", vid, n, fixed)
+        if not fixed:
+            continue
+        with _db() as db:
+            db.execute("UPDATE yt_story SET segs=?, body=? WHERE vid=? AND n=?",
+                       (json.dumps(story["segs"], ensure_ascii=False),
+                        story["body"], vid, n))
+        done += 1
+    log.info("%d of %d free row(s) proofread, %d changed",
+             min(len(rows), max(count, 0)), len(rows), done)
+    return done
 
 
 def next_story(skip: "set[str] | tuple" = ()) -> dict | None:
@@ -1671,6 +1900,10 @@ if __name__ == "__main__":
                     help="transcribe N videos and split them into stories")
     ap.add_argument("--judge", action="store_true",
                     help="judge the titles harvested but not yet judged")
+    ap.add_argument("--proofread", nargs="?", type=int, const=1, default=None,
+                    metavar="N",
+                    help="put back what whisper misheard in N already-banked "
+                         "stories (only ones not parked on an issue)")
     ap.add_argument("--show", action="store_true")
     ap.add_argument("--push-state", action="store_true",
                     help="commit this machine's harvest onto origin and push")
@@ -2077,6 +2310,75 @@ if __name__ == "__main__":
             "the tape moved under a story already parked on an issue"
         _c.close(); _theirs.unlink(missing_ok=True)
 
+        # The proofread answer, which is the one stage that can put words on
+        # screen the recording never says. Every case here is about that and
+        # nothing else: the model is not asked whether it improved the line,
+        # it is asked whether the line is still the same line.
+        # Ten lines, because PROOF_MAX_REJECT is a FRACTION: on a three-line
+        # fixture one rejection is a third of the story and every case below
+        # would read as the runaway one. A real story is dozens of segments.
+        _want = {0: "Я ему дачка, что не поделилась выигрышем с собакой",
+                 2: "Он завел собачий тростовый фонд для Бакстера",
+                 **{i: f"Обычная строка номер {i} без единой ошибки"
+                    for i in range(3, 11)}}
+        _same = "\n".join(f"{i} {t}" for i, t in _want.items() if i > 2)
+
+        # The ordinary answer: two misheard words put back, everything else
+        # copied out and therefore reported as neither fixed nor kept.
+        (_fx, _kept), _f = _parse_proof(
+            "0 Я мудачка, что не поделилась выигрышем с собакой\n"
+            "2 Он завел собачий трастовый фонд для Бакстера\n" + _same, _want)
+        assert not _f, _f
+        assert set(_fx) == {0, 2} and not _kept, (_fx, _kept)
+        assert _fx[2].startswith("Он завел собачий трастовый"), _fx[2]
+
+        # A line that came back as a different sentence is NOT applied: the
+        # tape still says the original, and a subtitle that improves on what
+        # is being heard contradicts it. One of ten is dropped quietly.
+        (_fx2, _kept2), _f2 = _parse_proof(
+            "0 Я считаю, что поступила совершенно правильно в этой ситуации\n"
+            "2 Он завел собачий трастовый фонд для Бакстера\n" + _same, _want)
+        assert _kept2 == [0] and set(_fx2) == {2}, (_fx2, _kept2)
+        assert not _f2, "one rewritten line of ten is kept, not re-asked"
+
+        # ...and a model doing it to a fifth of them is not proofreading the
+        # story, so that answer is asked for again instead.
+        (_, _kept3), _f3 = _parse_proof(
+            "0 Мне кажется, я была совершенно права в этом споре\n"
+            "2 Мой парень придумал какой-то фонд для своей собаки\n"
+            "3 Здесь ничего похожего на исходную строку уже не осталось\n"
+            + "\n".join(f"{i} {t}" for i, t in _want.items() if i > 3), _want)
+        assert _kept3 == [0, 2, 3] and _f3, (_kept3, _f3)
+
+        # A line left out of the answer is a fault: every line was sent
+        # because every line is going on screen.
+        _, _f4 = _parse_proof("0 Я мудачка, что не поделилась выигрышем с собакой",
+                              _want)
+        assert _f4 and "2" in _f4[0], _f4
+
+        # The closed set, which never reaches the model. Case comes from the
+        # words being replaced, because every one of these is said both mid
+        # sentence and at the head of one.
+        assert _known("Я ему дачка, что закончила") == "Я мудачка, что закончила"
+        assert _known("итак, я ему дачка") == "итак, я мудачка"
+        assert _known("Абдейт первый. Обдей 10. Потом обдейт.") == \
+            "Апдейт первый. Апдейт 10. Потом апдейт.", _known("Абдейт первый.")
+        assert _known("собачьим тростовым фундом") == "собачьим трастовым фондом"
+        assert _known("Редит, все мудаки") == "Реддит, все мудаки"
+        # ...and a line with none of them comes back untouched, byte for byte
+        _clean = "Мама забрала деньги без спроса, и я обиделась."
+        assert _known(_clean) == _clean, _known(_clean)
+        # "фундамент" is not "фондамент": the table may only fire on the whole
+        # word it was written for.
+        assert _known("залили фундамент") == "залили фундамент"
+
+        # An empty segment is never sent and so can never come back changed -
+        # _parse_split() leaves it in place so the cuts still point where they
+        # did, and _proofread() has to leave it alone for the same reason.
+        _segs = [{"text": ""}, {"text": "  "}, {"text": "настоящая строка"}]
+        assert list({i: s["text"] for i, s in enumerate(_segs)
+                     if s["text"].strip()}) == [2], "an empty segment was sent"
+
         print("upvote ok")
     elif a.harvest is not None:
         print(f"{harvest(a.harvest)} new videos")
@@ -2086,6 +2388,8 @@ if __name__ == "__main__":
         # cannot use, and the workflow already runs the two back to back.
         print(f"{digest(a.digest)} new stories")
         print(f"{cache_audio()} source audio files ready")
+    elif a.proofread is not None:
+        print(f"{reproof(a.proofread)} stories corrected")
     elif a.judge:
         kept, dropped = judge()
         print(f"{kept} readings, {dropped} something else")
