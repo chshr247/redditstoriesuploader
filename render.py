@@ -108,6 +108,24 @@ MUSIC_DUCK = "threshold=0.03:ratio=8:attack=5:release=300"
 # this one could pick a file that is not in the repo at all.
 MUSIC_EXT = (".mp3", ".m4a", ".opus", ".ogg")
 
+# --- output loudness ---
+# What the finished mix is normalised to, last, after the voice, the bed and
+# the ducking. Measured on a published render (yt_Zk7zfGDnZEM_2, 2026-09-08):
+# -22.4 LUFS integrated, against roughly -14 for the feed it lands in. TikTok
+# turns a loud upload DOWN and does not turn a quiet one up, so those eight
+# decibels are simply lost - the video plays flat and far away next to the one
+# before it, during the seconds it is being decided on.
+#
+# Applied to the whole mix rather than to the narration, so the bed keeps the
+# ratio MUSIC_VOL was tuned to: everything moves by the same amount.
+# -1.5 dBTP leaves the headroom their encoder needs to not clip on the way in.
+#
+# ponytail: one pass, which measures as it goes and lands near the target
+# rather than on it. Two passes would mean decoding the whole track first, for
+# a video nobody is mastering. If a render comes out audibly off, that is the
+# upgrade - not a different number here.
+LUFS_I, LUFS_TP, LUFS_LRA = -14, -1.5, 11
+
 log = logging.getLogger(__name__)
 
 # The title card is not an ASS style any more - it is a stack of PNGs drawn by
@@ -727,6 +745,13 @@ def render(mp3, words: list[dict], name: str, bg=None,
         video += ";" + ";".join(_music_chain(
             aidx, spoken, dur, _dur(SFX) if SFX.exists() else 0.0))
         audio = "[a]"
+
+    # Last, over whatever the mix turned out to be - see LUFS_I. `audio` is a
+    # bare stream spec when nothing above filtered it, and a filter graph wants
+    # the brackets either way.
+    src = audio if audio.startswith("[") else f"[{audio}]"
+    video += f";{src}loudnorm=I={LUFS_I}:TP={LUFS_TP}:LRA={LUFS_LRA}[loud]"
+    audio = "[loud]"
 
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
