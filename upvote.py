@@ -182,7 +182,18 @@ PART_CEILING = 600
 # the filter below then dropped it: r/Glitch_in_the_Matrix, ggwWdlCb33U #3,
 # 2026-09-07. The sub travels with the story either way, so voice.py still
 # pins the horror narrator and _pick_music still reaches for the horror bed.
-_DIGEST_SUBS = list(SUBREDDITS) + list(SUBREDDITS_HORROR)
+# ...plus the subs only a RECORDING can come from. AskReddit is the whole
+# reason this exists: a video that is one question and many people's answers
+# reads like no sub on the lists above, and source.py could not use it anyway -
+# an AskReddit post's selftext is empty, so _usable()'s MIN_CHARS drops every
+# one of them and the story lives in the comments. Kept out of
+# config.SUBREDDITS for exactly that reason: that list is where the scraper
+# goes looking, and sending it somewhere with nothing to find costs a request
+# per run forever. Downstream reads `sub` for the horror narrator and the music
+# bed and falls through to the ordinary ones for any other name.
+_DIGEST_SUBS = (list(SUBREDDITS) + list(SUBREDDITS_HORROR)
+                + [s.strip() for s in os.getenv("UPVOTE_SUBS_EXTRA", "AskReddit")
+                   .split(",") if s.strip()])
 
 _SUBS_BLOCK = ("The list:\n" + "\n".join(f"  {x}" for x in _DIGEST_SUBS)
                if _DIGEST_SUBS else
@@ -206,6 +217,24 @@ A video of this length holds SEVERAL stories - commonly five to ten, one every
 two to four minutes. List every one of them. Stopping after the first story or
 two, and sweeping the rest of the video into one enormous range, is the single
 most common way to answer this wrongly.
+
+SOME VIDEOS ARE ONE QUESTION AND ITS ANSWERS instead, and those are the
+exception to everything in the paragraph above. The narrator reads a question
+out at the top - "за что был уволен ваш самый отбитый коллега?" - and the rest
+of the video is different people answering that one question. Such a video is
+ONE story running from the question to the last answer, and NOT one story per
+answer. Two reasons, and both matter: an answer pulled out on its own opens on
+somebody replying to a question the viewer was never asked, and most answers
+are a minute or two long, which is a fragment by the rule at the bottom of
+this page - split that way, the video comes back empty and is thrown out.
+So: one `first`/`last` across the whole thing, `title` the question itself,
+`teller` "" because there are many, and a `cut` at the START of an answer
+wherever the minutes say one is due. The join between two answers is the
+cleanest turn a video of this kind has - nobody is left mid-account.
+
+Tell the two shapes apart by what the answers ARE. People recounting what
+happened to them is this shape. A list of one-line opinions, preferences or
+jokes is neither shape and is not a story at all - see `sub` below.
 
 Answer with JSON only, a list of objects:
 
@@ -240,8 +269,10 @@ Answer with JSON only, a list of objects:
                 that matters, and a number past the end is an invented one.
   sub         - which of THIS CHANNEL'S subreddits the story reads like it
                 came from, spelled exactly as it appears in the list below.
+                A question with people's own accounts under it is AskReddit
+                when that name is on the list.
                 Answer "none" when it belongs to none of them: a round-up of
-                mysteries, a quiz, a page of one-line answers, a story from a
+                mysteries, a quiz, a page of one-line opinions, a story from a
                 sub this channel does not publish. "none" is a real answer and
                 a common one - do not stretch a story into the nearest name on
                 the list to avoid saying it.
@@ -308,19 +339,27 @@ Answer with the numbers of the videos that are COMPLETE STORIES told start to
 finish - the kind where a narrator reads out a post somebody wrote about
 something that happened to them. One story or several, either is fine.
 
-Leave out everything else, and there is plenty of it:
+A video where several DIFFERENT people each tell what happened to them counts
+as complete stories and stays, however the title is phrased. That is most of
+what this channel publishes: a question in the title with real accounts under
+it ("What got your most unhinged coworker fired?", "Ex-employees spill their
+industry's secrets") is a video full of stories, and each of those answers is
+a story somebody lived.
 
-  * round-ups of short answers to a question - dozens of one-line replies,
-    where nothing runs long enough to be a video on its own
-  * mysteries, history, facts, true crime, lists, quizzes, news, reactions
-  * anything addressed to the audience as a question rather than told as an
-    account of what happened to one person
+Leave out everything else:
 
-The test is what the title promises. A title that says who did what and how it
-turned out is the kind to keep. A title that asks the audience something is
-usually the kind to leave out - but not always: a question can be the first
-line of one person's own story ("You want me online at all hours? No problem,
-but I am a programmer"), and that one stays.
+  * lists of one-line replies - opinions, preferences, jokes, ratings, where
+    an answer is a sentence and nobody is recounting anything
+  * mysteries, history, facts, true crime, quizzes, news, reactions,
+    explainers - anything whose subject is a topic rather than a person
+  * anything told about the world rather than by the people it happened to
+
+The test is whether somebody's own account is being read out. A title that
+says who did what and how it turned out stays. A title that asks a question
+stays when the answers to it are accounts ("what got your coworker fired")
+and goes when they are opinions ("what is cool at 18 and cringe at 30"). A
+question can also be the first line of one person's own story ("You want me
+online at all hours? No problem, but I am a programmer"), and that one stays.
 
 The channel's own labelling says nothing either way. A rubric in brackets, a
 series name, a "#15" on the end - that is how the channel files its videos,
@@ -337,8 +376,8 @@ Answer with JSON only, and answer for the videos you are LEAVING OUT - the
 ones you keep need no line. Each one is an object naming it twice, by number
 and by its own first words:
 
-  [{"n": 4, "t": "Какой секрет разрушит"},
-   {"n": 11, "t": "What Simple Job Would"}]
+  [{"n": 4, "t": "Топ 10 фактов о"},
+   {"n": 11, "t": "Which Historical Mystery Was"}]
 
   n - the number on the line.
   t - the first three or four words of that same line, copied exactly. They
