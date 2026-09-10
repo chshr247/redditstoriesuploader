@@ -31,6 +31,7 @@ FONT_SIZE = 110
 POP_MS = 120               # scale-up duration of a word appearing
 HOLD_MAX = 0.18            # how long a card may outlive its own audio
 SKIP_HEAD = 30.0           # seconds of every background clip that are off limits
+SKIP_TAIL = 30.0           # seconds of footage a seek has to leave after it
 
 # --- encoder ceiling ---
 # TikTok re-encodes everything, so the job here is to hand its encoder a clean
@@ -392,7 +393,7 @@ def _live(scores: list[float], lo: float, hi: float) -> list[int]:
     return [s for s, v in windows.items() if v > bar]
 
 
-def _seek(bg_dur: float, dur: float, name: str = "",
+def _seek(bg_dur: float, name: str = "",
           scores: list[float] | None = None) -> float:
     """Where inside the background clip to start, at random.
 
@@ -400,9 +401,10 @@ def _seek(bg_dur: float, dur: float, name: str = "",
     first SKIP_HEAD seconds: a background clip opens on an intro, a title card
     or a menu, the one stretch of it that looks like a clip off YouTube.
 
-    The window is [SKIP_HEAD, bg_dur - dur], so the narration also fits before
-    the end and -stream_loop never fires - that is what makes the head skip a
-    guarantee for the whole video rather than only for its first frame.
+    The window is [SKIP_HEAD, bg_dur - SKIP_TAIL]. The narration may well run
+    past the end of the footage - -stream_loop wraps it back to the seek, and
+    the head stays skipped when it does - but a seek in the last SKIP_TAIL
+    seconds wraps almost immediately and reads as a glitch, not as a loop.
 
     Given `scores` from _motion(), the draw narrows to the livelier half of
     that window. Uniform, roughly half the videos open on the slow stretch of
@@ -411,14 +413,14 @@ def _seek(bg_dur: float, dur: float, name: str = "",
     serve every video this channel makes, and a clip that always opens at its
     one peak is a repeat the viewer notices.
     """
-    latest = bg_dur - dur
+    latest = bg_dur - SKIP_TAIL
     if latest >= SKIP_HEAD:
         live = _live(scores, SKIP_HEAD, latest) if scores else []
         if live:
             return float(random.choice(live))
         return round(random.uniform(SKIP_HEAD, latest), 2)
     if bg_dur > SKIP_HEAD:
-        # too short to fit the narration after the head; start right past the
+        # too short to leave SKIP_TAIL after the head; start right past the
         # head anyway and let it loop, which re-seeks here rather than to 0
         log.warning("%s is only %.0fs - looping from %.0fs", name, bg_dur, SKIP_HEAD)
         return SKIP_HEAD
@@ -457,7 +459,7 @@ def _cut(bg_dur: float, dur: float, title_end: float, name: str,
     if title_end < CUT_MIN_CARD or dur - title_end < HOOK_WINDOW:
         return None
     for _ in range(CUT_TRIES):
-        pick = _seek(bg_dur, dur - title_end, name, scores)
+        pick = _seek(bg_dur, name, scores)
         if abs(pick - first) >= CUT_MIN_GAP:
             return pick
     log.info("%s: no second window %.0fs clear of %.0fs, leaving the cut out",
@@ -663,16 +665,15 @@ def render(mp3, words: list[dict], name: str, bg=None,
     cards = (card.build(title_words or [], title, title_end, name, part)
              if title and title_end > 0 else [])
 
-    # Every video opens on the first frame of its clip. The head is no longer
-    # off limits, nothing is drawn, and -stream_loop below covers a narration
-    # longer than the footage by starting the clip over.
+    # A random point past the head, so two videos off the same clip do not
+    # open on the same frame. -stream_loop below covers a narration longer than
+    # what is left after the seek.
     #
-    # ponytail: this leaves _motion(), _live(), _seek() and _cut() with no
-    # caller. They are kept whole, and their self-tests with them, because the
-    # only thing standing between here and a live-second draw again is these
-    # two values - put back `scores = _motion(bg)`, `bg_dur = _dur(bg)` and the
-    # two calls that used them.
-    seek, cut = 0.0, None
+    # ponytail: the draw is uniform - no _motion() probe to weight it towards
+    # the livelier seconds, and no _cut(). Both are kept whole with their
+    # self-tests; put back `scores = _motion(bg)` and pass it here to weight
+    # the draw again.
+    seek, cut = _seek(_dur(bg), bg.name), None
 
     # 720p sources get upscaled ~2.7x to cover 1080 wide, so lanczos over the
     # default bilinear is a visible win for one flag. setsar guards against
@@ -802,17 +803,17 @@ if __name__ == "__main__":
     assert _ts(65.43) == "0:01:05.43"
     assert _ts(3661.5) == "1:01:01.50"
 
-    # The head is off limits and the tail must still hold the whole narration,
-    # both across the range and not just on average - a bound that only holds
-    # for the mean is the bound that ships the menu screen once a week.
-    picks = [_seek(600, 60) for _ in range(2000)]
-    assert all(SKIP_HEAD <= s <= 540 for s in picks), (min(picks), max(picks))
+    # The head is off limits and the seek leaves SKIP_TAIL seconds of footage
+    # after it, both across the range and not just on average - a bound that
+    # only holds for the mean is the bound that ships the menu screen once a week.
+    picks = [_seek(600) for _ in range(2000)]
+    assert all(SKIP_HEAD <= s <= 570 for s in picks), (min(picks), max(picks))
     assert len(set(picks)) > 100, "seek is not actually random"
     assert min(picks) < 60 and max(picks) > 500, (min(picks), max(picks))
     # clip with no room for both: head still wins, looping covers the rest
-    assert _seek(100, 90, "(expected warning)") == SKIP_HEAD
-    assert _seek(20, 60, "(expected warning)") == 0   # shorter than the head skip
-    assert _seek(90.0, 60.0) == SKIP_HEAD   # exactly enough room, no randomness left
+    assert _seek(50, "(expected warning)") == SKIP_HEAD
+    assert _seek(20, "(expected warning)") == 0   # shorter than the head skip
+    assert _seek(60.0) == SKIP_HEAD   # exactly enough room, no randomness left
 
     # One loud stretch in an otherwise quiet clip: every live second must come
     # from it, and every seek must come from the live seconds. A window starting
@@ -823,7 +824,7 @@ if __name__ == "__main__":
     live = _live(quiet, SKIP_HEAD, 540)
     assert live, "a clip with an obvious peak produced no live seconds"
     assert all(100 - HOOK_WINDOW < s < 200 for s in live), (min(live), max(live))
-    seeks = {_seek(600, 60, scores=quiet) for _ in range(200)}
+    seeks = {_seek(600, scores=quiet) for _ in range(200)}
     assert seeks <= {float(s) for s in live}, sorted(seeks - {float(s) for s in live})
     assert len(seeks) > 20, "the draw collapsed onto a handful of seconds"
     # A cut between two still shots is not motion. This shipped once: the mean
@@ -841,20 +842,20 @@ if __name__ == "__main__":
     assert _live([0.02] * 600, SKIP_HEAD, 540) == []
     assert _live(quiet, SKIP_HEAD, 40) == []      # too short a window to have a middle
     # ...and the fallback is the old behaviour, untouched
-    flat = [_seek(600, 60, scores=[0.02] * 600) for _ in range(200)]
-    assert len(set(flat)) > 100 and all(SKIP_HEAD <= s <= 540 for s in flat)
+    flat = [_seek(600, scores=[0.02] * 600) for _ in range(200)]
+    assert len(set(flat)) > 100 and all(SKIP_HEAD <= s <= 570 for s in flat)
 
     # The cut is far from the opening or it is not made at all, and the second
     # stretch still has to hold everything after the title card.
     cuts = [_cut(1100, 75, 3.0, "bg", None, 100.0) for _ in range(200)]
     assert all(c is None or abs(c - 100.0) >= CUT_MIN_GAP for c in cuts)
-    assert all(c is None or SKIP_HEAD <= c <= 1100 - 72 for c in cuts)
+    assert all(c is None or SKIP_HEAD <= c <= 1100 - SKIP_TAIL for c in cuts)
     assert sum(c is not None for c in cuts) > 190, "the cut is being dropped too often"
     # Nothing to cut on, and nothing to cut into
     assert _cut(1100, 75, 0, "bg", None, 100.0) is None      # no title card
     assert _cut(1100, 75, 74.0, "bg", None, 100.0) is None   # nothing after the card
     # A clip with no window CUT_MIN_GAP clear of the opening gives up quietly
-    assert _cut(200, 75, 3.0, "(expected info)", None, 60.0) is None
+    assert _cut(150, 75, 3.0, "(expected info)", None, 60.0) is None
 
     # A channel outside AD_CHANNELS gets no banner even with the directory
     # full, and one inside it gets whatever is there. Both channels read the
