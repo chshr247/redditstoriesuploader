@@ -69,19 +69,24 @@ CUT_TRIES = 40             # draws allowed to find that gap before the cut is dr
 # --- overlay banner ---
 # An optional image or clip laid over every render. None of these numbers are
 # taste: each one comes from a placement spec, and the reasoning behind every
-# one of them - why this instant, this share of the frame, this band of it, and
-# which of its rules are knowingly not met - is in DOCS.ru.md, not here.
-AD_AT = 3.0                # when it appears, seconds
-AD_FADE = 0.5              # fade in, and out again if AD_SEC ends it
-AD_SEC = 0.0               # how long it stays; 0 means to the end of the video
+# one of them - why this instant, this band of the frame, and which of its
+# rules are knowingly not met - is in DOCS.ru.md, not here.
+#
+# The banner arrives as a green screen the size of the frame rather than as a
+# file with an alpha channel, which is what every number below is shaped by.
+AD_AT = 2.5                # when its own entry animation starts, seconds
 AD_CHANNELS = ("ru",)      # channels that carry one; the rest never do
-AD_MIN_AREA = 1 / 6        # of the frame, below which _ad_size() warns
-AD_MARGIN = 120            # side gap - and the only width control there is, so
-                           # this is the number to turn when the banner has to
-                           # come down a size. At 120 a 2:1 banner is 840x420,
-                           # which still clears AD_MIN_AREA, but only just.
-AD_Y = 240                 # below the platform's top interface strip, and word
-                           # cards sit dead centre, so this band is free
+AD_Y = 1160                # word cards sit dead centre, so the banner goes
+                           # under them. It reaches 1683 at the low point of
+                           # its own travel, which leaves ~240px for the
+                           # caption and handle along the bottom - that is the
+                           # floor, and this is the number to turn to raise it.
+AD_KEY = "0x038925"        # the green it is delivered on, sampled off the file
+AD_SIM = 0.10              # key tolerance. Measured: the artwork's darkest
+                           # navy sits 0.20 away, so this clears it twice over
+                           # while still taking the anti-aliased corners.
+AD_BAND_Y = 0.484          # the banner's band inside that screen, as a share
+AD_BAND_H = 0.336          # of its height - see _ad_chain() for why a band
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp")
 
 # The whoosh runs under the card's first frames, and voice.py has already left
@@ -500,62 +505,45 @@ def _ad_input(ad: Path) -> list[str]:
     return ["-stream_loop", "-1", "-i", str(ad)]
 
 
-def _ad_size(ad: Path) -> int:
-    """The full frame width bar a margin - and a warning if that misses 1/6.
+def _ad_chain(idx: int) -> str:
+    """Filter graph putting input `idx` over [base] as the banner -> [v].
 
-    Solving for the AD_MIN_AREA minimum instead would be exactly backwards: it
-    is a floor to stay above, not a size to hit, and the widest placement that
-    still clears the interface is the one the spec asks for. See DOCS.ru.md.
+    The banner is delivered on a green screen rather than with an alpha
+    channel, so the chain keys it. colorkey, not chromakey: chromakey compares
+    chroma alone, and the artwork's dark navy is close enough to the green in
+    U/V that it goes with the background - measured, it took the whole banner
+    and left the corners.
 
-    Only the aspect ratio is measured, and only to tell whether that width can
-    reach the floor at all - a banner too wide to qualify at any size is a
-    file that has to be swapped, so this warns and renders rather than failing
-    a whole run over it.
-    """
-    wide = W - 2 * AD_MARGIN
-    try:
-        wh = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-             "stream=width,height", "-of", "csv=p=0", str(ad)],
-            capture_output=True, text=True, check=True).stdout.strip().split(",")
-        ratio = int(wh[0]) / int(wh[1])
-    except (subprocess.SubprocessError, OSError, ValueError, IndexError,
-            ZeroDivisionError) as e:
-        log.warning("could not measure %s (%s) - placing it at full width anyway",
-                    ad.name, e)
-        return wide
-    got = wide * wide / ratio
-    if got < W * H * AD_MIN_AREA:
-        log.warning("%s is %.1f:1 - %dx%d covers 1/%.1f of the frame, under the "
-                    "1/%.0f it is paid for. Use a less wide banner.",
-                    ad.name, ratio, wide, round(wide / ratio), W * H / got,
-                    1 / AD_MIN_AREA)
-    return wide
+    The crop is the BAND the banner lives in, not the banner: it travels up and
+    down inside that band as part of its own animation, and a crop to the
+    artwork slices it in half halfway through the loop. Whatever the band
+    leaves around the artwork is green and keys out with the rest. The band is
+    what the crop is for at all - the file carries a stray sparkle outside it,
+    drawn in a green far enough from the key to survive it.
 
+    Cropping before keying rather than after is not an optimisation: the key
+    has to run on the whole strip either way, and this way it never sees the
+    sparkle to begin with.
 
-def _ad_chain(idx: int, dur: float, wide: int) -> str:
-    """Filter graph putting input `idx` over [base] as a fading banner -> [v].
+    Scaling the green screen to the frame's WIDTH is the whole size question.
+    The screen is 9:16 like the frame, so that lands the artwork at exactly the
+    share of the frame it was drawn to cover - which is what a banner that may
+    not be resized asks for, and what pasting it at its own pixel size on a
+    bigger frame would quietly break.
 
     tpad rather than overlay's `enable`: enable only hides the banner while its
-    stream runs on underneath, so a gif or a video would arrive three seconds
-    into itself, mid-motion. Padding the FRONT with transparent frames delays
-    the stream itself, so the animation starts on its first frame the moment the
-    banner appears - which is the whole point of the delay for anything that
-    moves, and costs a still image nothing.
-
-    The fade is on alpha, so it dissolves against the footage instead of
-    fading through black, and it sits after the pad so both timestamps are read
-    off the same padded timeline as AD_AT.
+    stream runs on underneath, so the clip would arrive AD_AT seconds into
+    itself, mid-motion. Padding the FRONT with transparent frames delays the
+    stream itself, so the banner's own entry animation starts on its first
+    frame the moment it appears. Nothing is faded over that on purpose - the
+    banner animates itself in, and a second fade on top reads as a stutter.
     """
-    gone = AD_AT + AD_SEC
-    out = (f",fade=t=out:st={gone - AD_FADE:.2f}:d={AD_FADE}:alpha=1"
-           if AD_SEC and gone < dur else "")
-    return (f"[{idx}:v]fps={FPS},scale={wide}:-2,format=rgba,"
-            f"tpad=start_duration={AD_AT}:start_mode=add:color=black@0,"
-            f"fade=t=in:st={AD_AT}:d={AD_FADE}:alpha=1{out}[ad];"
+    return (f"[{idx}:v]fps={FPS},crop=iw:ih*{AD_BAND_H}:0:ih*{AD_BAND_Y},"
+            f"colorkey={AD_KEY}:{AD_SIM}:0.03,format=rgba,scale={W}:-2,"
+            f"tpad=start_duration={AD_AT}:start_mode=add:color=black@0[ad];"
             # eof_action=pass, not shortest: a banner that runs out must leave
             # the video alone, not cut it off wherever it happened to end
-            f"[base][ad]overlay=(W-w)/2:{AD_Y}:format=auto:eof_action=pass[v]")
+            f"[base][ad]overlay=0:{AD_Y}:format=auto:eof_action=pass[v]")
 
 
 def _pick_music(key: str = "", sub: str = "", channel: str = CHANNEL) -> Path | None:
@@ -716,7 +704,7 @@ def render(mp3, words: list[dict], name: str, bg=None,
 
     ad_in = _ad_input(ad) if ad else []
     if ad:
-        video += ";" + _ad_chain(nbg + 1 + len(cards), dur, _ad_size(ad))
+        video += ";" + _ad_chain(nbg + 1 + len(cards))
 
     # Audio inputs come after every video one, in the order they are appended
     # below. `spoken` is whatever the voice has become so far - the bare mp3, or
@@ -786,7 +774,7 @@ def render(mp3, words: list[dict], name: str, bg=None,
     subprocess.run(cmd, cwd=OUT_DIR, check=True)
     log.info("%s: %.1f sec from %s at %.1fs%s%s", out.name, dur, bg.name, seek,
              f", cutting to %.1fs at %.1fs" % (cut, title_end) if cut else "",
-             f", banner {ad.name} from {AD_AT:.0f}s" if ad else "")
+             f", banner {ad.name} from {AD_AT:g}s" if ad else "")
     if cards:
         log.info("%s: title card over %.1fs in %d frames%s", out.name, title_end,
                  len(cards), f", {SFX.name} under it" if sfx_in else "")
@@ -865,50 +853,59 @@ if __name__ == "__main__":
         assert (got is not None) == (c in AD_CHANNELS and any(AD_DIR.rglob("*.*"))), \
             f"{c}: {got}"
 
-    # The banner: nothing on screen before AD_AT, fully there once the fade is
-    # over, and a moving source starting from its own first frame rather than
-    # three seconds into itself. Run on the real filter graph over a black
+    # The band goes under the word cards, which sit dead centre, and the whole
+    # of it has to stay in frame. The source being 9:16 like the frame is what
+    # lets the second one be written in frame heights: scaled to W, the band
+    # comes out H * AD_BAND_H tall.
+    assert AD_Y > H / 2, "the banner reaches up into the word cards"
+    assert AD_Y + H * AD_BAND_H <= H, "the band runs off the bottom of the frame"
+
+    # The banner: nothing on screen before AD_AT, the green keyed out around
+    # it, and a moving source starting from its own first frame rather than
+    # AD_AT seconds into itself. Run on the real filter graph over a flat
     # frame, so it costs one short encode instead of a whole render.
     ad = OUT_DIR / "_selftest_ad.mp4"
-    # a source that MOVES: black for its first second, then white. Overlaid at
-    # AD_AT it must show its black opening, not the white it would be showing
-    # if the stream had been running underneath all along.
+    # a green screen that MOVES: a box in the banner's band, black for its
+    # first second and white after. Overlaid at AD_AT it must show the black
+    # opening, not the white it would be showing if the stream had been running
+    # underneath all along. Narrower than the screen, so the strip beside it
+    # stays green and has to key out.
+    box = (f"drawbox=x=iw*0.1:y=ih*{AD_BAND_Y}:w=iw*0.8:h=ih*{AD_BAND_H}"
+           ":t=fill:color=")
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
-                    "-i", f"color=black:s=400x200:r={FPS}:d=1", "-f", "lavfi",
-                    "-i", f"color=white:s=400x200:r={FPS}:d=4",
-                    "-filter_complex", "[0:v][1:v]concat=n=2:v=1[v]",
+                    "-i", f"color={AD_KEY}:s=720x1280:r={FPS}:d=1", "-f", "lavfi",
+                    "-i", f"color={AD_KEY}:s=720x1280:r={FPS}:d=8",
+                    "-filter_complex", f"[0:v]{box}black[a];[1:v]{box}white[b];"
+                                       "[a][b]concat=n=2:v=1[v]",
                     "-map", "[v]", "-c:v", "libx264", "-preset", "ultrafast",
                     "-pix_fmt", "yuv420p", str(ad)], check=True)
-    # a 2:1 banner at full width clears the sixth the rules ask for, and stays
-    # inside the frame with its margins
-    wide = _ad_size(ad)
-    assert wide * (wide / 2) >= W * H * AD_MIN_AREA, wide
-    assert wide == W - 2 * AD_MARGIN, wide
-    assert AD_Y + wide / 2 < H / 2, "the banner reaches down into the word cards"
     over = OUT_DIR / "_selftest_banner.mp4"
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
-                    "-f", "lavfi", "-i", f"color=black:s={W}x{H}:r={FPS}:d=9",
+                    "-f", "lavfi", "-i", f"color=gray:s={W}x{H}:r={FPS}:d=9",
                     *_ad_input(ad),
-                    "-filter_complex", f"[0:v]null[base];{_ad_chain(1, 9.0, wide)}",
+                    "-filter_complex", f"[0:v]null[base];{_ad_chain(1)}",
                     "-map", "[v]", "-t", "9", "-c:v", "libx264",
                     "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(over)],
                    check=True)
 
-    def _lum(at: float) -> int:
-        """Mean brightness of one strip of the banner area, 0-255."""
+    def _lum(at: float, x: int = W // 2) -> int:
+        """Mean brightness of one strip of the banner's band, 0-255."""
         return subprocess.run(
             ["ffmpeg", "-v", "error", "-ss", f"{at}", "-i", str(over), "-vf",
-             f"crop={wide}:100:{(W - wide) // 2}:{AD_Y + 60},scale=1:1,format=gray",
+             f"crop=40:100:{x}:{AD_Y + 100},scale=1:1,format=gray",
              "-frames:v", "1", "-f", "rawvideo", "-"],
             capture_output=True, check=True).stdout[0]
 
-    if AD_AT:
-        assert _lum(AD_AT / 2) < 40, "the banner is on screen before it should be"
+    # grey is the base showing through, and it has to show through twice: once
+    # before the banner is due, and once beside it for the whole run, where the
+    # source is green and nothing but the key can be taking it away
+    assert 100 < _lum(AD_AT / 2) < 160, "the banner is on screen before it should be"
+    assert 100 < _lum(AD_AT + 1.5, 20) < 160, "the green screen was not keyed out"
     # its own first second, which is black - if tpad had been swapped for
-    # overlay's `enable` this would already be white and the gif would arrive
-    # mid-animation
-    assert _lum(AD_AT + AD_FADE + 0.2) < 40, "the banner did not start from frame one"
-    assert _lum(AD_AT + 1.5) > 200, "the banner never faded in"
+    # overlay's `enable` this would already be white and the banner would
+    # arrive mid-animation
+    assert _lum(AD_AT + 0.2) < 40, "the banner did not start from frame one"
+    assert _lum(AD_AT + 1.5) > 200, "the banner never arrived"
 
     # The card is images now, so the ass file must carry nothing of it - a
     # leftover Card style would draw its own box UNDER the png and show as a
