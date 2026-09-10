@@ -463,13 +463,19 @@ def _db():
     # `keep` is the title filter's verdict: 1 a reading, 0 something else,
     # NULL not judged yet. NULL is treated as 1 downstream - a judgement that
     # never happened must not empty the queue.
+    # `prio` is yt_story's, one step earlier: a video somebody wants read
+    # NEXT, ahead of whatever has more views, and digest() hands it down to
+    # every story it finds inside so the front of the queue is asked for
+    # once rather than twice.
     db.execute("CREATE TABLE IF NOT EXISTS yt("
                "id TEXT PRIMARY KEY, chan TEXT, title TEXT, sec REAL, "
-               "views INT, ts REAL, done INT DEFAULT 0, keep INT)")
-    try:
-        db.execute("ALTER TABLE yt ADD COLUMN keep INT")   # rows that predate it
-    except sqlite3.OperationalError:
-        pass
+               "views INT, ts REAL, done INT DEFAULT 0, keep INT, "
+               "prio INT DEFAULT 0)")
+    for _col in ("keep INT", "prio INT DEFAULT 0"):   # rows that predate them
+        try:
+            db.execute(f"ALTER TABLE yt ADD COLUMN {_col}")
+        except sqlite3.OperationalError:
+            pass
     # One row per story found inside one video. `start`/`end` are seconds into
     # the source recording: a transcript is split on a time axis because that
     # is the only axis whisper gives, and they are kept so a story can be
@@ -481,11 +487,21 @@ def _db():
     # story has actually been parked - one entry per video, with the stretch
     # of the recording it is read from - and it is the only thing narration()
     # needs at the render, hours and one process later.
+    #
+    # `prio` is the hand on the queue: 0 for everything the pipeline
+    # banked itself, and anything above it for a story somebody wants out
+    # NEXT, highest first. Views rank the rest, and they still do - the
+    # column only lets a person overrule that ranking for a named story
+    # without lying about how many people watched it.
     db.execute("CREATE TABLE IF NOT EXISTS yt_story("
                "vid TEXT, n INT, sub TEXT, title TEXT, body TEXT, "
                "start REAL, end REAL, views INT, ts REAL, used INT DEFAULT 0, "
-               "segs TEXT, cuts TEXT, parts TEXT, "
+               "segs TEXT, cuts TEXT, parts TEXT, prio INT DEFAULT 0, "
                "PRIMARY KEY(vid, n))")
+    try:
+        db.execute("ALTER TABLE yt_story ADD COLUMN prio INT DEFAULT 0")
+    except sqlite3.OperationalError:                  # rows that predate it
+        pass
     return db
 
 
@@ -1198,14 +1214,14 @@ def digest(count: int = 1) -> int:
     stored = 0
     with _db() as db:
         rows = db.execute(
-            "SELECT id, chan, title, views FROM yt WHERE done=0 "
-            "AND COALESCE(keep, 1)=1 ORDER BY views DESC LIMIT ?",
+            "SELECT id, chan, title, views, prio FROM yt WHERE done=0 "
+            "AND COALESCE(keep, 1)=1 ORDER BY prio DESC, views DESC LIMIT ?",
             (count,)).fetchall()
     if not rows:
         log.info("nothing left to digest - run --harvest")
         return 0
 
-    for vid, chan, vtitle, views in rows:
+    for vid, chan, vtitle, views, prio in rows:
         log.info("%s (%s, %s views): %s", vid, chan, views, vtitle[:60])
         try:
             segs = _transcribe(_audio(vid))
@@ -1265,12 +1281,12 @@ def digest(count: int = 1) -> int:
                                   "as whisper heard it", vid, n)
                 db.execute(
                     "INSERT OR REPLACE INTO yt_story(vid, n, sub, title, body,"
-                    " start, end, views, ts, segs, cuts)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    " start, end, views, ts, segs, cuts, prio)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (vid, n, s["sub"], s["title"], s["body"],
                      s["start"], s["end"], views, time.time(),
                      json.dumps(s["segs"], ensure_ascii=False),
-                     json.dumps(s["cuts"])))
+                     json.dumps(s["cuts"]), prio))
                 kept += 1
             db.execute("UPDATE yt SET done=1 WHERE id=?", (vid,))
         log.info("%s: %d stor%s kept of %d found", vid, kept,
@@ -1305,7 +1321,7 @@ def reproof(count: int = 1) -> int:
                 pass
         rows = [r for r in db.execute(
             "SELECT vid, n, segs FROM yt_story WHERE used=0 AND parts IS NULL"
-            " ORDER BY views DESC") if f"yt_{r[0]}_{r[1]}" not in flight]
+            " ORDER BY prio DESC, views DESC") if f"yt_{r[0]}_{r[1]}" not in flight]
 
     done = 0
     for vid, n, segs in rows[:max(count, 0)]:
@@ -1362,7 +1378,7 @@ def next_story(skip: "set[str] | tuple" = ()) -> dict | None:
     with _db() as db:
         rows = db.execute(
             "SELECT vid, n, sub, title, body, start, end, views FROM yt_story "
-            "WHERE used=0 ORDER BY views DESC, vid, n").fetchall()
+            "WHERE used=0 ORDER BY prio DESC, views DESC, vid, n").fetchall()
     for vid, n, sub, title, body, start, end, views in rows:
         if (key := f"yt_{vid}_{n}") in skip:
             continue
@@ -1699,7 +1715,7 @@ def show() -> None:
         print(f"stories: {left} found, {used} used, {left - used} waiting")
         for r in db.execute(
                 "SELECT title, sub, views, ROUND(end-start) FROM yt_story "
-                "WHERE used=0 ORDER BY views DESC LIMIT 10"):
+                "WHERE used=0 ORDER BY prio DESC, views DESC LIMIT 10"):
             print(f"  {r[2]:>9} r/{r[1]:<20} {r[3]:>4.0f}s  {r[0][:50]}")
 
 
@@ -1882,6 +1898,24 @@ def _apply_desk(state: dict) -> int:
                     "WHERE vid=? AND n=?",
                     [(*(r[st_cols.index(c)] for c in mine), r[0], r[1])
                      for r in recut])
+
+            # `prio` is the one column a PERSON sets, and it is set HERE - so
+            # it has to travel on its own line: a story whose text has not
+            # moved is not a recut, and without this the hand on the queue
+            # never leaves the desk. Not held back by `flight` the way the
+            # text is, because it reorders what has NOT gone out yet and can
+            # move no cut under a story that has.
+            if "prio" in st_cols:
+                i_prio = st_cols.index("prio")
+                db.executemany("UPDATE yt_story SET prio=? WHERE vid=? AND n=?",
+                               [(r[i_prio], r[0], r[1]) for r in st_rows])
+            # ...and on the video, which is the same hand one step earlier:
+            # CI digests too wherever it has a cookie, and it has to reach the
+            # videos in the order a person put them in.
+            if "prio" in yt_cols:
+                i_yp = yt_cols.index("prio")
+                db.executemany("UPDATE yt SET prio=? WHERE id=?",
+                               [(r[i_yp], r[0]) for r in yt_rows])
 
             # A part this desk has sent. Without this line CI keeps handing the
             # same part to next_part() every tick, rebuilds it, uploads it as
@@ -2334,6 +2368,25 @@ if __name__ == "__main__":
                           " WHERE vid='v9'").fetchone()
         assert _got[:4] == ("Тело", 12.5, '[{"t": 1}]', '[{"body": "новое"}]'), _got
         assert _got[4] == 1, "used came back from this desk's staler row"
+        # ...and the hand on the queue travels even where the text did not:
+        # v8 is word for word what CI already has, and its prio still has to
+        # arrive or a story picked out by a person never jumps the queue.
+        _c.execute("INSERT INTO yt(id, chan, views, prio) VALUES ('v8','c',1,0)")
+        _c.commit(); _c.close()
+        _state["yt_story"] = (_st_cols + ["prio"], [
+            ("v8", 0, "x", "T", "не тронуто", 0, 9, 1, 0, "[]", "[]", None, 0, 7)])
+        _state["yt"] = (["id", "chan", "views", "done", "keep", "prio"],
+                        [("v8", "c", 1, 0, 1, 5)])
+        _real_path, globals()["DB_PATH"] = DB_PATH, _theirs
+        try:
+            _apply_desk(_state)
+        finally:
+            globals()["DB_PATH"] = _real_path
+        _c = sqlite3.connect(_theirs)
+        assert _c.execute("SELECT prio FROM yt_story WHERE vid='v8'"
+                          ).fetchone()[0] == 7, "prio never left the desk"
+        assert _c.execute("SELECT prio FROM yt WHERE id='v8'").fetchone()[0] == 5,             "a video pushed to the front was digested in the old order"
+        _state["yt"] = (["id"], [])
         # ...but not under a story that is MID-FLIGHT. Part 1 of yt_v7_0 is out
         # and part 2 is cut from the ranges in that row: moving them now means
         # part 2 does not carry on where part 1 stopped.
