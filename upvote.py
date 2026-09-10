@@ -513,6 +513,18 @@ def _channels() -> list[str]:
 # one about a runtime nobody installed.
 _JS = ["--js-runtimes", "node"] if shutil.which("node") else []
 
+# YouTube serves a channel's titles in whatever language it thinks the caller
+# wants, and both of these channels upload English translations alongside their
+# own - so an anonymous listing came back "What Simple Job Would Humble Most
+# People In One Shift?" for a video whose narrator says every word of it in
+# Russian. That is what judge() then read: a machine translation of a title
+# whose own wording is most of what the verdict rests on, with the channel's
+# rubric ("Боюсь спросить #21") translated out of it. OUTPUT_LANG is the
+# language this channel publishes in and _channels() has already dropped every
+# handle that records in another, so it is also the language these titles were
+# written in.
+_LANG = ["--extractor-args", f"youtube:lang={OUTPUT_LANG}"]
+
 # A signed-in session, for the runs that need one. A PO token answers the URL
 # challenge; it does NOT answer "Sign in to confirm you are not a bot", which
 # is what YouTube shows a datacentre IP - measured on this repo's runner
@@ -540,8 +552,9 @@ def _ytdlp(*args: str) -> str:
     installed for the interpreter that is running this.
     """
     try:
-        r = subprocess.run([sys.executable, "-m", "yt_dlp", *_JS, *_COOKIE_ARGS,
-                            *args], check=True, capture_output=True, text=True)
+        r = subprocess.run([sys.executable, "-m", "yt_dlp", *_JS, *_LANG,
+                            *_COOKIE_ARGS, *args],
+                           check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
         if "No module named" in (e.stderr or ""):
             raise RuntimeError("yt-dlp is not installed - pip install yt-dlp")
