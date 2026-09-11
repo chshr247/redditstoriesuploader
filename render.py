@@ -76,11 +76,16 @@ CUT_TRIES = 40             # draws allowed to find that gap before the cut is dr
 # file with an alpha channel, which is what every number below is shaped by.
 AD_AT = 2.5                # when its own entry animation starts, seconds
 AD_CHANNELS = ("ru",)      # channels that carry one; the rest never do
-AD_Y = 1160                # word cards sit dead centre, so the banner goes
-                           # under them. It reaches 1683 at the low point of
-                           # its own travel, which leaves ~240px for the
-                           # caption and handle along the bottom - that is the
-                           # floor, and this is the number to turn to raise it.
+AD_Y = 115                 # word cards sit dead centre, so the banner goes
+                           # ABOVE them, under the top edge of the frame. At
+                           # AD_SCALE the band ends at 663, so the whole of the
+                           # banner's travel stays clear of the cards - this is
+                           # the number to turn to move it, and the self-check
+                           # holds the clearance either way up.
+AD_SCALE = 0.85            # share of the frame's WIDTH the green screen is
+                           # scaled to. 1.0 is the size the artwork was drawn
+                           # to cover; anything under it is the channel owner's
+                           # call, not a measurement - see _ad_chain().
 AD_KEY = "0x038925"        # the green it is delivered on, sampled off the file
 AD_SIM = 0.10              # key tolerance. Measured: the artwork's darkest
                            # navy sits 0.20 away, so this clears it twice over
@@ -505,6 +510,11 @@ def _ad_input(ad: Path) -> list[str]:
     return ["-stream_loop", "-1", "-i", str(ad)]
 
 
+def _ad_w() -> int:
+    """The banner's width in pixels, even - x264 will not take an odd one."""
+    return int(W * AD_SCALE) // 2 * 2
+
+
 def _ad_chain(idx: int) -> str:
     """Filter graph putting input `idx` over [base] as the banner -> [v].
 
@@ -525,11 +535,12 @@ def _ad_chain(idx: int) -> str:
     has to run on the whole strip either way, and this way it never sees the
     sparkle to begin with.
 
-    Scaling the green screen to the frame's WIDTH is the whole size question.
-    The screen is 9:16 like the frame, so that lands the artwork at exactly the
-    share of the frame it was drawn to cover - which is what a banner that may
-    not be resized asks for, and what pasting it at its own pixel size on a
-    bigger frame would quietly break.
+    Scaling the green screen by the frame's WIDTH is the whole size question.
+    The screen is 9:16 like the frame, so scaling it to W lands the artwork at
+    exactly the share of the frame it was drawn to cover - which is what
+    pasting it at its own pixel size on a bigger frame would quietly break.
+    AD_SCALE takes a share of that on purpose, and centring what is left is the
+    only sane reading of a banner narrower than the frame.
 
     tpad rather than overlay's `enable`: enable only hides the banner while its
     stream runs on underneath, so the clip would arrive AD_AT seconds into
@@ -539,11 +550,11 @@ def _ad_chain(idx: int) -> str:
     banner animates itself in, and a second fade on top reads as a stutter.
     """
     return (f"[{idx}:v]fps={FPS},crop=iw:ih*{AD_BAND_H}:0:ih*{AD_BAND_Y},"
-            f"colorkey={AD_KEY}:{AD_SIM}:0.03,format=rgba,scale={W}:-2,"
+            f"colorkey={AD_KEY}:{AD_SIM}:0.03,format=rgba,scale={_ad_w()}:-2,"
             f"tpad=start_duration={AD_AT}:start_mode=add:color=black@0[ad];"
             # eof_action=pass, not shortest: a banner that runs out must leave
             # the video alone, not cut it off wherever it happened to end
-            f"[base][ad]overlay=0:{AD_Y}:format=auto:eof_action=pass[v]")
+            f"[base][ad]overlay=(W-w)/2:{AD_Y}:format=auto:eof_action=pass[v]")
 
 
 def _pick_music(key: str = "", sub: str = "", channel: str = CHANNEL) -> Path | None:
@@ -853,12 +864,14 @@ if __name__ == "__main__":
         assert (got is not None) == (c in AD_CHANNELS and any(AD_DIR.rglob("*.*"))), \
             f"{c}: {got}"
 
-    # The band goes under the word cards, which sit dead centre, and the whole
-    # of it has to stay in frame. The source being 9:16 like the frame is what
-    # lets the second one be written in frame heights: scaled to W, the band
-    # comes out H * AD_BAND_H tall.
-    assert AD_Y > H / 2, "the banner reaches up into the word cards"
-    assert AD_Y + H * AD_BAND_H <= H, "the band runs off the bottom of the frame"
+    # The band clears the word cards, which sit dead centre, and the whole of
+    # it stays in frame. The source being 9:16 like the frame is what lets both
+    # be written in frame heights: scaled to _ad_w(), the band comes out
+    # H * AD_BAND_H * AD_SCALE tall. Written for either end of the frame, so
+    # moving the banner back down needs no new check here.
+    band = H * AD_BAND_H * AD_SCALE
+    assert not AD_Y < H / 2 < AD_Y + band, "the banner runs into the word cards"
+    assert 0 <= AD_Y and AD_Y + band <= H, "the band runs off the frame"
 
     # The banner: nothing on screen before AD_AT, the green keyed out around
     # it, and a moving source starting from its own first frame rather than
