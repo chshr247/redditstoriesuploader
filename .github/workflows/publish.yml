@@ -4,7 +4,7 @@ name: publish
 # between runs except the state file, so out/ is thrown away with the runner.
 on:
   schedule:
-    # Twice an hour from 11:07 to 02:37 MSK. Fixed slots plus a retry hour
+    # Twice an hour from 10:07 to 02:37 MSK. Fixed slots plus a retry hour
     # looked cheaper and were not: the gap check is exactly the spacing between
     # two of the slots, so any drift - a late cron, a manual run, a retry firing
     # instead of its primary - pushed the next slot under the threshold and lost
@@ -16,7 +16,7 @@ on:
     # a best-effort basis and silently drops them under load, and :00 is the
     # single most contended minute there is. Measured on this repo - 5 of 13
     # firings on 2026-08-01, 1 of 3 by noon on 08-02, every one of them 24 to
-    # 56 minutes late. Off-peak minutes and two ticks an hour buy 28 attempts
+    # 56 minutes late. Off-peak minutes and two ticks an hour buy 34 attempts
     # for the same nothing, which is what makes a dropped slot survivable.
     #
     # The tail runs to 02:37 MSK rather than stopping at midnight so a day that
@@ -33,7 +33,7 @@ on:
     # concurrency group keeps the two off seen.db. The cron stays because the
     # pinger's token is a fine-grained PAT, those cap at a year, and an expired
     # one fails by doing nothing at all.
-    - cron: "7,37 8-23 * * *"
+    - cron: "7,37 7-23 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
