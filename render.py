@@ -84,6 +84,12 @@ AD_CHANNELS = ("ru",)      # channels that carry one; the rest never do
 AD_HOLD_STILL = 5.0        # how long the story is paused for a banner that is
                            # a still and has no length of its own. A clip is
                            # asked how long it is - see _ad_hold().
+AD_SPEED = 1.3             # how much the banner is sped up, picture and sound
+                           # together. The programme allows 1.4 at the most and
+                           # the self-check holds that ceiling; the point of
+                           # using any of it is the pause, which is this much
+                           # shorter for it - 6.0s of banner becomes 4.6s of
+                           # stopped story.
 AD_SCALE = 1.0             # share of the frame's WIDTH the green screen is
                            # scaled to. The programme wants the banner over a
                            # quarter of the screen: at 1.0 it covers 29.6% of
@@ -506,8 +512,14 @@ def _pick_ad(channel: str = CHANNEL) -> Path | None:
 
 
 def _ad_hold(ad: Path) -> float:
-    """How long the story is paused for this banner - its own length."""
-    return AD_HOLD_STILL if ad.suffix.lower() in IMAGE_EXT else _dur(ad)
+    """How long the story is paused for this banner - its own length, sped up.
+
+    A still has no length of its own and nothing to speed up, so AD_SPEED does
+    not touch it.
+    """
+    if ad.suffix.lower() in IMAGE_EXT:
+        return AD_HOLD_STILL
+    return _dur(ad) / AD_SPEED
 
 
 def _ad_times(dur: float, hold: float = 0.0) -> list[float]:
@@ -659,7 +671,11 @@ def _ad_chain(idx: int, times: list[float], src: str = "base") -> str:
     for i, at in enumerate(times):
         nxt = "v" if i == len(times) - 1 else f"adon{i}"
         parts += [
-            f"[{idx + i}:v]fps={FPS},crop=iw:ih*{AD_BAND_H}:0:ih*{AD_BAND_Y},"
+            # setpts ahead of fps, not after it: this is where the clip is sped
+            # up, and fps is then what hands the graph a clean stream at FPS
+            # rather than one with the frames of a 60 fps source bunched up.
+            f"[{idx + i}:v]setpts=PTS/{AD_SPEED},fps={FPS},"
+            f"crop=iw:ih*{AD_BAND_H}:0:ih*{AD_BAND_Y},"
             f"colorkey={AD_KEY}:{AD_SIM}:0.03,format=rgba,scale={_ad_w()}:-2,"
             f"tpad=start_duration={at:.3f}:start_mode=add:color=black@0[ad{i}]",
             # eof_action=pass, not shortest: a banner that runs out must leave
@@ -892,7 +908,9 @@ def render(mp3, words: list[dict], name: str, bg=None,
     # inputs the banner is already open on, so nothing new is read.
     if ad and _has_audio(ad):
         legs = ";".join(
-            f"[{ad_idx + i}:a]adelay={round(at * 1000)}:all=1,"
+            # atempo before the delay, or the banner's sound would run at its
+            # own speed under a picture running at AD_SPEED
+            f"[{ad_idx + i}:a]atempo={AD_SPEED},adelay={round(at * 1000)}:all=1,"
             f"volume={AD_VOL}[adsnd{i}]" for i, at in enumerate(ad_at))
         taps = "".join(f"[adsnd{i}]" for i in range(len(ad_at)))
         # duration=first, as everywhere else here: the story with its pauses in
@@ -1133,6 +1151,13 @@ if __name__ == "__main__":
     assert _two.count("overlay=") == 2 and _two.endswith("[v]"), _two
     assert "[5:v]" in _two and "[6:v]" in _two, _two
     assert "start_duration=30.000" in _two and "start_duration=90.000" in _two, _two
+
+    # The programme allows 1.4x at the most, and the pause is exactly as long
+    # as the banner turns out to be once sped up - a hold measured on the
+    # unsped clip would leave the story frozen after the banner had finished.
+    assert AD_SPEED <= 1.4, f"the banner runs at {AD_SPEED}x, over the 1.4 limit"
+    assert f"setpts=PTS/{AD_SPEED}" in _two, _two
+    assert abs(_ad_hold(ad) - _dur(ad) / AD_SPEED) < 1e-6, _ad_hold(ad)
 
     # The card is images now, so the ass file must carry nothing of it - a
     # leftover Card style would draw its own box UNDER the png and show as a
