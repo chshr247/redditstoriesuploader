@@ -57,6 +57,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+import safety
 import source
 import tags as tags_          # `tags` is the local variable in caption()
 from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL,
@@ -426,7 +427,13 @@ def caption(title: str, hashtags=None, body: str = "") -> str:
     pool = (tags_.pick(title, body) if hashtags is None
             else random.sample(list(hashtags), min(5, len(hashtags))))
     tags = " ".join(pool[:5])
-    title = title.strip()
+    # Softened here and not upstream: the caption is the one place the platform
+    # reads as a description of what the video is, and body shaming in it is a
+    # harassment hit that comes back as no reach rather than as a strike. The
+    # card and the narration keep the story's own wording - see safety.SOFTEN.
+    # Tags are picked off the ORIGINAL title on purpose: they are matched
+    # against a topic table, not published as prose.
+    title = safety.soften(title.strip())
     room = TITLE_MAX - len(tags) - 3
     if len(title) > room:
         title = title[:room - 3].rstrip() + "..."

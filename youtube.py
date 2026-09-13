@@ -34,6 +34,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+import safety
 import tags as tags_          # `tags` is the local variable in description_for
 from config import (CHANNEL, DB_PATH, DECLARE_AI, DEFAULT_CHANNEL, OUT_DIR,
                     STOP_REASON, STOPPED, chan_key,
@@ -113,8 +114,13 @@ def description_for(title: str, body: str = "", hashtags=None) -> str:
             else random.sample(list(hashtags), min(5, len(hashtags))))
     tags = " ".join(pool[:5])
 
-    teaser = " ".join(re.split(r"(?<=[.!?])\s+", body.strip())[:2]).strip()
-    parts = [title.strip()] + ([teaser] if teaser else [])
+    # Softened, both halves: the teaser is cut from the story's own first two
+    # sentences, which is exactly where a title's shaming word came from in the
+    # first place. See safety.SOFTEN - the narration and the card keep the
+    # wording, only what is published as a description of the video is changed.
+    teaser = safety.soften(
+        " ".join(re.split(r"(?<=[.!?])\s+", body.strip())[:2]).strip())
+    parts = [safety.soften(title.strip())] + ([teaser] if teaser else [])
     return (("\n\n".join(parts)) + "\n\n" + tags)[:DESC_MAX]
 
 

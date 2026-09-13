@@ -52,6 +52,29 @@ PROFANITY = re.compile(
     r"\b(бля\w*|ху[йёея]\w*|пизд\w*|[её]б\w*|муда[кч]\w*|сука|суки|"
     r"fuck\w*|shit\w*|bitch\w*|cunt\w*)", re.IGNORECASE)
 
+# Swapped in the CAPTION and the description only - not in the audio, not on
+# the card. The story keeps the words it was told in; what goes to the platform
+# as metadata does not have to read as an attack on how somebody looks.
+# TikTok's harassment policy names body shaming outright, and a video read that
+# way is quietly kept out of the For You feed rather than taken down - the
+# failure that looks like nothing at all, which is why this is worth a table.
+#
+# STEMS rather than whole words, because the ending carries the agreement:
+# жирной -> полной, жирная -> полная, жирным -> полным. That trick only holds
+# inside one declension class, which is why this list is short and is not a
+# thesaurus - "тупой" would want "наивный" and the same stem swap would turn
+# "тупик" into "наивник".
+SOFTEN = [
+    (re.compile(r"\bжирн", re.IGNORECASE), "полн"),
+    (re.compile(r"\bтолст", re.IGNORECASE), "полн"),
+    (re.compile(r"\bуродлив", re.IGNORECASE), "непривлекательн"),
+    # the genre's own word, and a whole one - "Я мудак, что..." is the shape
+    # every AmItheAsshole title comes in
+    (re.compile(r"\bмудак\b", re.IGNORECASE), "не прав"),
+    (re.compile(r"\bfat\b", re.IGNORECASE), "plus-size"),
+    (re.compile(r"\bugly\b", re.IGNORECASE), "plain"),
+]
+
 _COMPILED = {k: re.compile(v, re.IGNORECASE) for k, v in BANNED.items()}
 
 
@@ -65,6 +88,18 @@ def blocked(*texts: str) -> str | None:
             if m:
                 return f"{name}:{m.group(0)[:30]}"
     return None
+
+
+def soften(text: str) -> str:
+    """Shaming wording swapped for something neutral. Captions only - see SOFTEN.
+
+    The capital is carried across, or a swap at the front of a title lowercases
+    it: "Жирная соседка" has to come back "Полная соседка", not "полная".
+    """
+    for pat, into in SOFTEN:
+        text = pat.sub(
+            lambda m: into.capitalize() if m.group(0)[:1].isupper() else into, text)
+    return text
 
 
 def mask(word: str) -> str:
@@ -100,6 +135,18 @@ if __name__ == "__main__":
                "мы убили целый вечер на это", "the movie was a massacre of good taste",
                "she rated it 8 out of 10"]:
         assert blocked(ok) is None, f"false positive on {ok!r}"
+
+    # The caption is what the platform reads the video as, and body shaming in
+    # it is a harassment hit that never announces itself. Endings survive the
+    # stem swap, and so does the capital at the front of a title.
+    assert soften("Сестра назвала мою жену жирной") == "Сестра назвала мою жену полной"
+    assert soften("Жирная соседка") == "Полная соседка"
+    assert soften("Я мудак, что не вступился") == "Я не прав, что не вступился"
+    assert soften("AITA for calling her fat") == "AITA for calling her plus-size"
+    assert soften("обычный заголовок без шейминга") == "обычный заголовок без шейминга"
+    # ...and it leaves the story alone: mask() is what the screen gets, and the
+    # audio gets neither
+    assert mask("Я мудак") == "Я м****"
 
     assert mask("бляха") == "б****"
     assert mask("Что за хуйня") == "Что за х****"
