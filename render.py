@@ -67,31 +67,42 @@ CUT_MIN_GAP = 90.0         # how far the post-title footage must be from the ope
 CUT_TRIES = 40             # draws allowed to find that gap before the cut is dropped
 
 # --- overlay banner ---
-# An optional image or clip laid over every render. None of these numbers are
-# taste: each one comes from a placement spec, and the reasoning behind every
-# one of them - why this instant, this band of the frame, and which of its
-# rules are knowingly not met - is in DOCS.ru.md, not here.
+# An optional image or clip the render STOPS for: the story freezes, the mix
+# goes quiet, the banner plays centred over the held frame, and the story picks
+# up where it left off. None of these numbers are taste: each one comes from a
+# placement spec, and the reasoning behind every one of them - why this
+# instant, why the pause, and which of its rules are knowingly not met - is in
+# DOCS.ru.md, not here.
 #
-# The banner arrives as a green screen the size of the frame rather than as a
-# file with an alpha channel, which is what every number below is shaped by.
-AD_AT = 2.5                # when its own entry animation starts, seconds
+# The banner arrives as a green screen rather than as a file with an alpha
+# channel, which is what every number below is shaped by.
+AD_EVERY = 60.0            # one banner per FULL minute of video, each in the
+                           # middle of its own minute - the programme's rule,
+                           # and its own example: a 2 minute video carries two,
+                           # at 0:30 and 1:30. See _ad_times().
 AD_CHANNELS = ("ru",)      # channels that carry one; the rest never do
-AD_Y = 115                 # word cards sit dead centre, so the banner goes
-                           # ABOVE them, under the top edge of the frame. At
-                           # AD_SCALE the band ends at 663, so the whole of the
-                           # banner's travel stays clear of the cards - this is
-                           # the number to turn to move it, and the self-check
-                           # holds the clearance either way up.
-AD_SCALE = 0.85            # share of the frame's WIDTH the green screen is
-                           # scaled to. 1.0 is the size the artwork was drawn
-                           # to cover; anything under it is the channel owner's
-                           # call, not a measurement - see _ad_chain().
-AD_KEY = "0x038925"        # the green it is delivered on, sampled off the file
-AD_SIM = 0.10              # key tolerance. Measured: the artwork's darkest
-                           # navy sits 0.20 away, so this clears it twice over
-                           # while still taking the anti-aliased corners.
-AD_BAND_Y = 0.484          # the banner's band inside that screen, as a share
-AD_BAND_H = 0.336          # of its height - see _ad_chain() for why a band
+AD_HOLD_STILL = 5.0        # how long the story is paused for a banner that is
+                           # a still and has no length of its own. A clip is
+                           # asked how long it is - see _ad_hold().
+AD_SCALE = 1.0             # share of the frame's WIDTH the green screen is
+                           # scaled to. The programme wants the banner over a
+                           # quarter of the screen: at 1.0 it covers 29.6% of
+                           # the frame, and 0.85 - the old offer's setting -
+                           # would put it at 21%. The self-check holds the full
+                           # width, so this is not a free knob any more.
+AD_KEY = "0x00FE00"        # the green it is delivered on, sampled off the file
+AD_SIM = 0.25              # key tolerance. The artwork's own darkest pixel
+                           # sits 0.99 away from that green, so this is about
+                           # the anti-aliased edges and nothing else.
+AD_VOL = 1.0               # the banner's own sound, against the narration.
+                           # Not a taste setting: no audible voice-over on the
+                           # banner means the video is not paid for at all.
+AD_BAND_Y = 0.0            # the banner's band inside that screen, as a share
+AD_BAND_H = 1.0            # of its height - see _ad_chain() for why a band.
+                           # This artwork uses the whole screen (measured: it
+                           # reaches y 38..961 of 1000 over its six seconds),
+                           # so the crop is a no-op and the numbers are here
+                           # for the next banner, not for this one.
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp")
 
 # The whoosh runs under the card's first frames, and voice.py has already left
@@ -494,20 +505,96 @@ def _pick_ad(channel: str = CHANNEL) -> Path | None:
     return random.choice(ads) if ads else None
 
 
-def _ad_input(ad: Path) -> list[str]:
-    """Input flags that make the banner last as long as the video does.
+def _ad_hold(ad: Path) -> float:
+    """How long the story is paused for this banner - its own length."""
+    return AD_HOLD_STILL if ad.suffix.lower() in IMAGE_EXT else _dur(ad)
 
-    Each source type loops by its own flag: a still frame has to be told to
-    repeat at all, a gif carries a loop count the demuxer honours only when
-    asked, and a video has to be re-read from the top. Without this the banner
-    plays once and the rest of the video runs with an empty slot.
+
+def _ad_times(dur: float, hold: float = 0.0) -> list[float]:
+    """Where the NARRATION is cut for each banner, seconds into the narration.
+
+    One banner per FULL minute, never fewer than one, each in the middle of its
+    own slice: 75 seconds of story gets a single banner at 37.5s, and two
+    minutes gets 0:30 and 1:30, which is the programme's own worked example.
+    Slicing the whole duration rather than counting 60s steps is what keeps the
+    last banner off the end of the video, where a viewer has already swiped.
+
+    The count is solved for rather than divided out, because the finished video
+    is longer than the narration by `hold` per banner - the story stops while
+    the banner plays - and the minutes the programme counts are the finished
+    ones: 1:58 of story is 2:04 on screen, and that is two banners, not one.
+
+    The cut points themselves need no such correction, and that is not luck:
+    banner i runs from `cut + i*hold` to `cut + (i+1)*hold` on the finished
+    timeline, so putting the cut at the middle of its slice of the NARRATION
+    lands the banner at the middle of its slice of the VIDEO. The hold cancels.
+    """
+    n = 1
+    while n < int((dur + n * hold) // AD_EVERY):
+        n += 1
+    return [dur * (2 * i + 1) / (2 * n) for i in range(n)]
+
+
+def _snap(at: float, words: list[dict]) -> float:
+    """`at` moved to the nearest gap between words.
+
+    The story stops dead for the banner, and stopping it in the middle of a
+    word is the one way to make a pause sound like a glitch instead of a break.
+    Word ends rather than starts: the gap AFTER a word is where the narrator
+    has already finished saying it.
+    """
+    ends = [w["end"] for w in words if w.get("end")]
+    return min(ends, key=lambda e: abs(e - at)) if ends else at
+
+
+def _pause(src: str, out: str, cuts: list[float], hold: float,
+           audio: bool = False) -> str:
+    """Stop `src` dead for `hold` seconds at each of `cuts` -> `out`.
+
+    setpts pushes everything after a cut later by `hold`, which leaves a hole
+    in the timestamps; what fills the hole is what makes it a pause rather than
+    a jump. On the picture that is `fps`, which repeats the last frame it was
+    given until the next one is due - so the frame the story stopped on stays
+    on screen under the banner. On the sound it is `aresample`, which fills a
+    gap in the timestamps with silence.
+
+    Both of those are ordinary behaviour of filters already in the chain, which
+    is the whole reason it is done this way: the obvious build - split, trim
+    each stretch, concat with a frozen frame between - buffers a whole video of
+    1080x1920 frames on the branches concat is not reading yet.
+    """
+    if not cuts:
+        return f"{src}{'anull' if audio else 'null'}[{out}]"
+    shift = "+".join(f"gte(T,{c:.3f})" for c in cuts)
+    if audio:
+        return (f"{src}asetpts='PTS+({shift})*{hold:.3f}/TB',"
+                f"aresample=48000:async=1:first_pts=0[{out}]")
+    return f"{src}setpts='PTS+({shift})*{hold:.3f}/TB',fps={FPS}[{out}]"
+
+
+def _ad_input(ad: Path) -> list[str]:
+    """Input flags for ONE playing of the banner.
+
+    A still frame has to be told to repeat at all or it is gone after a single
+    video frame, and a gif carries a loop count the demuxer honours only when
+    asked. A clip is left alone: it plays once, where it was put, and the
+    banner appearing again later is another input of the same file - looping it
+    would restart the animation every six seconds for the rest of the video.
     """
     ext = ad.suffix.lower()
     if ext in IMAGE_EXT:
         return ["-loop", "1", "-i", str(ad)]
     if ext == ".gif":
         return ["-ignore_loop", "0", "-i", str(ad)]
-    return ["-stream_loop", "-1", "-i", str(ad)]
+    return ["-i", str(ad)]
+
+
+def _has_audio(p: Path) -> bool:
+    """Whether the file carries a sound track at all - a still never does."""
+    return bool(subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+         "stream=codec_type", "-of", "csv=p=0", str(p)],
+        capture_output=True, text=True, check=True).stdout.strip())
 
 
 def _ad_w() -> int:
@@ -515,8 +602,26 @@ def _ad_w() -> int:
     return int(W * AD_SCALE) // 2 * 2
 
 
-def _ad_chain(idx: int) -> str:
-    """Filter graph putting input `idx` over [base] as the banner -> [v].
+def _ad_h(ad: Path) -> int:
+    """How tall the banner's band lands on the frame, once scaled to _ad_w().
+
+    Measured off the file rather than assumed: the old artwork was 9:16 like
+    the frame, this one is 1902x1000, and the difference is the whole of what
+    the placement checks are about.
+    """
+    w, h = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=width,height", "-of", "csv=p=0", str(ad)],
+        capture_output=True, text=True, check=True).stdout.strip().split(",")
+    return round(_ad_w() * int(h) * AD_BAND_H / int(w))
+
+
+def _ad_chain(idx: int, times: list[float], src: str = "base") -> str:
+    """Filter graph putting the banner over [src] once per `times` -> [v].
+
+    One input per appearance, starting at `idx`: the same file opened again is
+    cheaper than it looks - six seconds of 1902x1000 - and it is the only way
+    each showing can start from its own first frame (see tpad below).
 
     The banner is delivered on a green screen rather than with an alpha
     channel, so the chain keys it. colorkey, not chromakey: chromakey compares
@@ -536,25 +641,36 @@ def _ad_chain(idx: int) -> str:
     sparkle to begin with.
 
     Scaling the green screen by the frame's WIDTH is the whole size question.
-    The screen is 9:16 like the frame, so scaling it to W lands the artwork at
-    exactly the share of the frame it was drawn to cover - which is what
-    pasting it at its own pixel size on a bigger frame would quietly break.
-    AD_SCALE takes a share of that on purpose, and centring what is left is the
-    only sane reading of a banner narrower than the frame.
+    Pasting the artwork at its own pixel size on a bigger frame would quietly
+    shrink it against everything around it; stretching the screen to W lands it
+    at the share of the frame it was drawn to cover. AD_SCALE takes a share of
+    that, and the programme's quarter-of-the-screen floor is what decides how
+    small that share may get - see the self-check.
 
     tpad rather than overlay's `enable`: enable only hides the banner while its
-    stream runs on underneath, so the clip would arrive AD_AT seconds into
-    itself, mid-motion. Padding the FRONT with transparent frames delays the
-    stream itself, so the banner's own entry animation starts on its first
-    frame the moment it appears. Nothing is faded over that on purpose - the
-    banner animates itself in, and a second fade on top reads as a stutter.
+    stream runs on underneath, so the clip would arrive halfway through the
+    video already halfway through itself. Padding the FRONT with transparent
+    frames delays the stream itself, so the banner's own entry animation starts
+    on its first frame the moment it appears. Nothing is faded over that on
+    purpose - the banner animates itself in, and a second fade on top reads as
+    a stutter.
     """
-    return (f"[{idx}:v]fps={FPS},crop=iw:ih*{AD_BAND_H}:0:ih*{AD_BAND_Y},"
+    parts, cur = [], src
+    for i, at in enumerate(times):
+        nxt = "v" if i == len(times) - 1 else f"adon{i}"
+        parts += [
+            f"[{idx + i}:v]fps={FPS},crop=iw:ih*{AD_BAND_H}:0:ih*{AD_BAND_Y},"
             f"colorkey={AD_KEY}:{AD_SIM}:0.03,format=rgba,scale={_ad_w()}:-2,"
-            f"tpad=start_duration={AD_AT}:start_mode=add:color=black@0[ad];"
+            f"tpad=start_duration={at:.3f}:start_mode=add:color=black@0[ad{i}]",
             # eof_action=pass, not shortest: a banner that runs out must leave
             # the video alone, not cut it off wherever it happened to end
-            f"[base][ad]overlay=(W-w)/2:{AD_Y}:format=auto:eof_action=pass[v]")
+            # dead centre, both ways: the story is frozen underneath, so there
+            # is nothing left for the banner to keep out of the way of
+            f"[{cur}][ad{i}]overlay=(W-w)/2:(H-h)/2:format=auto:"
+            f"eof_action=pass[{nxt}]",
+        ]
+        cur = nxt
+    return ";".join(parts)
 
 
 def _pick_music(key: str = "", sub: str = "", channel: str = CHANNEL) -> Path | None:
@@ -713,15 +829,28 @@ def render(mp3, words: list[dict], name: str, bg=None,
                for a in ("-loop", "1", "-i", str(p))]
     video += ";" + _card_chain(nbg + 1, cards, "sub", last)
 
-    ad_in = _ad_input(ad) if ad else []
+    # The story stops for the banner rather than running on behind it, so the
+    # finished video is longer than the narration: `cuts` are moments in the
+    # narration, `ad_at` the same moments once every earlier pause has pushed
+    # them later. Snapped to a word end, because a pause that lands in the
+    # middle of a word reads as a broken file rather than as a break.
+    #
+    # One input per showing, so each starts from its own first frame.
+    hold = _ad_hold(ad) if ad else 0.0
+    cuts = [_snap(c, words) for c in _ad_times(dur, hold)] if ad else []
+    ad_at = [c + i * hold for i, c in enumerate(cuts)]
+    total = dur + len(cuts) * hold
+    ad_idx = nbg + 1 + len(cards)
+    ad_in = [a for _ in cuts for a in _ad_input(ad)]
     if ad:
-        video += ";" + _ad_chain(nbg + 1 + len(cards))
+        video += f";{_pause('[' + last + ']', 'held', cuts, hold)}"
+        video += ";" + _ad_chain(ad_idx, ad_at, "held")
 
     # Audio inputs come after every video one, in the order they are appended
     # below. `spoken` is whatever the voice has become so far - the bare mp3, or
     # the mp3 with the whoosh already in it - and each stage hands the next one
     # its label.
-    aidx = nbg + 1 + len(cards) + bool(ad)
+    aidx = ad_idx + len(cuts)
     spoken = f"[{audio}]"
 
     # normalize=0, or amix halves the narration to make room for half a second
@@ -746,10 +875,35 @@ def render(mp3, words: list[dict], name: str, bg=None,
             aidx, spoken, dur, _dur(SFX) if SFX.exists() else 0.0))
         audio = "[a]"
 
+    # The story stops for the banner, so the whole mix stops with it - voice,
+    # whoosh and bed alike, in one place, on the finished mix rather than on
+    # any one leg of it. What plays over the frozen frame is the banner and
+    # nothing else, which is what a break is.
+    src = audio if audio.startswith("[") else f"[{audio}]"
+    if cuts:
+        video += f";{_pause(src, 'gapped', cuts, hold, audio=True)}"
+        audio = src = "[gapped]"
+
+    # The banner's own sound, over the top of everything and NOT ducked. The
+    # programme pays on the voice-over being audible, so this is the one leg of
+    # the mix that is not a taste decision: silent banner, unpaid video.
+    # adelay puts each showing where its picture already is - the same seconds
+    # _ad_chain() padded the video leg to - and the audio rides along on the
+    # inputs the banner is already open on, so nothing new is read.
+    if ad and _has_audio(ad):
+        legs = ";".join(
+            f"[{ad_idx + i}:a]adelay={round(at * 1000)}:all=1,"
+            f"volume={AD_VOL}[adsnd{i}]" for i, at in enumerate(ad_at))
+        taps = "".join(f"[adsnd{i}]" for i in range(len(ad_at)))
+        # duration=first, as everywhere else here: the story with its pauses in
+        # it decides how long the video is, and a banner must not stretch it
+        video += (f";{legs};{src}{taps}amix=inputs={1 + len(ad_at)}"
+                  ":duration=first:normalize=0[withad]")
+        audio, src = "[withad]", "[withad]"
+
     # Last, over whatever the mix turned out to be - see LUFS_I. `audio` is a
     # bare stream spec when nothing above filtered it, and a filter graph wants
     # the brackets either way.
-    src = audio if audio.startswith("[") else f"[{audio}]"
     video += f";{src}loudnorm=I={LUFS_I}:TP={LUFS_TP}:LRA={LUFS_LRA}[loud]"
     audio = "[loud]"
 
@@ -762,7 +916,7 @@ def render(mp3, words: list[dict], name: str, bg=None,
         *sfx_in,
         *music_in,
         "-filter_complex", video,
-        "-map", "[v]", "-map", audio, "-t", f"{dur:.3f}", "-r", str(FPS),
+        "-map", "[v]", "-map", audio, "-t", f"{total:.3f}", "-r", str(FPS),
         # The ceiling is the point, not the CRF - see CRF/MAXRATE above for why
         # this one is where it is, and how to put it back if the upload cannot
         # carry it.
@@ -783,9 +937,10 @@ def render(mp3, words: list[dict], name: str, bg=None,
     ]
     # run inside OUT_DIR: the subtitles filter chokes on Windows drive colons
     subprocess.run(cmd, cwd=OUT_DIR, check=True)
-    log.info("%s: %.1f sec from %s at %.1fs%s%s", out.name, dur, bg.name, seek,
+    log.info("%s: %.1f sec from %s at %.1fs%s%s", out.name, total, bg.name, seek,
              f", cutting to %.1fs at %.1fs" % (cut, title_end) if cut else "",
-             f", banner {ad.name} from {AD_AT:g}s" if ad else "")
+             f", banner {ad.name} at {', '.join(f'{a:.1f}s' for a in ad_at)}"
+             f", holding {hold:.1f}s each" if ad else "")
     if cards:
         log.info("%s: title card over %.1fs in %d frames%s", out.name, title_end,
                  len(cards), f", {SFX.name} under it" if sfx_in else "")
@@ -864,39 +1019,90 @@ if __name__ == "__main__":
         assert (got is not None) == (c in AD_CHANNELS and any(AD_DIR.rglob("*.*"))), \
             f"{c}: {got}"
 
-    # The band clears the word cards, which sit dead centre, and the whole of
-    # it stays in frame. The source being 9:16 like the frame is what lets both
-    # be written in frame heights: scaled to _ad_w(), the band comes out
-    # H * AD_BAND_H * AD_SCALE tall. Written for either end of the frame, so
-    # moving the banner back down needs no new check here.
-    band = H * AD_BAND_H * AD_SCALE
-    assert not AD_Y < H / 2 < AD_Y + band, "the banner runs into the word cards"
-    assert 0 <= AD_Y and AD_Y + band <= H, "the band runs off the frame"
+    # One banner per full minute, each in the middle of its own slice - the
+    # programme's rule, with its own worked example as the second case.
+    assert _ad_times(75) == [37.5], _ad_times(75)
+    assert _ad_times(120) == [30.0, 90.0], _ad_times(120)
+    assert _ad_times(179) == [44.75, 134.25], _ad_times(179)
+    assert _ad_times(20) == [10.0], "a short video still carries one"
+    assert all(0 < a < d for d in (45, 75, 120, 200) for a in _ad_times(d)), \
+        "a banner landed outside the video"
+    # ...counted on the FINISHED length, pauses included: 1:58 of story with a
+    # six second break in it is 2:04 on screen, which the programme reads as
+    # two minutes and wants two banners.
+    assert _ad_times(118, 6) == [29.5, 88.5], _ad_times(118, 6)
+    assert _ad_times(52, 6) == [26.0], "a minute is a minute, not 58 seconds"
+    # ...and every banner still lands dead centre of its slice of the FINISHED
+    # video, which is the placement the programme actually pays on. This is the
+    # check that would catch the hold being added to the cut points as well.
+    for _d, _h in ((75, 6), (118, 6), (240, 6), (95, 5)):
+        _c = _ad_times(_d, _h)
+        _tot = _d + len(_c) * _h
+        for _i, _one in enumerate(_c):
+            _mid = _one + _i * _h + _h / 2          # middle of the banner
+            assert abs(_mid - _tot * (2 * _i + 1) / (2 * len(_c))) < 1e-6, \
+                f"banner {_i} of {_d}s+{_h}s is off centre: {_mid} of {_tot}"
 
-    # The banner: nothing on screen before AD_AT, the green keyed out around
-    # it, and a moving source starting from its own first frame rather than
-    # AD_AT seconds into itself. Run on the real filter graph over a flat
-    # frame, so it costs one short encode instead of a whole render.
+    # The pause lands between words, never inside one
+    _w = [{"word": "a", "start": 0.0, "end": 1.0},
+          {"word": "b", "start": 1.2, "end": 2.4},
+          {"word": "c", "start": 2.6, "end": 4.0}]
+    assert _snap(1.9, _w) == 2.4 and _snap(1.3, _w) == 1.0, _snap(1.9, _w)
+    assert _snap(9.0, _w) == 4.0, "the last word end is as far as it can go"
+    assert _snap(1.9, []) == 1.9, "no words, nothing to snap to"
+
+    # Nothing to pause for is a pass-through, on either leg - a dangling label
+    # here is a failed render, not a wrong picture
+    assert _pause("[base]", "held", [], 6) == "[base]null[held]"
+    assert _pause("[a]", "gapped", [], 6, audio=True) == "[a]anull[gapped]"
+    _p = _pause("[base]", "held", [30.0, 90.0], 6)
+    assert "gte(T,30.000)+gte(T,90.000)" in _p and f"fps={FPS}" in _p, _p
+    assert _pause("[a]", "gapped", [30.0], 6, audio=True).count("aresample") == 1
+
+    # The banner: nothing on screen before it is due, the green keyed out
+    # around it, and a moving source starting from its own first frame rather
+    # than mid-animation. Run on the real filter graph over a flat frame, so it
+    # costs one short encode instead of a whole render.
+    _at = 2.5
     ad = OUT_DIR / "_selftest_ad.mp4"
     # a green screen that MOVES: a box in the banner's band, black for its
-    # first second and white after. Overlaid at AD_AT it must show the black
+    # first second and white after. Overlaid at `_at` it must show the black
     # opening, not the white it would be showing if the stream had been running
     # underneath all along. Narrower than the screen, so the strip beside it
-    # stays green and has to key out.
+    # stays green and has to key out. Shaped like the real artwork rather than
+    # like the frame, because that ratio is what decides the placement below.
     box = (f"drawbox=x=iw*0.1:y=ih*{AD_BAND_Y}:w=iw*0.8:h=ih*{AD_BAND_H}"
            ":t=fill:color=")
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
-                    "-i", f"color={AD_KEY}:s=720x1280:r={FPS}:d=1", "-f", "lavfi",
-                    "-i", f"color={AD_KEY}:s=720x1280:r={FPS}:d=8",
+                    "-i", f"color={AD_KEY}:s=720x378:r={FPS}:d=1", "-f", "lavfi",
+                    "-i", f"color={AD_KEY}:s=720x378:r={FPS}:d=8",
                     "-filter_complex", f"[0:v]{box}black[a];[1:v]{box}white[b];"
                                        "[a][b]concat=n=2:v=1[v]",
                     "-map", "[v]", "-c:v", "libx264", "-preset", "ultrafast",
                     "-pix_fmt", "yuv420p", str(ad)], check=True)
+
+    # The banner is centred, so the only thing left to hold is that it fits.
+    # Measured off the banner that will actually be used, falling back to the
+    # synthetic one when the directory is empty - the two are the same shape on
+    # purpose. Nothing about the word cards any more: the story is frozen while
+    # the banner is up, so there is nothing underneath to stay clear of.
+    band = _ad_h(_pick_ad("ru") or ad)
+    assert band <= H, f"the banner is {band} tall and the frame is {H}"
+    top = (H - band) // 2
+    # ...and it is as big as this artwork can be made. The programme wants a
+    # quarter of the screen; measured on the file, the drawing is full-bleed -
+    # it touches both edges of its green screen and stands 840 of its 1000
+    # rows, 920 at the pop and the logo. At the frame's full width that is
+    # 24.9% of the frame steady and 27.2% at the peak, so the frame's own width
+    # is the ceiling and anything under it drops the banner under the bar
+    # outright. This is what stops AD_SCALE being turned down for taste.
+    assert _ad_w() == W, "the banner is not laid out at the full width of the frame"
+
     over = OUT_DIR / "_selftest_banner.mp4"
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
                     "-f", "lavfi", "-i", f"color=gray:s={W}x{H}:r={FPS}:d=9",
                     *_ad_input(ad),
-                    "-filter_complex", f"[0:v]null[base];{_ad_chain(1)}",
+                    "-filter_complex", f"[0:v]null[base];{_ad_chain(1, [_at])}",
                     "-map", "[v]", "-t", "9", "-c:v", "libx264",
                     "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(over)],
                    check=True)
@@ -905,20 +1111,28 @@ if __name__ == "__main__":
         """Mean brightness of one strip of the banner's band, 0-255."""
         return subprocess.run(
             ["ffmpeg", "-v", "error", "-ss", f"{at}", "-i", str(over), "-vf",
-             f"crop=40:100:{x}:{AD_Y + 100},scale=1:1,format=gray",
+             f"crop=40:100:{x}:{top + 100},scale=1:1,format=gray",
              "-frames:v", "1", "-f", "rawvideo", "-"],
             capture_output=True, check=True).stdout[0]
 
     # grey is the base showing through, and it has to show through twice: once
     # before the banner is due, and once beside it for the whole run, where the
     # source is green and nothing but the key can be taking it away
-    assert 100 < _lum(AD_AT / 2) < 160, "the banner is on screen before it should be"
-    assert 100 < _lum(AD_AT + 1.5, 20) < 160, "the green screen was not keyed out"
+    assert 100 < _lum(_at / 2) < 160, "the banner is on screen before it should be"
+    assert 100 < _lum(_at + 1.5, 20) < 160, "the green screen was not keyed out"
     # its own first second, which is black - if tpad had been swapped for
     # overlay's `enable` this would already be white and the banner would
     # arrive mid-animation
-    assert _lum(AD_AT + 0.2) < 40, "the banner did not start from frame one"
-    assert _lum(AD_AT + 1.5) > 200, "the banner never arrived"
+    assert _lum(_at + 0.2) < 40, "the banner did not start from frame one"
+    assert _lum(_at + 1.5) > 200, "the banner never arrived"
+
+    # Two showings, two inputs, chained and ending on the label the rest of the
+    # graph expects - the wiring a second banner rides on, checked without an
+    # encode. Each gets its own tpad, or they would arrive together.
+    _two = _ad_chain(5, [30.0, 90.0])
+    assert _two.count("overlay=") == 2 and _two.endswith("[v]"), _two
+    assert "[5:v]" in _two and "[6:v]" in _two, _two
+    assert "start_duration=30.000" in _two and "start_duration=90.000" in _two, _two
 
     # The card is images now, so the ass file must carry nothing of it - a
     # leftover Card style would draw its own box UNDER the png and show as a
@@ -1067,7 +1281,13 @@ if __name__ == "__main__":
          "stream=width,height", "-of", "csv=p=0", str(out)],
         capture_output=True, text=True, check=True).stdout.strip()
     assert probe == f"{W},{H}", f"wrong resolution: {probe}"
-    assert abs(_dur(out) - _dur(mp3)) < 1.0, "video length does not match audio"
+    # The narration, plus the pause each banner holds the story for. No banner
+    # and the two are simply the same length, which is what this used to say.
+    _ad = _pick_ad("ru")
+    _hold = _ad_hold(_ad) if _ad else 0.0
+    _want = _dur(mp3) + len(_ad_times(_dur(mp3), _hold)) * _hold if _ad else _dur(mp3)
+    assert abs(_dur(out) - _want) < 1.0, \
+        f"video is {_dur(out):.1f}s, wanted {_want:.1f}s"
 
     def _centre(at: float, scale: float = 1.0) -> int:
         """Mean brightness of the card's left gutter at `scale`, 0-255.
