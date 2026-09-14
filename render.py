@@ -525,26 +525,36 @@ def _ad_hold(ad: Path) -> float:
 def _ad_times(dur: float, hold: float = 0.0) -> list[float]:
     """Where the NARRATION is cut for each banner, seconds into the narration.
 
-    One banner per FULL minute, never fewer than one, each in the middle of its
-    own slice: 75 seconds of story gets a single banner at 37.5s, and two
-    minutes gets 0:30 and 1:30, which is the programme's own worked example.
-    Slicing the whole duration rather than counting 60s steps is what keeps the
-    last banner off the end of the video, where a viewer has already swiped.
+    One banner per FULL minute, never fewer than one. The programme says two
+    things, and they are not the same rule - which one applies is decided by
+    how many banners there are:
+
+    * under two minutes, one banner, "strictly in the MIDDLE of the video" -
+      so 1:59 of video carries it at 0:59, not at 0:30;
+    * two minutes and up, the worked example is absolute: "0:30 and 1:30, and
+      so on", one banner in the middle of each MINUTE. Spreading them over
+      equal slices of the video instead drifts the last one out of its minute
+      (2:50 of video put it at 2:07, leaving 1:00-2:00 bare) and that is
+      exactly what the programme refuses to pay for.
 
     The count is solved for rather than divided out, because the finished video
     is longer than the narration by `hold` per banner - the story stops while
     the banner plays - and the minutes the programme counts are the finished
     ones: 1:58 of story is 2:04 on screen, and that is two banners, not one.
 
-    The cut points themselves need no such correction, and that is not luck:
-    banner i runs from `cut + i*hold` to `cut + (i+1)*hold` on the finished
-    timeline, so putting the cut at the middle of its slice of the NARRATION
-    lands the banner at the middle of its slice of the VIDEO. The hold cancels.
+    The cut points are in the NARRATION, which is that much shorter, so each
+    one steps back by the pauses already taken (`i*hold`) and by half of its
+    own (the banner wants its MIDDLE on the mark, not its first frame). The
+    single-banner case needs no such correction: the middle of the narration
+    is the middle of the video, because the one pause sits on it and grows it
+    symmetrically.
     """
     n = 1
     while n < int((dur + n * hold) // AD_EVERY):
         n += 1
-    return [dur * (2 * i + 1) / (2 * n) for i in range(n)]
+    if n == 1:
+        return [dur / 2]
+    return [AD_EVERY * (i + 0.5) - hold * (i + 0.5) for i in range(n)]
 
 
 def _snap(at: float, words: list[dict]) -> float:
@@ -1037,29 +1047,35 @@ if __name__ == "__main__":
         assert (got is not None) == (c in AD_CHANNELS and any(AD_DIR.rglob("*.*"))), \
             f"{c}: {got}"
 
-    # One banner per full minute, each in the middle of its own slice - the
-    # programme's rule, with its own worked example as the second case.
+    # One banner alone sits in the middle of the video, whatever its length...
     assert _ad_times(75) == [37.5], _ad_times(75)
-    assert _ad_times(120) == [30.0, 90.0], _ad_times(120)
-    assert _ad_times(179) == [44.75, 134.25], _ad_times(179)
+    assert _ad_times(119) == [59.5], "1:59 is one banner, and in the MIDDLE"
     assert _ad_times(20) == [10.0], "a short video still carries one"
+    # ...and from two minutes up they go on the minute grid instead, which is
+    # the programme's own worked example: 0:30, 1:30, and so on.
+    assert _ad_times(120) == [30.0, 90.0], _ad_times(120)
+    assert _ad_times(179) == [30.0, 90.0], _ad_times(179)
     assert all(0 < a < d for d in (45, 75, 120, 200) for a in _ad_times(d)), \
         "a banner landed outside the video"
-    # ...counted on the FINISHED length, pauses included: 1:58 of story with a
-    # six second break in it is 2:04 on screen, which the programme reads as
-    # two minutes and wants two banners.
-    assert _ad_times(118, 6) == [29.5, 88.5], _ad_times(118, 6)
+    # The count is taken off the FINISHED length, pauses included: 1:58 of
+    # story with a six second break in it is 2:04 on screen, which the
+    # programme reads as two minutes and wants two banners.
+    assert _ad_times(118, 6) == [27.0, 81.0], _ad_times(118, 6)
     assert _ad_times(52, 6) == [26.0], "a minute is a minute, not 58 seconds"
-    # ...and every banner still lands dead centre of its slice of the FINISHED
-    # video, which is the placement the programme actually pays on. This is the
-    # check that would catch the hold being added to the cut points as well.
-    for _d, _h in ((75, 6), (118, 6), (240, 6), (95, 5)):
+    # ...and the cut points are in the NARRATION, so what has to land on the
+    # mark is the middle of the banner on the FINISHED timeline. This is the
+    # check that would catch the pauses not being taken back out of the cuts -
+    # the drift that left 1:00-2:00 of a 2:50 video with no banner at all.
+    for _d, _h in ((75, 6), (118, 6), (240, 6), (95, 5), (169.8, 4.63)):
         _c = _ad_times(_d, _h)
         _tot = _d + len(_c) * _h
+        assert _c == sorted(_c) and 0 < _c[0] and _c[-1] < _d, \
+            f"cuts outside the narration: {_c} of {_d}s"
         for _i, _one in enumerate(_c):
             _mid = _one + _i * _h + _h / 2          # middle of the banner
-            assert abs(_mid - _tot * (2 * _i + 1) / (2 * len(_c))) < 1e-6, \
-                f"banner {_i} of {_d}s+{_h}s is off centre: {_mid} of {_tot}"
+            _want = _tot / 2 if len(_c) == 1 else AD_EVERY * _i + AD_EVERY / 2
+            assert abs(_mid - _want) < 1e-6, \
+                f"banner {_i} of {_d}s+{_h}s is at {_mid}, wanted {_want}"
 
     # The pause lands between words, never inside one
     _w = [{"word": "a", "start": 0.0, "end": 1.0},
