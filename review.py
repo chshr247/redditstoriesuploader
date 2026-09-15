@@ -254,7 +254,7 @@ def _critic(critic) -> str:
     return out + "\n"
 
 
-def _body(post: dict, written: list, critic=None) -> str:
+def _body(post: dict, written: list, critic=None, note: str = "") -> str:
     title = written[0][0]
     parts = "\n\n".join(
         (f"**Часть {i}.** " if len(written) > 1 else "") + body
@@ -267,9 +267,17 @@ def _body(post: dict, written: list, critic=None) -> str:
             if (src := upvote.source_url(post["id"]))
             else f"r/{post['sub']} · {post['score']} · "
                  f"https://redd.it/{post['id']}")
+    # Above the title and below nothing: it is a reason to answer `-`, so it
+    # has to be read before the title is read, not after the narration. Phrased
+    # as a guess on purpose - upvote.screen() is wrong more often than it is
+    # right, and a flag that reads like a verdict would get obeyed like one.
+    warn = (f"> ⚠️ **Возможен боди-шейминг:** {note}\n>\n"
+            f"> Автопроверка, она ошибается чаще, чем попадает — "
+            f"реши сам. Если да, сними историю ответом `-`.\n\n") if note else ""
     return (
         f"{head}\n\n"
-        f"**Название от модели:**\n\n`{title}`\n\n"
+        + warn
+        + f"**Название от модели:**\n\n`{title}`\n\n"
         + _critic(critic)
         + f"{parts}\n\n---\n"
         f"**Первая строка комментария:**\n"
@@ -302,15 +310,20 @@ def _body(post: dict, written: list, critic=None) -> str:
 
 
 def park(post: dict, gender: str, written: list[tuple[str, str]],
-         critic=None) -> int:
-    """Open the issue, store the script, return the issue number."""
+         critic=None, note: str = "") -> int:
+    """Open the issue, store the script, return the issue number.
+
+    `note` is a warning rendered above the title - see upvote.screen(), the one
+    thing that fills it. It is not stored: it says nothing about the story that
+    the story does not say, and the issue is where it is read.
+    """
     # Assigned, not just opened: a notification for one's own repository depends
     # on the watch setting, an assignment does not - the same reason publish.py's
     # draft reminder assigns itself.
     url = _gh("issue", "create",
               "--title", f"[{OUTPUT_LANG}] {script.plain(written[0][0])[:70]}",
               "--assignee", _owner(),
-              "--body-file", "-", stdin=_body(post, written, critic))
+              "--body-file", "-", stdin=_body(post, written, critic, note))
     issue = int(url.rstrip("/").rsplit("/", 1)[1])
     with _db() as db:
         db.execute("INSERT OR REPLACE INTO review(post_id, lang, issue, ts, "

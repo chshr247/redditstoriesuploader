@@ -135,11 +135,15 @@ def write_and_park(post: dict, n: int = 1) -> None:
 def park_heard(s: dict, n: int) -> bool:
     """Park a harvested story: the text is the tape's, and nothing rewrites it.
 
-    No LLM call, which is the point twice over - it is a story somebody has
-    already read aloud, so there is nothing to write, and the recording only
+    Nothing WRITES here, which is the point twice over - it is a story somebody
+    has already read aloud, so there is nothing to write, and the recording only
     stays usable while the words are the ones on it. The user is asked for a
     title exactly as for any other story; a title is all there is to decide
     here, because the narration is already read.
+
+    That rule is about words, not about calls, and upvote.screen() below is the
+    exception it always allowed: it reads the story, answers with a warning for
+    the issue, and touches not one word of the tape.
 
     The gender is not known and is not on the tape either. It tints the
     subtitles (render.NARRATOR_COLOURS) and picks the fallback narrator if the
@@ -167,8 +171,20 @@ def park_heard(s: dict, n: int) -> bool:
         return False
     log.info("heard: r/%s [%d views] %d part(s): %s", s["subreddit"],
              s["score"], len(written), s["title"][:60])
+    # The ONE model call this path makes, and it writes nothing: it reads the
+    # story and may put a warning on the issue. See the docstring above on why
+    # the others are absent - a judgement that changes no words leaves the
+    # recording usable, which is what that rule is actually protecting.
+    # Advisory by measurement, not by caution: upvote.screen() is wrong more
+    # often than right, so it decorates the question rather than answering it.
+    try:
+        note = upvote.screen(written[0][0], " ".join(b for _, b in written))
+    except Exception:
+        log.exception("%s: the body-image screen failed - parking it unflagged",
+                      s["id"])
+        note = ""
     review.park({"id": s["id"], "sub": s["subreddit"], "score": s["score"],
-                 "text": s["selftext"]}, "", written)
+                 "text": s["selftext"]}, "", written, note=note)
     # Marked here and not at the render, for write_and_park()'s reason: the
     # text is safer in sqlite than the story is loose in the queue, where the
     # next run would park it a second time while the first is still out.

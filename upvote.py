@@ -439,11 +439,19 @@ def _screen_system() -> str:
 
 
 def screen(title: str, body: str) -> str:
-    """Why this harvested story should not be published, or "" to keep it.
+    """Why this story might be kept out of the feed, or "" if nothing is.
 
-    One call, temperature 0, and the same _ask() every other judgement here
-    uses. Costs one small request per story banked; measured on the 117 in the
-    queue on 2026-09-15 it dropped six, of which four were plainly right.
+    ADVISORY. The answer goes on the review issue for the user to read; it
+    decides nothing on its own, and that is not caution, it is what the
+    measurement says. Over the 117 stories parked on 2026-09-15 it flagged ten
+    and four of those were right - among the six wrong ones a mother-in-law
+    forcing cake on somebody with a deadly nut allergy, a landlord drilling
+    holes to watch his tenant, and one answer that said DROP with the reason
+    "not looks". It also disagreed with itself between two runs at temperature
+    0 on the same story.
+
+    So it is worth having and not worth obeying: the flag costs the reader a
+    line, and the four it gets right are videos that would publish to nobody.
     """
     if not (system := _screen_system()):
         log.warning("the body-image rule is gone from the writing prompt - "
@@ -1352,20 +1360,15 @@ def digest(count: int = 1) -> int:
                     log.info("%s #%d dropped (%s): %s", vid, n, hit,
                              (s["title"] or "")[:60])
                     continue
-                # ...and the half of the same category no word can catch. A
-                # model call per story, here rather than in park_heard(),
-                # because a story refused here never reaches the review queue
-                # and never costs anybody an issue to answer. A failure keeps
-                # the story: this gate exists to save reach, and losing a
-                # story to a timeout is the more expensive mistake.
-                try:
-                    if why := screen(s["title"] or "", s["body"] or ""):
-                        log.info("%s #%d dropped (body image: %s): %s",
-                                 vid, n, why[:60], (s["title"] or "")[:60])
-                        continue
-                except Exception:
-                    log.exception("%s #%d: the body-image screen failed, "
-                                  "keeping the story", vid, n)
+                # The half of the same category no word can catch is NOT
+                # decided here - screen() is advisory and runs at the park, on
+                # the issue the user answers anyway. Measured 2026-09-15 over
+                # the 117 stories in the queue, it dropped ten and only four
+                # were right: it took a forced-feeding story with a deadly nut
+                # allergy and a landlord-stalking story for body image, and on
+                # one story it answered DROP with the reason "not looks".
+                # A judge that wrong is a judge that advises, not one that
+                # refuses - see main.park_heard().
                 # The topic filter, and it is the sub list rather than a second
                 # opinion: whatever this channel already publishes is what its
                 # audience turned up for. An empty SUBREDDITS means no filter.
