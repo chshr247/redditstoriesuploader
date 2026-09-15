@@ -41,6 +41,32 @@ BANNED = {
     # exterminate") that was harmless as a story but unpostable as a title card.
     "genocide": r"\b(истреб\w*|геноцид\w*|genocide|exterminat\w*|ethnic\s+cleansing)\b",
     "drugs": r"\b(героин\w*|кокаин\w*|метамфетамин\w*|heroin|cocaine|meth(amphetamine)?|fentanyl)\b",
+    # MEASURED, not guessed. TikTok's "Здоровое поведение" is the category that
+    # actually bites this channel, and it bites harder than the adult-themes
+    # one everybody expects: on 2026-09-14 "Сестра назвала мою жену жирной"
+    # took 28 views and "Я нашел у жены тайник с огромными фаллоимитаторами"
+    # took 575, both with the same banner, the same length and the same
+    # account. Sex is distributed; a word about somebody's weight is not.
+    #
+    # SOFTEN swaps these in the caption and was not enough - the audio and the
+    # burned-in subtitles keep them, and the platform reads both. So the story
+    # is refused outright rather than published with a politer description.
+    #
+    # Adjectival толст\w* is deliberately absent: толстовка, толстый слой and
+    # толстый кошелёк are ordinary words, and this list DROPS a story rather
+    # than masking a word in it - a false positive here costs a video. The
+    # nouns are safe because nobody calls a hoodie a толстуха.
+    #
+    # "fat chance" is excluded because it is an idiom about probability that
+    # says nothing about anybody's body, and the source half of this gate reads
+    # English Reddit, where it is common. жирный шрифт and жирное пятно are the
+    # same shape of word and are NOT excluded: they are rare in a story about
+    # people, and the cost of being wrong about them is one candidate out of
+    # hundreds, against a video that publishes to nobody.
+    "body_shaming": r"\b(жирн(ая|ый|ое|ые|ую|ого|ой|ым|ых|ому)|жирух\w*|"
+                    r"толстух\w*|толстяк\w*|ожирени\w*|целлюлит\w*|"
+                    r"свиномат\w*|тройн\w+\s+подбород\w+|"
+                    r"fat(?!\s+chance)(so|ty|ass)?|obese|obesity|lardass)\b",
 }
 
 # Russian mat, masked on screen. The prompt tells the model to avoid it;
@@ -130,10 +156,21 @@ if __name__ == "__main__":
     assert blocked("Adolf Hitler was nominated for a Nobel Peace Prize"
                    ).startswith("hate:")
 
+    # The category that actually costs this channel its reach - see BANNED.
+    # Both halves, because the source is English and the narration is not.
+    assert blocked("Сестра назвала мою жену жирной").startswith("body_shaming:")
+    assert blocked("ей бы сбросить вес, а не лезть в чужую жизнь "
+                   "с её тройным подбородком").startswith("body_shaming:")
+    assert blocked("AITA for calling my sister fat").startswith("body_shaming:")
+
     # narrow on purpose: these must NOT fire
     for ok in ["I was born in 1988", "we had to kill time at the airport",
                "мы убили целый вечер на это", "the movie was a massacre of good taste",
-               "she rated it 8 out of 10"]:
+               "she rated it 8 out of 10",
+               # body_shaming's neighbours: ordinary words one letter away from
+               # it, and the reason толст\w* is not on the list
+               "она надела толстовку", "толстый слой пыли", "толстый кошелёк",
+               "fat chance of that happening"]:
         assert blocked(ok) is None, f"false positive on {ok!r}"
 
     # The caption is what the platform reads the video as, and body shaming in
