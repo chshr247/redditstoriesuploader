@@ -65,6 +65,7 @@ import sys
 import time
 from pathlib import Path
 
+import safety
 import script
 from config import (DB_PATH, LLM_BASE_URL, MIN_SEC, OPENAI_API_KEY,
                     OUT_DIR, OUTPUT_LANG, PART_SEC, SUBREDDITS,
@@ -1257,6 +1258,27 @@ def digest(count: int = 1) -> int:
                 # are exactly the ones YouTube tolerates in a narrated story
                 # and TikTok actions. If a video is ever taken down for its
                 # content, this is the line that was removed.
+                #
+                # ...and it came true, on 2026-09-14, as a DERANK rather than a
+                # takedown - which is the same bill paid quietly. "Сестра
+                # назвала мою жену жирной" took 28 views against a median of
+                # ~440, kept out of the For You feed under the platform's
+                # healthy-behaviours policy. So one category comes back, and
+                # exactly one: body_shaming is the case the paragraph above
+                # describes most precisely - YouTube narrates a story about
+                # somebody's weight without blinking and TikTok will not carry
+                # it. The other eight stay off, on the 09-06 reasoning, which
+                # still holds for them.
+                #
+                # `only` rather than reading the category off the result: the
+                # first hit wins, so a story carrying a suicide AND a weight
+                # insult comes back "self_harm" and a startswith() test lets it
+                # through. See safety.blocked().
+                if hit := safety.blocked(s["title"] or "", s["body"] or "",
+                                         only=("body_shaming",)):
+                    log.info("%s #%d dropped (%s): %s", vid, n, hit,
+                             (s["title"] or "")[:60])
+                    continue
                 # The topic filter, and it is the sub list rather than a second
                 # opinion: whatever this channel already publishes is what its
                 # audience turned up for. An empty SUBREDDITS means no filter.

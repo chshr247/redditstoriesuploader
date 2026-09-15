@@ -104,12 +104,24 @@ SOFTEN = [
 _COMPILED = {k: re.compile(v, re.IGNORECASE) for k, v in BANNED.items()}
 
 
-def blocked(*texts: str) -> str | None:
-    """Category of the first banned term found, or None if the text is clean."""
+def blocked(*texts: str, only: "tuple[str, ...] | None" = None) -> str | None:
+    """Category of the first banned term found, or None if the text is clean.
+
+    `only` narrows it to the named categories, and it exists for exactly one
+    caller: upvote.py's harvest, which trusts YouTube's moderation for
+    everything except the one category YouTube tolerates and TikTok quietly
+    keeps out of the feed. Narrowing rather than reading the category off the
+    result is the point - this returns the FIRST hit across all of them, so a
+    story carrying both a suicide and a weight insult comes back "self_harm"
+    and a caller testing that string for "body_shaming" lets it straight
+    through.
+    """
     for text in texts:
         if not text:
             continue
         for name, pat in _COMPILED.items():
+            if only and name not in only:
+                continue
             m = pat.search(text)
             if m:
                 return f"{name}:{m.group(0)[:30]}"
@@ -162,6 +174,17 @@ if __name__ == "__main__":
     assert blocked("ей бы сбросить вес, а не лезть в чужую жизнь "
                    "с её тройным подбородком").startswith("body_shaming:")
     assert blocked("AITA for calling my sister fat").startswith("body_shaming:")
+
+    # `only` narrows the gate, and the reason it exists rather than the caller
+    # reading the category off the result: the first hit wins, so a story
+    # carrying both comes back as the other category and a startswith() test
+    # would pass it.
+    _both = "После самоубийства брата она назвала мою жену жирной"
+    assert blocked(_both).startswith("self_harm:"), blocked(_both)
+    assert blocked(_both, only=("body_shaming",)).startswith("body_shaming:")
+    assert blocked("Он оказался нацистом", only=("body_shaming",)) is None
+    assert blocked("Сестра назвала мою жену жирной",
+                   only=("self_harm",)) is None
 
     # narrow on purpose: these must NOT fire
     for ok in ["I was born in 1988", "we had to kill time at the airport",
