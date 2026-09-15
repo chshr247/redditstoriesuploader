@@ -146,7 +146,23 @@ MAX_SEGMENTS = int(os.getenv("UPVOTE_MAX_SEGMENTS", 2200))
 # a chain between the two is now dropped where 480 would have taken it.
 # Nothing in the queue is there yet. If the log starts naming such stories,
 # this is the number that let them in, not STORY_MAX.
-PART_MAX = int(os.getenv("UPVOTE_PART_SEC", 270))
+#
+# 270 -> 150 on 2026-09-15, against measured views rather than taste. The
+# channel's median fell 2006 -> 478 over the four weeks in which the typical
+# video went past three minutes, while the like RATE doubled (1.38% -> 3.32%)
+# - fewer people reached, the ones who did liked it, which is the shape of a
+# completion problem and not of a story problem. Simulated over the 103 unused
+# stories by running _bounds() itself: the median part goes 181s -> 124s and
+# the share over three minutes 50% -> 3%, for 226 videos instead of 170.
+#
+# It is not free, and both prices are visible in that simulation. Four stories
+# now need more than `most` parts and are dropped by main._park_one where 270
+# took them. And 27 stories fall through to _sentence_cuts instead of the
+# model's turns, against 5 at 270 - a shorter part has fewer turns to choose
+# from, so more of them end mid-scene. 120 was measured too: it buys a 102s
+# median and no part over 180s at all, but at ten stories dropped and 39 cut
+# on sentences. 150 was the better trade, not the shortest number available.
+PART_MAX = int(os.getenv("UPVOTE_PART_SEC", 150))
 # ...and the ceiling on a WHOLE story, past which it is not published at all.
 #
 # It exists because a post and its updates are one story now (see the split
@@ -660,7 +676,7 @@ def _ytdlp(*args: str) -> str:
     return r.stdout
 
 
-def harvest(limit: int = 60) -> int:
+def harvest(limit: int = 100) -> int:
     """Metadata for each channel's latest videos. Downloads no media."""
     added = 0
     with _db() as db:
@@ -2108,7 +2124,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO,
                         format="%(levelname)s %(name)s: %(message)s")
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--harvest", nargs="?", type=int, const=60, default=None,
+    ap.add_argument("--harvest", nargs="?", type=int, const=100, default=None,
                     help="list each channel's latest N videos")
     ap.add_argument("--digest", nargs="?", type=int, const=1, default=None,
                     help="transcribe N videos and split them into stories")
@@ -2402,7 +2418,12 @@ if __name__ == "__main__":
         # channel PREFERS, PART_CEILING is the one the platform enforces, so a
         # recording between them is one long video rather than nothing.
         _mid = {"start": 0.0, "end": (PART_MAX + PART_CEILING) / 2 * VOICE_SPEEDUP}
-        assert want_parts(_mid) == 2, "over PART_MAX it wants splitting"
+        # `> 1` and not `== 2`: the count depends on how far PART_MAX sits below
+        # PART_CEILING, and the midpoint is three parts at 150 where it was two
+        # at 270. What is being tested is the BRANCH - this length wants
+        # splitting, and the line below says it still fits one video - so
+        # pinning the exact number only broke the test when the constant moved.
+        assert want_parts(_mid) > 1, "over PART_MAX it wants splitting"
         assert want_parts(_mid, PART_CEILING) == 1, "and it still fits one video"
         _long = {"start": 0.0, "end": (PART_CEILING + 60) * VOICE_SPEEDUP}
         assert want_parts(_long, PART_CEILING) == 2, "past the ceiling it does not"
