@@ -21,8 +21,12 @@ rem harmless: the queue holds several days of stories and the catalogue is
 rem re-read from scratch every time rather than appended to.
 cd /d "%~dp0"
 
-rem Latest 60 per channel, titles judged by the model - cheap, no media.
-python upvote.py --harvest 60 || exit /b 1
+rem Latest 100 per channel, titles judged by the model - cheap, no media. Was
+rem 60; the queue is ranked on views and not on recency, so a deeper window is
+rem simply more candidates to rank, and listing costs one metadata call either
+rem way. Only un-judged titles reach the model, so the widening costs one extra
+rem PICK_BATCH on the first run and nothing after it.
+python upvote.py --harvest 100 || exit /b 1
 
 rem The expensive half: download, transcribe, split into stories, and put the
 rem recordings in the release. Three videos is UPVOTE_DIGEST_PER_RUN's default
