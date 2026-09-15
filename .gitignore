@@ -10,6 +10,12 @@ __pycache__/
 # ...and the same clone under its own name, in case it was cloned by hand
 # without renaming. Never tracked here, not even as a gitlink.
 reddit-prompts/
+# The project brief Claude reads every session. It describes the whole
+# pipeline, so it lives in the private repo as .private/CLAUDE.md and the file
+# here is one line importing it. Ignored rather than committed as that stub:
+# the import would resolve to nothing on a clone without the deploy key, and a
+# brief that is silently empty is worse than one that is absent.
+CLAUDE.md
 # seen.db is tracked on purpose: it is the only state a GitHub Actions run
 # must carry over, and it holds no secrets - just post ids and upload ids.
 out/
