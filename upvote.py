@@ -389,6 +389,79 @@ and by its own first words:
 An empty list is a valid answer - it means every video here is a reading.
 """
 
+# The one rule from the writing prompt's SKIP list that a harvested story is
+# still judged against, and the reason it has to be judged here at all:
+# park_heard() never calls a model, so a story that arrives with its own
+# recording is never read by the thing that applies that list. safety.blocked()
+# covers the half of this a word can catch; this covers the half it cannot -
+# "попросил девушку одеваться попрактичнее" took 1 view and carries no word
+# any blocklist could see.
+#
+# The rule itself is not restated here. It is lifted out of prompts.WRITE, so
+# the wording under test is the wording that ships - two copies of a rule is
+# one copy that goes stale, and this one was already tuned once (2026-09-15)
+# for reading a forced-virginity-check story as body image.
+#
+# Lifted lazily and not at import: script._prompts() exits the process when
+# .private is not cloned, and upvote.py is imported by callers that never go
+# near a prompt.
+_SCREEN_HEAD = "- its conflict IS somebody's body"
+
+SCREEN_SYSTEM = """\
+You apply ONE rule from a story-selection checklist and nothing else.
+
+The rule:
+%s
+
+You are given a story. Answer with exactly one line:
+  DROP: <six words on what in the story trips the rule>
+or
+  KEEP
+
+Apply ONLY this rule. A story that is unpleasant, sexual, coercive, violent or
+badly written for any OTHER reason is KEEP - those are other rules' business,
+and this channel wants the strong stories they cover. The rule is about a
+story whose conflict IS somebody's body or how they look.
+"""
+
+
+def _screen_system() -> str:
+    """SCREEN_SYSTEM with the live rule in it, or "" when the rule is gone.
+
+    An empty answer turns the gate off rather than screening against a blank
+    rule, which would be a model asked to apply nothing and would answer
+    anything. If the bullet is ever renamed in the prompt, this goes quiet and
+    says so once - see screen().
+    """
+    rule = next((l for l in script._prompts()[0][OUTPUT_LANG].splitlines()
+                 if l.lstrip().startswith(_SCREEN_HEAD)), "")
+    return SCREEN_SYSTEM % rule if rule else ""
+
+
+def screen(title: str, body: str) -> str:
+    """Why this harvested story should not be published, or "" to keep it.
+
+    One call, temperature 0, and the same _ask() every other judgement here
+    uses. Costs one small request per story banked; measured on the 117 in the
+    queue on 2026-09-15 it dropped six, of which four were plainly right.
+    """
+    if not (system := _screen_system()):
+        log.warning("the body-image rule is gone from the writing prompt - "
+                    "harvested stories are not being screened for it")
+        return ""
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is empty - fill in .env")
+    from openai import OpenAI
+    client = OpenAI(api_key=OPENAI_API_KEY, base_url=LLM_BASE_URL or None)
+    got = script._ask(
+        client, system, f"Title: {title}\n\nStory:\n{(body or '')[:2500]}",
+        lambda raw: ((raw or "").strip(), []),
+        keep="Answer with one line: DROP: <reason> or KEEP.",
+        temperature=0)
+    line = (got or "").strip().splitlines()[0] if (got or "").strip() else ""
+    return line[len("DROP:"):].strip() if line.upper().startswith("DROP:") else ""
+
+
 PROOF_SYSTEM = """\
 You are given numbered lines of a Russian transcript that a speech recogniser
 produced from a recording of somebody reading a story aloud. The RECORDING is
@@ -1279,6 +1352,20 @@ def digest(count: int = 1) -> int:
                     log.info("%s #%d dropped (%s): %s", vid, n, hit,
                              (s["title"] or "")[:60])
                     continue
+                # ...and the half of the same category no word can catch. A
+                # model call per story, here rather than in park_heard(),
+                # because a story refused here never reaches the review queue
+                # and never costs anybody an issue to answer. A failure keeps
+                # the story: this gate exists to save reach, and losing a
+                # story to a timeout is the more expensive mistake.
+                try:
+                    if why := screen(s["title"] or "", s["body"] or ""):
+                        log.info("%s #%d dropped (body image: %s): %s",
+                                 vid, n, why[:60], (s["title"] or "")[:60])
+                        continue
+                except Exception:
+                    log.exception("%s #%d: the body-image screen failed, "
+                                  "keeping the story", vid, n)
                 # The topic filter, and it is the sub list rather than a second
                 # opinion: whatever this channel already publishes is what its
                 # audience turned up for. An empty SUBREDDITS means no filter.
