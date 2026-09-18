@@ -2002,7 +2002,7 @@ if __name__ == "__main__":
             # A tau post has no status to fetch, and asking is an error rather
             # than an empty answer - see status().
             print(pid, "(posted; the API has no status for a tau id)"
-                  if pid.startswith("tau:") else status(pid))
+                  if pid.startswith(("tau:", "ui:")) else status(pid))
         else:
             print("usage: python publish.py --auth | --whoami | --stats | "
                   "--status | "
