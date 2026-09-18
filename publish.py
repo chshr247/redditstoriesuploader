@@ -1386,9 +1386,16 @@ def upload_next(direct: bool = False, private: bool = True,
     # so an older ordinary video sitting in out/ must not spend it instead and
     # leave the story's middle waiting another day.
     if nxt := source.next_part():
-        mp4 = next((p for p in queue
-                    if _meta_for(p).get("post_id") == nxt["post_id"]
-                    and _meta_for(p).get("part") == nxt["n"]), mp4)
+        # Lowest pending part of that story, not strictly nxt["n"]: on a
+        # handoff channel CI clears a part the moment it ships the artifact, so
+        # next_part() runs AHEAD of what this desk has actually posted. On
+        # 2026-09-18 that sent part 5 of yt_pKK07u3URzA_0 while part 4 still sat
+        # in out/, and the story went out 1,2,3,5. A part still here with a
+        # lower number owns the slot.
+        mp4 = min((p for p in queue
+                   if _meta_for(p).get("post_id") == nxt["post_id"]
+                   and (_meta_for(p).get("part") or 0) <= nxt["n"]),
+                  key=lambda p: _meta_for(p).get("part") or 0, default=mp4)
 
     meta = _meta_for(mp4)
     if reason := _blocked(meta, force):
