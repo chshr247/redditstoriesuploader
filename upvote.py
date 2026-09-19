@@ -67,7 +67,7 @@ from pathlib import Path
 
 import safety
 import script
-from config import (DB_PATH, LLM_BASE_URL, MIN_SEC, OPENAI_API_KEY,
+from config import (DB_PATH, LLM_BASE_URL, MAX_SEC, MIN_SEC, OPENAI_API_KEY,
                     OUT_DIR, OUTPUT_LANG, PART_SEC, SUBREDDITS,
                     SUBREDDITS_HORROR, VOICE_SPEEDUP, chan_file)
 
@@ -162,7 +162,14 @@ MAX_SEGMENTS = int(os.getenv("UPVOTE_MAX_SEGMENTS", 2200))
 # from, so more of them end mid-scene. 120 was measured too: it buys a 102s
 # median and no part over 180s at all, but at ten stories dropped and 39 cut
 # on sentences. 150 was the better trade, not the shortest number available.
-PART_MAX = int(os.getenv("UPVOTE_PART_SEC", 150))
+#
+# 150 -> 105 on 2026-09-19, and this time not against views: config.MAX_SEC
+# caps a video at 1:59 and this is what the split AIMS at, so it has to sit
+# far enough under that an uneven set of turns still lands inside. The 120
+# row above is the nearest measurement - a 102s median and nothing over 180s
+# - and what changes now is that the far tail is no longer shipped: a part
+# past MAX_SEC is sped up to fit by voice.fit() instead.
+PART_MAX = int(os.getenv("UPVOTE_PART_SEC", 105))
 # ...and the ceiling on a WHOLE story, past which it is not published at all.
 #
 # It exists because a post and its updates are one story now (see the split
@@ -178,11 +185,16 @@ PART_MAX = int(os.getenv("UPVOTE_PART_SEC", 150))
 # several stories, which is the thing the prompt just stopped it doing.
 STORY_MAX = int(os.getenv("UPVOTE_STORY_SEC", 1800))
 PARTS = int(os.getenv("UPVOTE_MAX_PARTS", 5))
-# TikTok's own limit on one video, and the last word whatever the two above
-# say. Parts are cut on the model's turns rather than on a stopwatch, so an
-# uneven set of turns can hand one part more than its share - and a part past
-# this is a part the platform refuses.
-PART_CEILING = 600
+# The last word whatever the two above say, and it is config.MAX_SEC itself:
+# a part longer than a video may be is a part that does not ship.
+#
+# It used to be TikTok's own 600s, the length the PLATFORM refuses. It was
+# briefly MAX_SEC x 1.25 - the point past which voice.fit()'s speed-up stops
+# being listenable - which made the ceiling 148 seconds in a pipeline that
+# promises 119. A limit with a second, higher limit behind it is not a limit.
+# So this is the number, _bounds() cuts under it rather than near it, and
+# voice.fit() is left holding nothing but rounding.
+PART_CEILING = MAX_SEC
 
 # The channel's subs, as a CHOICE offered to the model rather than a string
 # match made after it. Free-form, the same story came back r/PettyRevenge on
@@ -1641,7 +1653,8 @@ def want_parts(story: dict, cap: int = 0) -> int:
     return max(1, math.ceil(played / (cap or PART_MAX)))
 
 
-def _bounds(segs: list[dict], cuts: list[int], n: int) -> "list[tuple] | None":
+def _bounds(segs: list[dict], cuts: list[int], n: int,
+            cap: int = 0) -> "list[tuple] | None":
     """`n` segment ranges split on the model's cuts, or None if they will not.
 
     The cuts are where the story turns; which of them to use is arithmetic -
@@ -1660,9 +1673,22 @@ def _bounds(segs: list[dict], cuts: list[int], n: int) -> "list[tuple] | None":
     exactly the "two of four minutes and one of forty seconds" this paragraph
     promises not to do; its first part ran 10.3 minutes, past the ten a video
     may be, and main.park_heard burned the whole story over it (2026-09-06).
+
+    `cap` is the other end and the newer one: None as well when a part comes out
+    LONGER than a video may be. Left at 0 this function behaves exactly as it
+    did, which is what want_parts()'s own callers still want; split_parts()
+    passes PART_CEILING and asks for one part MORE when it bites, because the
+    answer to a part over the ceiling is another cut and not a faster voice.
+
+    The cap is measured in seconds HEARD - divided by VOICE_SPEEDUP - because
+    that is what config.MAX_SEC counts and what main._render() measures. The
+    MIN_SEC test on the same line is done the same way for the same reason; it
+    used to compare raw tape seconds, which agreed on `ru` (speedup 1.0) and
+    quietly let short parts through on any channel sped up.
     """
     if n <= 1:
-        return [(0, len(segs) - 1)]
+        out = [(0, len(segs) - 1)]
+        return None if _over(segs, out, cap) else out
     span = segs[-1]["end"] - segs[0]["start"]
     picked: list[int] = []
     for k in range(1, n):
@@ -1673,10 +1699,13 @@ def _bounds(segs: list[dict], cuts: list[int], n: int) -> "list[tuple] | None":
         picked.append(min(free, key=lambda c: abs(segs[c]["start"] - want)))
     edges = [0, *sorted(picked), len(segs)]
     out = [(a, b - 1) for a, b in zip(edges, edges[1:])]
-    if any(a > b or segs[b]["end"] - segs[a]["start"] < MIN_SEC
-           for a, b in out):
-        return None
-    return out
+    return None if _over(segs, out, cap) else out
+
+
+def _over(segs: list[dict], out: "list[tuple]", cap: int) -> bool:
+    """True when any of these ranges is empty, under MIN_SEC or over `cap`."""
+    return any(a > b or not MIN_SEC <= (segs[b]["end"] - segs[a]["start"])
+               / VOICE_SPEEDUP <= (cap or math.inf) for a, b in out)
 
 
 # What the end of a sentence looks like at the end of a whisper segment. The
@@ -1703,14 +1732,33 @@ def _sentence_cuts(segs: list[dict]) -> list[int]:
             if _SENTENCE_END.search(segs[i - 1]["text"] or "")]
 
 
-def split_parts(story_id: str, n: int = 1) -> list:
-    """The story as up to `n` videos: [(title, body), ...], verbatim.
+def split_parts(story_id: str, n: int = 1, most: int = 0) -> list:
+    """The story as videos: [(title, body), ...], verbatim. `n` is the guess.
 
     The audio range of each part is written onto the row here, and that is the
     load-bearing half - narration() reads it back at the render, in another
     run, with nothing to go on but the part's id. One title for every part,
     which is what the rest of the pipeline already assumes: it is the cover
     drawn at the head of each one, not a line of the narration.
+
+    `n` comes from want_parts() and is arithmetic on PART_MAX - the count this
+    recording WOULD need if its turns were evenly spaced. They are not, so the
+    count is tried UPWARDS first, to `most`: a part that lands over
+    PART_CEILING is answered with one more cut, because the recording is as
+    long as it is and the only other answers are a pitched-up tape or a burned
+    story. Downwards after that, which is the older fallback and the opposite
+    trade - a story whose turns are bunched at the front is two videos rather
+    than three, and that beats a third video eight seconds long.
+
+    `most` is the caller's day: main._park_one already refuses a story wanting
+    more parts than one day can publish, and a split story landing across two
+    days is a different video to everyone who saw the one before it. Left at 0
+    nothing is tried above `n`.
+
+    Returns whatever the LAST resort produced when nothing fits under the
+    ceiling at any count. That is deliberate: too_long() measures what was
+    actually recorded and main.park_heard() decides to burn the story. This
+    function cuts; it does not get to drop.
     """
     got = _row(story_id)
     if not got:
@@ -1720,17 +1768,29 @@ def split_parts(story_id: str, n: int = 1) -> list:
     if not segs:
         raise ValueError(f"{story_id} has no segments to cut on")
 
-    for want in range(max(1, n), 0, -1):
-        if bounds := _bounds(segs, cuts, want):
+    n = max(1, n)
+    for want in [*range(n, max(n, most) + 1), *range(n - 1, 0, -1)]:
+        if bounds := _bounds(segs, cuts, want, PART_CEILING):
             break
         # No turn of the model's leaves parts of a usable length at this
         # count. Fall back to sentence ends before giving up a part: a cut
         # mid-scene costs less than the video that is never made.
-        if bounds := _bounds(segs, _sentence_cuts(segs), want):
+        if bounds := _bounds(segs, _sentence_cuts(segs), want, PART_CEILING):
             log.info("%s: no usable turn for %d parts - cutting on the "
                      "sentence nearest each division instead", story_id, want)
             break
-    if want < n:
+    else:
+        # Nothing fits under the ceiling at any count this day can publish.
+        # Cut it at the count that was asked for anyway and hand it on: the
+        # row has to carry SOME ranges for too_long() to measure and for the
+        # log to name, and burning the recording is park_heard's call.
+        want = n
+        bounds = (_bounds(segs, cuts, want) or _bounds(segs, _sentence_cuts(segs), want)
+                  or [(0, len(segs) - 1)])
+        log.warning("%s: no cut into %d-%d parts keeps every one under %ds - "
+                    "recording it at %d for the caller to judge",
+                    story_id, n, max(n, most), PART_CEILING, want)
+    if want != n:
         log.info("%s: asked for %d parts, the story breaks into %d",
                  story_id, n, want)
 
@@ -1756,8 +1816,8 @@ def too_long(story_id: str) -> str:
         return ""
     for i, p in enumerate(json.loads(got[2][3]), 1):
         if (sec := (p["end"] - p["start"]) / VOICE_SPEEDUP) > PART_CEILING:
-            return (f"part {i} runs {sec / 60:.1f} min, past the "
-                    f"{PART_CEILING / 60:.0f} a video may be")
+            return (f"part {i} runs {sec:.0f}s, more than the {PART_CEILING}s "
+                    f"that still speeds up cleanly into a {MAX_SEC}s video")
     return ""
 
 
@@ -2367,6 +2427,15 @@ if __name__ == "__main__":
                                {"text": "x"}]) == [1]
         assert _sentence_cuts([{"text": "и тогда"}, {"text": "x"}]) == []
 
+        # The OTHER end, and the reason PART_CEILING stopped being a number
+        # above config.MAX_SEC: a cut that lands a part over the ceiling is not
+        # a cut this pipeline may make. `segs` is 200 seconds, so two parts are
+        # 100 each and fit, and one part of everything does not.
+        assert _bounds(segs, [10], 2, PART_CEILING) == [(0, 9), (10, 19)]
+        assert _bounds(segs, [10], 1, PART_CEILING) is None, \
+            "200s in one video is over the ceiling, whatever was asked for"
+        assert _bounds(segs, [10], 1) == [(0, 19)], "and uncapped it is allowed"
+
         # The half that has to survive a process boundary: which stretch of
         # which recording a part is, found again from the part's key alone.
         import tempfile
@@ -2393,6 +2462,14 @@ if __name__ == "__main__":
         assert narration("yt_v1_0_p1"), "an unchanged narration keeps its clip"
         confirm("yt_v1_0", [("T", "something somebody else said")])
         assert narration("yt_v1_0_p1") is None, "a rewrite drops the clip"
+
+        # Asked for two, the 200-second story needs no more - but asked for ONE
+        # it does: 200s is over the ceiling and `most` is the licence to cut it
+        # again rather than ship it pitched up or burn it. Without that licence
+        # the same call comes back as the one part it was asked for, and
+        # too_long() is what refuses it afterwards.
+        assert len(split_parts("yt_v1_0", 1, 3)) == 2, "the search goes up"
+        assert len(split_parts("yt_v1_0", 1)) == 1, "and only when let"
 
         # one part, one range, and the story told whole
         assert split_parts("yt_v1_0", 1) == [("T", " ".join(

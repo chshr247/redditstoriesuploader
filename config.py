@@ -358,7 +358,14 @@ PART_WORD = {"ru": "Часть", "en": "Part"}
 # itself would land under it half the time on script.TOLERANCE alone. Only
 # sources under about 1850 characters sit on it, and they are the one place any
 # padding is left.
-_TARGET_SEC = {"ru": 130, "en": 75}
+# Lowered 130 -> 75 on 2026-09-19 with MAX_SEC. It is a FLOOR, and a floor two
+# minutes and ten seconds up cannot sit under a 1:59 ceiling at all - but the
+# fix is not to park it just under the ceiling either. Everything between this
+# and PART_SEC is the band a story is sized inside; at 100 the band was five
+# seconds wide and every split part came out on the floor, which is the padding
+# this stopped being a target to avoid. Back level with en, which is where ru
+# sat before the 130 experiment bought runtime this channel may no longer spend.
+_TARGET_SEC = {"ru": 75, "en": 75}
 TARGET_SEC = int(chan_env("TARGET_SEC", str(_TARGET_SEC.get(CHANNEL, 75))))
 # The ceiling for the horror slot, and only a ceiling: script.target_sec()
 # scales the target by the length of the source and stops here. A scary story
@@ -368,7 +375,13 @@ TARGET_SEC = int(chan_env("TARGET_SEC", str(_TARGET_SEC.get(CHANNEL, 75))))
 # find out what was on the stairs. Note that past 180 seconds YouTube no
 # longer treats the upload as a Short: youtube.py drops the #Shorts tag for
 # these, which is the correct label and also a smaller audience.
-HORROR_SEC = int(os.getenv("HORROR_SEC", 330))
+#
+# 330 -> 110 on 2026-09-19. The horror slot keeps no exemption from MAX_SEC:
+# a ceiling that one subreddit is allowed past is not a ceiling. It is still
+# a separate knob and still five seconds above PART_SEC, because the slot is
+# still allowed to aim LONGER than the feed - it just cannot aim past the hard
+# limit any more, so what it buys is five seconds and not four minutes.
+HORROR_SEC = int(os.getenv("HORROR_SEC", 110))
 # r/BestofRedditorUpdates, named once here because source.py needs it in two
 # places - it cleans the sub's boilerplate, caps its length by it, and ranks it
 # ahead of everything else. A sub matched by name in several spots is a sub that
@@ -392,10 +405,27 @@ BORU = "bestofredditorupdates"
 # Shorts feed; past 180 seconds YouTube stops treating a vertical upload as a
 # Short, and the shelf was returning views in the tens, so the ceiling that
 # mattered stopped mattering - see YT_ENABLED.
-PART_SEC = int(os.getenv("PART_SEC", 300))
+#
+# 300 -> 105 on 2026-09-19, and that is the AIM, not the limit - see MAX_SEC.
+# The 14 seconds of headroom under it are there because a word budget only
+# approximates a runtime (the voice paced 167-214 wpm across runs), so a
+# script aimed exactly at the limit lands over it about half the time.
+PART_SEC = int(os.getenv("PART_SEC", 105))
 # hard floor: under this a video loses monetization eligibility, so main.py
 # re-synthesizes at a slower rate rather than shipping a 58-second clip
 MIN_SEC = int(os.getenv("MIN_SEC", 62))
+# ...and the hard CEILING, the mirror of it: no video ships longer than this,
+# whatever the knobs above aimed at and whatever the tape actually runs.
+#
+# Everything else here is a target that a script or a set of whisper cuts
+# lands NEAR. This one is enforced on the finished mp3 in main._render(),
+# which is the only place the real length is known: voice.fit() speeds the
+# track up until it fits rather than re-voicing it, so a harvested reading
+# survives the trim - the tape's words are the invariant, its pace is not.
+#
+# 119 and not 120 because "under two minutes" is the point of it: a clip
+# that ffprobes 120.04 is two minutes to every platform that rounds.
+MAX_SEC = int(os.getenv("MAX_SEC", 119))
 
 # --- TikTok (https://developers.tiktok.com/apps) ---
 # One app can hold tokens for several accounts, so the client pair is shared by
@@ -669,6 +699,11 @@ if __name__ == "__main__":
     # than an ordinary video, and TikTok refuses an upload past ten minutes.
     assert TARGET_SEC < PART_SEC <= 600, \
         f"PART_SEC={PART_SEC} must sit between TARGET_SEC and 600"
+    # The hard ceiling has to be over everything that aims at it, or the aim
+    # itself would be a breach and voice.fit() would speed up every video.
+    assert MIN_SEC < MAX_SEC <= 600, f"MAX_SEC={MAX_SEC} out of sane range"
+    assert max(TARGET_SEC, PART_SEC, HORROR_SEC) <= MAX_SEC, \
+        f"MAX_SEC={MAX_SEC} is below a length something else aims at"
     # Loudness is a ranking term, so it has to sit above the floor to mean
     # anything: at or below it every candidate scores the full point and the
     # term stops separating anything at all.
@@ -736,7 +771,8 @@ if __name__ == "__main__":
                 (f"{chan_key('TIKTOK_PROXY')} has a user without a password or "
                  "the other way round - the login challenge cannot be answered")
     print(f"OK: channel {CHANNEL}, {len(SUBREDDITS)} subs, "
-          f"{TARGET_SEC}s (floor {MIN_SEC}s), score from {MIN_SCORE}, "
+          f"{TARGET_SEC}-{PART_SEC}s ({MIN_SEC}s floor, {MAX_SEC}s hard cap), "
+          f"score from {MIN_SCORE}, "
           f"loud at {LOUD_AT}")
     _hv = FISH_VOICE_HORROR[:8] if FISH_VOICE_HORROR else "from the male pool"
     print(f"    horror: {len(SUBREDDITS_HORROR)} subs, voice {_hv}"

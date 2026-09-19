@@ -36,7 +36,7 @@ import script
 import source
 import upvote
 import voice
-from config import (CHANNEL, LOUD_AT, MIN_SEC, OUT_DIR, PART_SEC,
+from config import (CHANNEL, LOUD_AT, MAX_SEC, MIN_SEC, OUT_DIR, PART_SEC,
                     REVIEW_BATCH, REVIEW_TAKES, STOP_REASON, STOPPED,
                     TIKTOK_ENABLED, TIKTOK_PER_DAY, chan_file, chan_key)
 
@@ -91,6 +91,17 @@ def _render(title: str, body: str, gender: str, key: str, sub: str,
         if total < MIN_SEC:
             log.warning("still %.1fs after slowing down - story was too short", total)
 
+    # The other end, and the only place the real length is known: everything
+    # upstream sizes a video by a word budget or by a set of whisper cuts, and
+    # both only approximate what the track comes out at. voice.fit() resamples
+    # rather than re-voicing, so a harvested reading keeps its own words and a
+    # picked take keeps being the take - unlike the floor above, which loses
+    # both. Every render goes through here, so MAX_SEC is a fact and not a
+    # target: render.py ends every mix on the narration (duration=first), so
+    # the mp3's length IS the video's.
+    mp3, words = voice.fit(mp3, words, MAX_SEC)
+    total = voice.duration(mp3)
+
     # keyed on the story, not the file: that is what keeps the two channels'
     # versions of one story off the same background clip.
     # The part number goes in for the card's "Часть N" line, and is read out of
@@ -132,7 +143,7 @@ def write_and_park(post: dict, n: int = 1) -> None:
     source.mark_used(post["id"], post["score"], post["sub"])
 
 
-def park_heard(s: dict, n: int) -> bool:
+def park_heard(s: dict, n: int, most: int = 0) -> bool:
     """Park a harvested story: the text is the tape's, and nothing rewrites it.
 
     Nothing WRITES here, which is the point twice over - it is a story somebody
@@ -150,7 +161,11 @@ def park_heard(s: dict, n: int) -> bool:
     text is ever rewritten - and an unknown gender keeps the captions white,
     which is the honest answer for a voice this pipeline did not cast.
     """
-    written = upvote.split_parts(s["id"], n)
+    # `most` is how many videos this day can publish, and it is a licence to go
+    # UP: `n` is arithmetic on evenly spaced turns and real turns are not, so a
+    # recording that comes out one part over config.MAX_SEC is cut once more
+    # rather than sped up or burned. See upvote.split_parts.
+    written = upvote.split_parts(s["id"], n, most)
     if len(written) < n:
         # The recording is as long as it is - a part fewer is not a shorter
         # video here, it is one video of everything, and PART_SEC is the
@@ -360,13 +375,17 @@ def _park_one(part: dict | None, may_split: bool) -> tuple[bool, int, int]:
         if heard_parts > 1 and not may_split:
             # A day with no room to SPLIT is not a day with no room for the
             # story. PART_MAX is this channel's preferred length; PART_CEILING
-            # is what the platform actually refuses, and a recording between
-            # the two is a long video rather than an impossible one. Shipping
-            # it whole is strictly better than the alternative, which for
-            # wEgnl93S-bw story 4 - 9.1 min, inside TikTok's 10 - was never
-            # publishing it at all. The only thing that closes may_split now is
-            # a channel that cannot publish a part, so this branch is rare -
-            # and it is still the right answer when it is reached.
+            # is the hard one, and a recording between the two is a long video
+            # rather than an impossible one. Shipping it whole is strictly
+            # better than the alternative, which for wEgnl93S-bw story 4 was
+            # never publishing it at all. The only thing that closes may_split
+            # now is a channel that cannot publish a part, so this branch is
+            # rare - and it is still the right answer when it is reached.
+            #
+            # The gap the two leave is 14 seconds since config.MAX_SEC, where
+            # it used to be seven minutes. So this rescues far less than it
+            # reads like it does; what it still does is keep a 110-second
+            # recording from being dropped by a day that cannot split.
             if upvote.want_parts(heard, upvote.PART_CEILING) == 1:
                 log.info("heard: %s is %d parts and today has no room for them"
                          " - shipping the whole %.1f min recording as one video",
@@ -386,7 +405,7 @@ def _park_one(part: dict | None, may_split: bool) -> tuple[bool, int, int]:
                 deferred.add(heard["id"])
                 continue
         try:
-            if park_heard(heard, heard_parts):
+            if park_heard(heard, heard_parts, most if may_split else 1):
                 return True, 0, 0
             # park_heard marks an uncuttable recording used; try the next one.
             continue
@@ -666,7 +685,10 @@ if __name__ == "__main__":
         voice.pick_voice = lambda g="male", s="": "picked"
         voice.speak_parts = lambda *a, **k: (
             heard.append(k["fish_voice"]) or (Path("m.mp3"), [], 0.0, []))
-        voice.duration = lambda p: next(dur)
+        # The listed values are the ones the FLOOR branch turns on; past them
+        # the default is any length comfortably inside MAX_SEC, so the ceiling
+        # check below is a pass-through and no test here has to count reads.
+        voice.duration = lambda p: next(dur, 70.0)
         render.render = lambda *a, **k: OUT_DIR / "_selftest_voice.mp4"
         _render("t", "b", "male", "_selftest_voice", "s")
         assert heard == ["picked", "picked"], heard

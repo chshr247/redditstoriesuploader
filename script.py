@@ -54,7 +54,8 @@ def _prompts():
 import safety
 from config import (PART_SEC, CRITIC_MIN, LLM_BASE_URL, LLM_MAX_TOKENS,
                     LLM_MODEL, LLM_REASONING, OPENAI_API_KEY, OUTPUT_LANG,
-                    HORROR_SEC, SUBREDDITS_HORROR, TARGET_SEC, VOICE_SPEEDUP,
+                    HORROR_SEC, MAX_SEC, SUBREDDITS_HORROR, TARGET_SEC,
+                    VOICE_SPEEDUP,
                     chan_file)
 
 
@@ -1598,9 +1599,15 @@ if __name__ == "__main__":
     _real_horror = SUBREDDITS_HORROR
     globals()["SUBREDDITS_HORROR"] = ["_selftest_horror"]
     _thin = {"sub": "_selftest_horror", "text": "x" * 600}
-    _mid = {"sub": "_selftest_horror", "text": "x" * 4000}
+    # Sized OFF the constants and not written as a literal: what these two rows
+    # test is the band between the floor and the ceiling, and since config.MAX_SEC
+    # pulled both ends together that band is seconds wide. A hard-coded 4000
+    # characters stopped being inside it and failed a test about something else.
+    _mid = {"sub": "_selftest_horror",
+            "text": "x" * source_chars((TARGET_SEC + HORROR_SEC) / 2)}
     _fat = {"sub": "_selftest_horror", "text": "x" * 20000}
-    _feed = {"sub": "AmItheAsshole", "text": "x" * 4000}
+    _feed = {"sub": "AmItheAsshole",
+             "text": "x" * source_chars((TARGET_SEC + PART_SEC) / 2)}
     assert target_sec(_thin) == TARGET_SEC, "a thin source is not padded out"
     assert target_sec(_fat) == HORROR_SEC, "and a long one stops at the ceiling"
     assert TARGET_SEC < target_sec(_mid) < HORROR_SEC, target_sec(_mid)
@@ -1623,15 +1630,23 @@ if __name__ == "__main__":
     assert target_sec(_cap_post) == PART_SEC, target_sec(_cap_post)
     assert part_count(_b(600)) == 1 and target_sec(_b(600)) == TARGET_SEC, \
         "a short one is an ordinary single video, not a padded five minutes"
-    _seven = _b(source_chars(7 * 60))
-    assert part_count(_seven) == 2, part_count(_seven)
-    assert abs(target_sec(_seven) - 210) <= 1, target_sec(_seven)
+    # Sized off PART_SEC rather than written as a literal seven minutes. The
+    # band between the floor and the ceiling is narrow since config.MAX_SEC,
+    # and seven minutes now divides into parts that all land on the floor -
+    # which would pass this assert while testing nothing about the division.
+    _worth = (MAX_PARTS - 0.4) * PART_SEC      # spills into the last part
+    _long = _b(source_chars(round(_worth)))
+    assert part_count(_long) == MAX_PARTS, part_count(_long)
+    assert abs(target_sec(_long) - _worth / MAX_PARTS) <= 1, target_sec(_long)
+    assert TARGET_SEC < target_sec(_long) < PART_SEC, \
+        "the parts share the runtime - neither floored nor at the ceiling"
     # ...and when the day has no room to split it, the ONE video it is told in
     # gets the whole runtime rather than a part's share of it. Sized off the
     # guess instead, the model would be asked for half a story's words and told
-    # to fit the whole story into them.
-    assert target_sec(_seven, 1) == PART_SEC, target_sec(_seven, 1)
-    assert abs(target_sec(_seven, 3) - 140) <= 1, target_sec(_seven, 3)
+    # to fit the whole story into them. The ceiling is what caps it now, which
+    # is the same clamp an explicit part count would hit - so the old `parts=3`
+    # line was dropped rather than rewritten to assert PART_SEC twice.
+    assert target_sec(_long, 1) == PART_SEC, target_sec(_long, 1)
     # Divided evenly, a part is never short enough to need a floor of its own,
     # which is why there is no rule here keeping the last one long: ceil() puts
     # the worst case just over half of PART_SEC, at the story that has only
@@ -1645,11 +1660,14 @@ if __name__ == "__main__":
     # whole story - this is the check config.LLM_MAX_TOKENS was raised for.
     assert _target_words(PART_SEC) * MAX_PARTS * 2 < LLM_MAX_TOKENS, \
         f"{LLM_MAX_TOKENS} tokens cannot hold {MAX_PARTS} parts of {PART_SEC}s"
-    # The horror slot has to be worth its own prompt, its own voice and four
-    # times the render: a ceiling that is not far above the feed's target is a
-    # slot that buys nothing. Was 3x while the feed sat at 87 seconds; the feed
-    # moved to 130 and this tracks the relation, not the old multiple.
-    assert _target_words(HORROR_SEC) > 2 * _target_words()
+    # The horror slot used to have to be worth twice the feed - its own prompt,
+    # its own voice and four times the render for a ceiling three times as high.
+    # config.MAX_SEC ended that: no slot may aim past 1:59, so the most the
+    # horror ceiling can buy over the feed is the few seconds between PART_SEC
+    # and the limit. What still has to hold is that it buys SOMETHING and stays
+    # inside the limit - a HORROR_SEC at or below PART_SEC is a slot that is
+    # only a different prompt, and one above MAX_SEC is a slot that lies.
+    assert PART_SEC < HORROR_SEC <= MAX_SEC, HORROR_SEC
     globals()["SUBREDDITS_HORROR"] = _real_horror
 
     tw = _target_words()
@@ -1961,13 +1979,17 @@ if __name__ == "__main__":
 
     # how many videos a post is worth, by source length alone
     assert part_count({"text": "x" * 500}) == 1
-    # A post is split when it does not FIT, so the seam is a duration and the
-    # whole ordinary feed sits on one side of it: source.MAX_CHARS is 4000,
-    # which is under five minutes told in full, so those subs are one video now.
+    # A post is split when it does not FIT, so the seam is a duration.
     assert part_count({"text": "x" * source_chars(PART_SEC)}) == 1
     assert part_count({"text": "x" * (source_chars(PART_SEC) + 10)}) == 2
-    assert part_count({"text": "x" * 4000}) == 1, \
-        "MAX_CHARS is worth one video, not three"
+    # source.MAX_CHARS is 4000, and it used to sit on the one-video side of that
+    # seam because PART_SEC was five minutes. Under config.MAX_SEC it does not
+    # any more: a full-length post from the ordinary feed is several videos
+    # again, the way it was before 2026-09-02. This is the line that says so, so
+    # that the day nobody expects a split story from r/AmItheAsshole, it is the
+    # test that fails rather than the queue.
+    assert part_count({"text": "x" * 4000}) > 1, \
+        "MAX_CHARS no longer fits in one video - see config.MAX_SEC"
     # source.BORU_CHARS is this same arithmetic run backwards, and the two are
     # a cap and its split: read apart they drift, and a sub whose cap is above
     # what its parts hold squeezes the difference out of every story.

@@ -351,6 +351,52 @@ def _scaled(words: list[dict], offset: float = 0.0,
              "end": round((w["end"] + offset) / k + lead, 3)} for w in words]
 
 
+def fit(mp3: Path, words: list[dict], max_sec: int) -> tuple:
+    """Speed the finished track up until it fits `max_sec`. Returns (mp3, words).
+
+    The mirror of main's MIN_SEC floor and deliberately NOT its method. The
+    floor is missed by the audio being too SHORT, and the only way to lengthen
+    it is to have the engine read it again; the ceiling is missed by the audio
+    being too long, and re-voicing to shorten it would throw away a harvested
+    reading to fix a length. So the track that exists is resampled instead -
+    the tape's WORDS are the invariant, its pace is not.
+
+    One uniform scale over the whole file, the whoosh's lead silence included,
+    which is why the timings can be divided by the same k with no offset: every
+    second of the track moved by the same factor.
+
+    What reaches this at all is rounding: upvote.PART_CEILING IS config.MAX_SEC
+    now, so a harvested part is cut under the limit rather than trimmed down to
+    it, and config.PART_SEC aims the written ones 14 seconds under. A factor
+    worth hearing means something upstream stopped agreeing with the ceiling,
+    so it says so - asetrate moves pitch with pace, and a tape read by a
+    stranger at 1.25 is not the tape any more.
+    """
+    total = duration(mp3)
+    if total <= max_sec:
+        return mp3, words
+    # Aim a second under, not AT: mp3 frames are padded out to a whole frame,
+    # so a track cut to exactly the limit ffprobes a few hundredths over it.
+    k = total / (max_sec - 1)
+    log.warning("%.1fs is over the %ds ceiling - speeding the track up x%.3f",
+                total, max_sec, k)
+    if k > 1.02:
+        log.warning("x%.3f is more than rounding - this video ships audibly "
+                    "pitched up. Something upstream stopped aiming under the "
+                    "ceiling; see upvote.PART_CEILING and config.PART_SEC.", k)
+    out = mp3.with_name(f"{mp3.stem}_fit.mp3")
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(mp3),
+         "-filter_complex", f"[0:a]anull{_speedup(k, dehiss=0)}[a]",
+         "-map", "[a]", str(out)], check=True)
+    # The dehiss shelf is _speedup's own and belongs to the FIRST shift; a
+    # second one on an already-shelved track takes the voice down with it.
+    got = duration(out)
+    if got > max_sec:
+        log.error("still %.1fs after the trim - the ceiling was not met", got)
+    return out, _scaled(words, k=k)
+
+
 def duration(path) -> float:
     """Container duration via ffprobe. Longer than the last word: mp3s end in silence."""
     out = subprocess.run(
@@ -947,6 +993,26 @@ if __name__ == "__main__":
     assert _w[0]["start"] == 0.0, \
         f"the story must open the track, with nothing in front of it: {_w[0]}"
     print("cover card and story-first track ok")
+
+    # The hard ceiling, checked on a real file because the whole claim is about
+    # what ffprobe reads back afterwards - an arithmetic check would only
+    # re-state the formula. No engine and no network: a tone is a track.
+    _src = OUT_DIR / "_selftest_fit_src.mp3"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+                    "-i", "sine=f=440:d=30", str(_src)], check=True)
+    _in = [{"word": "a", "start": 0.0, "end": 1.0},
+           {"word": "b", "start": 29.0, "end": 30.0}]
+    _fit, _fw = fit(_src, _in, 20)
+    assert duration(_fit) <= 20, f"the ceiling was not met: {duration(_fit):.2f}s"
+    # The timings have to move WITH the audio, or the subtitles run past the
+    # end of a video that no longer has room for them.
+    assert _fw[-1]["end"] <= 20, _fw[-1]
+    assert abs(_fw[-1]["end"] / _in[-1]["end"] - duration(_fit) / 30) < 0.02, \
+        "words and audio were scaled by different factors"
+    # ...and a track already inside the ceiling is handed back untouched, not
+    # re-encoded: every ordinary video takes this path.
+    assert fit(_src, _in, 60) == (_src, _in), "a short track must pass through"
+    print(f"ceiling ok: 30s -> {duration(_fit):.2f}s under a 20s cap")
 
     # full-length narration on purpose: pace on a two-sentence clip is not
     # representative, and this number is what WPM in script.py must match
