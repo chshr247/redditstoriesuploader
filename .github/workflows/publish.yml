@@ -174,6 +174,12 @@ jobs:
       # #133 on 2026-08-25. An unset variable arrives empty, config.py reads
       # empty as absent, and both callers land on the one number in config.py.
       TARGET_SEC: ${{ vars.TARGET_SEC }}
+      # The hashtag the ad programme wants in every description while its
+      # banner is in the video - a variable and not a secret, since it is
+      # published under every upload anyway. Set it together with the AD_URL
+      # secret below and clear it with them; unset arrives empty and nothing
+      # is added. The advertiser's name belongs here and not in the repo.
+      AD_TAG: ${{ vars.AD_TAG }}
       # Pause TikTok for one channel without touching YouTube: set the variable
       # to 0. Unset arrives here as an empty string, which config.py reads as
       # "not set" and therefore as enabled.

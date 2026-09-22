@@ -16,7 +16,7 @@ money still do not carry identical text.
 import random
 import re
 
-from config import OUTPUT_LANG, YT_HASHTAGS
+from config import AD_TAG, OUTPUT_LANG, YT_HASHTAGS
 
 # Kept in the same shape as everything else here: a stem, not a word. Russian
 # inflects every one of these, and "\bсосед" covers сосед, соседка, соседями,
@@ -289,6 +289,13 @@ def pick(title: str, body: str = "", n: int = 5, lang: str = "") -> list[str]:
         if t not in TOPIC_TAGS[lang]]
     random.shuffle(filler)
     out = list(dict.fromkeys(out))
+    # The ad programme's tag, and the only one here that is not about the
+    # story: the video is not paid for without it. Ahead of the filler and
+    # ahead of the n-slice, so it can never be the one that falls off the end -
+    # it costs a filler tag, never a topic. Channel-scoped like the banner
+    # itself: config.AD_TAG is empty wherever the offer does not run.
+    if AD_TAG and lang == OUTPUT_LANG:
+        out = [AD_TAG] + [t for t in out if t != AD_TAG]
     for t in filler:
         if len(out) >= n:
             break
@@ -337,6 +344,13 @@ if __name__ == "__main__":
     # nothing matched is still five usable tags, not an empty line
     blank = pick("Заголовок без темы", "Текст ни о чём", lang="ru")
     assert len(blank) == 5, blank
+    # The ad tag rides on every one of them, in front, where the five-tag slice
+    # cannot drop it - a caption without it is a video the programme does not
+    # pay for. Only on this process's own channel, and only while an offer is
+    # configured at all.
+    if AD_TAG:
+        assert blank[0] == AD_TAG and money[0] == AD_TAG, (blank, money)
+        assert pick("x", lang="en")[0] != AD_TAG or OUTPUT_LANG == "en",             "the ad tag leaked onto the other channel"
     # ...and not one of them is a topic tag nobody earned
     assert not (set(blank) & TOPIC_TAGS["ru"]), blank
     boss = pick("Начальник заставил меня выйти в выходной", "Директор давил.", lang="ru")

@@ -645,6 +645,13 @@ BG_DIR = ROOT / "assets" / "bg"      # background clips, 1080x1920
 # Empty directory means no banner, which is the default - drop a file in and
 # every render from then on carries it. See render._pick_ad().
 AD_DIR = ROOT / "assets" / "ad"
+# The hashtag the ad programme requires under every video carrying its banner -
+# no tag in the description, no payment for the video. Read from the env and
+# not written here for the same reason the advertiser is nowhere in this repo:
+# the offer, its rules and its name live in the private docs. Empty is the off
+# position, and it is the same switch as the AD_URL secret - set both when an
+# offer starts, clear both when it ends. See tags.pick().
+AD_TAG = chan_env("AD_TAG", "")
 # The whoosh the title card arrives on. Here rather than in render.py because
 # BOTH ends need it: render mixes it in, and voice.py holds the narration back
 # by exactly its length so the sound finishes before the first word. Missing
