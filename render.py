@@ -20,8 +20,8 @@ from pathlib import Path
 
 import card
 import safety
-from config import (AD_DIR, BG_DIR, CHANNEL, CHANNELS, MUSIC_DIR, OUT_DIR, SFX,
-                    SUBREDDITS_HORROR, SUBTITLE_FONT)
+from config import (AD_DIR, BG_DIR, CHANNEL, CHANNELS, MAX_SEC, MUSIC_DIR,
+                    OUT_DIR, SFX, SUBREDDITS_HORROR, SUBTITLE_FONT)
 from voice import duration as _dur
 
 W, H = 1080, 1920
@@ -84,22 +84,31 @@ AD_CHANNELS = ("ru",)      # channels that carry one; the rest never do
 AD_HOLD_STILL = 5.0        # how long the story is paused for a banner that is
                            # a still and has no length of its own. A clip is
                            # asked how long it is - see _ad_hold().
-AD_SPEED = 1.3             # how much the banner is sped up, picture and sound
-                           # together. The programme allows 1.4 at the most and
-                           # the self-check holds that ceiling; the point of
-                           # using any of it is the pause, which is this much
-                           # shorter for it - 6.0s of banner becomes 4.6s of
-                           # stopped story.
-AD_SCALE = 1.0             # share of the frame's WIDTH the green screen is
-                           # scaled to. The programme wants the banner over a
-                           # quarter of the screen: at 1.0 it covers 29.6% of
-                           # the frame, and 0.85 - the old offer's setting -
-                           # would put it at 21%. The self-check holds the full
-                           # width, so this is not a free knob any more.
-AD_KEY = "0x00FE00"        # the green it is delivered on, sampled off the file
-AD_SIM = 0.25              # key tolerance. The artwork's own darkest pixel
-                           # sits 0.99 away from that green, so this is about
-                           # the anti-aliased edges and nothing else.
+AD_SPEED = 1.2             # how much the banner is sped up, picture and sound
+                           # together. The programme allows 1.2 at the most
+                           # (1.4 until 2026-09-22) and the self-check holds
+                           # that ceiling; the point of using any of it is the
+                           # pause, which is this much shorter for it - 6.44s
+                           # of banner becomes 5.37s of stopped story.
+AD_SCALE = 1.05            # share of the frame's WIDTH the banner is scaled
+                           # to, and the only thing standing between this
+                           # artwork and the programme's quarter-of-the-screen
+                           # floor. This one is 1282x552 - wider and flatter
+                           # than the last - so at the frame's own width it
+                           # covers 1080x465 = 24.2% of it and misses the floor
+                           # by less than a point. 1.05 lands it at 1134x488,
+                           # of which 1080x488 = 25.4% is on screen; the 27 px
+                           # that go off each side are the transparent margin
+                           # (14 px) and the outer rounding of the card, and
+                           # nothing that reads as content. The self-check
+                           # measures the share off the file rather than
+                           # holding a number, so a squarer banner dropped in
+                           # here fails loudly instead of quietly underpaying.
+AD_MIN_SHARE = 0.25        # that floor, as the programme states it
+AD_KEY = "0x00FE00"        # the green a banner WITHOUT an alpha channel is
+AD_SIM = 0.25              # delivered on, and the key tolerance for it. Unused
+                           # by the current artwork, which carries real
+                           # transparency - see _alpha() and _ad_chain().
 AD_VOL = 1.0               # the banner's own sound, against the narration.
                            # Not a taste setting: no audible voice-over on the
                            # banner means the video is not paid for at all.
@@ -504,11 +513,32 @@ def _pick_ad(channel: str = CHANNEL) -> Path | None:
     Both channels render out of the same assets/ad, so the check has to be here
     - CI fetching the banner for every job is a cached download, not a decision.
     """
-    if channel not in AD_CHANNELS:
-        return None
-    ads = sorted(p for p in AD_DIR.rglob("*")
-                 if p.suffix.lower() in IMAGE_EXT + (".gif", ".mp4", ".mov", ".webm"))
+    ads = _ads(channel)
     return random.choice(ads) if ads else None
+
+
+def _ads(channel: str = CHANNEL) -> list[Path]:
+    """Every banner this channel could draw, in a stable order."""
+    if channel not in AD_CHANNELS:
+        return []
+    return sorted(p for p in AD_DIR.rglob("*")
+                  if p.suffix.lower() in IMAGE_EXT + (".gif", ".mp4", ".mov", ".webm"))
+
+
+def ad_pause(channel: str = CHANNEL) -> float:
+    """Seconds a banner will ADD to the finished video, worst case.
+
+    config.MAX_SEC is about the finished video - "under two minutes" is the
+    whole point of 119 - and main._render() trims the narration to it. The
+    story stops dead for each banner, so the mp3 is not the video's length any
+    more and the trim has to leave room for the pause. The longest candidate,
+    not the one drawn: render() draws its own, and a ceiling that holds only
+    for some of them is not a ceiling.
+
+    Only the single-banner case is covered, which is the only one that can
+    happen while MAX_SEC keeps the finished video inside one minute-and-a-bit.
+    """
+    return max((_ad_hold(a) for a in _ads(channel)), default=0.0)
 
 
 def _ad_hold(ad: Path) -> float:
@@ -608,7 +638,27 @@ def _ad_input(ad: Path) -> list[str]:
         return ["-loop", "1", "-i", str(ad)]
     if ext == ".gif":
         return ["-ignore_loop", "0", "-i", str(ad)]
+    # A VP9 webm keeps its transparency in a second frame beside the picture,
+    # and ffmpeg's OWN vp9 decoder drops it without a word: the file probes
+    # yuv420p, decodes to yuva420p under libvpx-vp9, and the difference is the
+    # banner arriving on a black slab. The decoder has to be named, and it is
+    # named only where there is something to lose.
+    if _alpha(ad):
+        return ["-c:v", "libvpx-vp9", "-i", str(ad)]
     return ["-i", str(ad)]
+
+
+def _alpha(ad: Path) -> bool:
+    """Whether the banner carries its own transparency.
+
+    The matroska flag, not the pixel format: the format the file probes as is
+    the one the default decoder would give, which is exactly the thing being
+    caught here. A banner with alpha is keyed by nobody - see _ad_chain().
+    """
+    return subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream_tags=alpha_mode", "-of", "csv=p=0", str(ad)],
+        capture_output=True, text=True, check=True).stdout.strip() == "1"
 
 
 def _has_audio(p: Path) -> bool:
@@ -638,18 +688,24 @@ def _ad_h(ad: Path) -> int:
     return round(_ad_w() * int(h) * AD_BAND_H / int(w))
 
 
-def _ad_chain(idx: int, times: list[float], src: str = "base") -> str:
+def _ad_chain(idx: int, times: list[float], src: str = "base",
+              ad: Path | None = None) -> str:
     """Filter graph putting the banner over [src] once per `times` -> [v].
 
     One input per appearance, starting at `idx`: the same file opened again is
     cheaper than it looks - six seconds of 1902x1000 - and it is the only way
     each showing can start from its own first frame (see tpad below).
 
-    The banner is delivered on a green screen rather than with an alpha
-    channel, so the chain keys it. colorkey, not chromakey: chromakey compares
-    chroma alone, and the artwork's dark navy is close enough to the green in
-    U/V that it goes with the background - measured, it took the whole banner
-    and left the corners.
+    A banner that carries its own transparency is not keyed at all, and that
+    is what the current one does: the programme refuses a video with any of
+    the green left showing, and the artwork this one is drawn over is green
+    itself. Keying it would be a choice between eating the card and leaving a
+    fringe. `_ad_input()` names the decoder that hands the alpha over.
+
+    A banner delivered on a green screen instead is keyed with colorkey, not
+    chromakey: chromakey compares chroma alone, and the last artwork's dark
+    navy was close enough to the green in U/V to go with the background -
+    measured, it took the whole banner and left the corners.
 
     The crop is the BAND the banner lives in, not the banner: it travels up and
     down inside that band as part of its own animation, and a crop to the
@@ -677,6 +733,7 @@ def _ad_chain(idx: int, times: list[float], src: str = "base") -> str:
     purpose - the banner animates itself in, and a second fade on top reads as
     a stutter.
     """
+    key = "" if ad is not None and _alpha(ad) else f"colorkey={AD_KEY}:{AD_SIM}:0.03,"
     parts, cur = [], src
     for i, at in enumerate(times):
         nxt = "v" if i == len(times) - 1 else f"adon{i}"
@@ -686,7 +743,7 @@ def _ad_chain(idx: int, times: list[float], src: str = "base") -> str:
             # rather than one with the frames of a 60 fps source bunched up.
             f"[{idx + i}:v]setpts=PTS/{AD_SPEED},fps={FPS},"
             f"crop=iw:ih*{AD_BAND_H}:0:ih*{AD_BAND_Y},"
-            f"colorkey={AD_KEY}:{AD_SIM}:0.03,format=rgba,scale={_ad_w()}:-2,"
+            f"{key}format=rgba,scale={_ad_w()}:-2,"
             f"tpad=start_duration={at:.3f}:start_mode=add:color=black@0[ad{i}]",
             # eof_action=pass, not shortest: a banner that runs out must leave
             # the video alone, not cut it off wherever it happened to end
@@ -870,7 +927,7 @@ def render(mp3, words: list[dict], name: str, bg=None,
     ad_in = [a for _ in cuts for a in _ad_input(ad)]
     if ad:
         video += f";{_pause('[' + last + ']', 'held', cuts, hold)}"
-        video += ";" + _ad_chain(ad_idx, ad_at, "held")
+        video += ";" + _ad_chain(ad_idx, ad_at, "held", ad)
 
     # Audio inputs come after every video one, in the order they are appended
     # below. `spoken` is whatever the voice has become so far - the bare mp3, or
@@ -1077,6 +1134,15 @@ if __name__ == "__main__":
             assert abs(_mid - _want) < 1e-6, \
                 f"banner {_i} of {_d}s+{_h}s is at {_mid}, wanted {_want}"
 
+    # ...and the video the pipeline actually makes carries exactly one. This
+    # is the pair main._render() relies on: it trims the narration to what is
+    # left of MAX_SEC once the pause is paid for, and the finished file has to
+    # come out under two minutes - over it, the programme starts counting
+    # minutes and wanting a banner in each one.
+    _room = MAX_SEC - ad_pause("ru")
+    assert len(_ad_times(_room, ad_pause("ru"))) == 1,         f"{_room:.1f}s of narration is not a one-banner video any more"
+    assert _room + ad_pause("ru") <= MAX_SEC, "the pause is not paid for"
+
     # The pause lands between words, never inside one
     _w = [{"word": "a", "start": 0.0, "end": 1.0},
           {"word": "b", "start": 1.2, "end": 2.4},
@@ -1120,17 +1186,34 @@ if __name__ == "__main__":
     # synthetic one when the directory is empty - the two are the same shape on
     # purpose. Nothing about the word cards any more: the story is frozen while
     # the banner is up, so there is nothing underneath to stay clear of.
-    band = _ad_h(_pick_ad("ru") or ad)
+    real = _pick_ad("ru")
+    band = _ad_h(real or ad)
     assert band <= H, f"the banner is {band} tall and the frame is {H}"
     top = (H - band) // 2
-    # ...and it is as big as this artwork can be made. The programme wants a
-    # quarter of the screen; measured on the file, the drawing is full-bleed -
-    # it touches both edges of its green screen and stands 840 of its 1000
-    # rows, 920 at the pop and the logo. At the frame's full width that is
-    # 24.9% of the frame steady and 27.2% at the peak, so the frame's own width
-    # is the ceiling and anything under it drops the banner under the bar
-    # outright. This is what stops AD_SCALE being turned down for taste.
-    assert _ad_w() == W, "the banner is not laid out at the full width of the frame"
+    # ...and it covers the quarter of the screen the programme pays for. The
+    # share is MEASURED - the banner's own height at AD_SCALE, times whatever
+    # of its width lands inside the frame, because what hangs off the side is
+    # not on screen and does not count. Rule and not taste: under a quarter,
+    # the video is worth nothing, so this is what stops AD_SCALE being turned
+    # down and what catches a differently shaped banner dropped into
+    # assets/ad. See AD_SCALE for the numbers this artwork gives.
+    share = min(_ad_w(), W) * band / (W * H)
+    assert share >= AD_MIN_SHARE,         f"the banner covers {share:.1%} of the frame, under the {AD_MIN_SHARE:.0%} floor"
+
+    # The banner's transparency survives the decoder. This is the one failure
+    # that costs the whole payment and shows up in no log: a VP9 webm carries
+    # its alpha in a second frame, ffmpeg's native decoder drops it silently,
+    # and the video ships with the artwork on a black slab - which the
+    # programme reads as an unremoved chroma background and refuses. The first
+    # frame is nearly empty, so its mean alpha is low while there is an alpha
+    # plane at all and exactly opaque once there is not.
+    if real and _alpha(real):
+        _a = subprocess.run(
+            ["ffmpeg", "-v", "error", *_ad_input(real), "-vf",
+             "format=rgba,alphaextract,scale=1:1,format=gray",
+             "-frames:v", "1", "-f", "rawvideo", "-"],
+            capture_output=True, check=True).stdout[0]
+        assert _a < 250, f"{real.name}: the alpha plane was dropped (mean {_a})"
 
     over = OUT_DIR / "_selftest_banner.mp4"
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
@@ -1168,10 +1251,11 @@ if __name__ == "__main__":
     assert "[5:v]" in _two and "[6:v]" in _two, _two
     assert "start_duration=30.000" in _two and "start_duration=90.000" in _two, _two
 
-    # The programme allows 1.4x at the most, and the pause is exactly as long
-    # as the banner turns out to be once sped up - a hold measured on the
-    # unsped clip would leave the story frozen after the banner had finished.
-    assert AD_SPEED <= 1.4, f"the banner runs at {AD_SPEED}x, over the 1.4 limit"
+    # The programme allows 1.2x at the most - it was 1.4 until 2026-09-22 -
+    # and the pause is exactly as long as the banner turns out to be once sped
+    # up; a hold measured on the unsped clip would leave the story frozen
+    # after the banner had finished.
+    assert AD_SPEED <= 1.2, f"the banner runs at {AD_SPEED}x, over the 1.2 limit"
     assert f"setpts=PTS/{AD_SPEED}" in _two, _two
     assert abs(_ad_hold(ad) - _dur(ad) / AD_SPEED) < 1e-6, _ad_hold(ad)
 

@@ -98,8 +98,13 @@ def _render(title: str, body: str, gender: str, key: str, sub: str,
     # picked take keeps being the take - unlike the floor above, which loses
     # both. Every render goes through here, so MAX_SEC is a fact and not a
     # target: render.py ends every mix on the narration (duration=first), so
-    # the mp3's length IS the video's.
-    mp3, words = voice.fit(mp3, words, MAX_SEC)
+    # the mp3's length IS the video's - minus what the banner adds to it. The
+    # story STOPS while a banner plays, so a track trimmed to 119s came out a
+    # 2:04 video, which is two minutes to every platform that rounds and, to
+    # the ad programme, a video that owes a banner in its second minute.
+    # Taking the pause off here keeps the finished file under two minutes and
+    # keeps the banner count at one, in the middle, where the rule wants it.
+    mp3, words = voice.fit(mp3, words, MAX_SEC - render.ad_pause())
     total = voice.duration(mp3)
 
     # keyed on the story, not the file: that is what keeps the two channels'
