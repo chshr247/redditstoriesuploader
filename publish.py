@@ -23,6 +23,7 @@ that holds for both backends - --public is what lifts it, on either.
 
     python publish.py --auth              one-time, gets the refresh token
     python publish.py --next              send the oldest unsent mp4
+    python publish.py --report-10k        report videos after five days above 10k views
     python publish.py --due               may another one go out today?
     python publish.py --enabled           is this channel paused?
     python publish.py --status            what is queued, what already went
@@ -160,6 +161,64 @@ def videos(fields: str = "id,title,create_time,view_count,like_count,"
         cursor = data.get("cursor")
         if not data.get("has_more") or not cursor:
             return out
+
+
+def report_10k() -> None:
+    """Report new matches; baseline only videos already old at activation."""
+    now = time.time()
+    day = 24 * 60 * 60
+    cutoff = now - 5 * day
+    started = os.getenv("TIKTOK_MILESTONES_SINCE")
+    started_at = datetime.datetime.fromisoformat(started).timestamp() if started else now
+    state_path = Path(".github") / f"tiktok-milestones-{CHANNEL}.json"
+    baseline = not state_path.exists()
+    processed = (set(json.loads(state_path.read_text("utf-8")))
+                 if not baseline else set())
+    for v in videos("id,title,create_time,view_count,share_url"):
+        video_id = str(v.get("id") or "")
+        posted = int(v.get("create_time") or 0)
+        views = int(v.get("view_count") or 0)
+        if not video_id or not posted or posted > cutoff or views <= 10_000:
+            continue
+        if video_id in processed:
+            continue
+        if baseline and posted <= started_at - 5 * day:
+            # Suppress the old backlog, not videos still young at activation.
+            processed.add(video_id)
+            continue
+        url = v.get("share_url")
+        if not url:
+            log.warning("%s passed 10k but has no share_url", video_id)
+            continue
+
+        title = (v.get("title") or "Без названия").replace("\n", " ").strip()
+        issue_title = f"TikTok {CHANNEL} >10k: {title[:140]} [{video_id}]"
+        existing = subprocess.run(
+            ["gh", "issue", "list", "--state", "all", "--search",
+             f"in:title {video_id}", "--limit", "100", "--json", "title"],
+            check=True, capture_output=True, text=True, encoding="utf-8")
+        if any(i["title"].endswith(f"[{video_id}]")
+               for i in json.loads(existing.stdout)):
+            log.info("issue already exists for TikTok video %s", video_id)
+            processed.add(video_id)
+            continue
+
+        posted_at = datetime.datetime.fromtimestamp(
+            posted, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        body = (f"[Открыть видео в TikTok](<{url}>)\n\n"
+                f"- Канал: {CHANNEL}\n"
+                f"- Опубликовано: {posted_at}\n"
+                f"- Просмотры: {views:,}\n"
+                f"- ID видео: `{video_id}`\n")
+        created = subprocess.run(
+            ["gh", "issue", "create", "--title", issue_title,
+             "--body", body], check=True, capture_output=True, text=True,
+            encoding="utf-8")
+        print(created.stdout.strip())
+        processed.add(video_id)
+
+    state_path.write_text(json.dumps(sorted(processed), indent=2) + "\n",
+                          encoding="utf-8")
 
 
 # "Часть 1/2 - " and "Часть 1/2. ", the two shapes the part marker has led a
@@ -1911,6 +1970,8 @@ if __name__ == "__main__":
                     v.get("view_count"), v.get("like_count"),
                     v.get("comment_count"), v.get("share_count"),
                     (v.get("title") or "").replace("\n", " ")])
+        elif "--report-10k" in sys.argv:
+            report_10k()
         elif "--due" in sys.argv:
             # exit code is the point: the workflow gate asks before it spends
             reason = due()
@@ -2005,6 +2066,7 @@ if __name__ == "__main__":
                   if pid.startswith(("tau:", "ui:")) else status(pid))
         else:
             print("usage: python publish.py --auth | --whoami | --stats | "
+                  "--report-10k | "
                   "--status | "
                   "--due | --enabled | --next | --stale [hours] | "
                   "--since-last | --handoff | "
