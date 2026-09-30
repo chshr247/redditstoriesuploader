@@ -677,15 +677,22 @@ def _ytdlp(*args: str) -> str:
     on this desk - while `python -m yt_dlp` works wherever the package was
     installed for the interpreter that is running this.
     """
-    try:
-        r = subprocess.run([sys.executable, "-m", "yt_dlp", *_JS, *_LANG,
-                            *_COOKIE_ARGS, *args],
-                           check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as e:
-        if "No module named" in (e.stderr or ""):
-            raise RuntimeError("yt-dlp is not installed - pip install yt-dlp")
-        raise RuntimeError(f"yt-dlp failed: {(e.stderr or '').strip()[-300:]}")
-    return r.stdout
+    for attempt in range(2):
+        try:
+            r = subprocess.run([sys.executable, "-m", "yt_dlp", *_JS, *_LANG,
+                                *_COOKIE_ARGS, *args],
+                               check=True, capture_output=True, text=True)
+            return r.stdout
+        except subprocess.CalledProcessError as e:
+            stderr = (e.stderr or "").strip()
+            if "No module named yt_dlp" in stderr:
+                raise RuntimeError("yt-dlp is not installed - pip install yt-dlp") from e
+            if (attempt == 0 and "generate_once.js" in stderr
+                    and "--version" in stderr and "timed out after" in stderr):
+                log.warning("PO token generator version check timed out; "
+                            "retrying yt-dlp once. stderr:\n%s", stderr)
+                continue
+            raise RuntimeError(f"yt-dlp failed:\n{stderr}") from e
 
 
 def harvest(limit: int = 100) -> int:
@@ -1322,6 +1329,7 @@ def digest(count: int = 1) -> int:
     anything the text can be scored on before it is told.
     """
     stored = 0
+    failed = []
     with _db() as db:
         rows = db.execute(
             "SELECT id, chan, title, views, prio FROM yt WHERE done=0 "
@@ -1337,6 +1345,7 @@ def digest(count: int = 1) -> int:
             segs = _transcribe(_audio(vid))
         except Exception:
             log.exception("%s: could not be read", vid)
+            failed.append(vid)
             continue
         if not segs:
             log.warning("%s: whisper heard nothing", vid)
@@ -1351,6 +1360,7 @@ def digest(count: int = 1) -> int:
             stories = []
         except Exception:
             log.exception("%s: split failed, leaving it for next run", vid)
+            failed.append(vid)
             continue
 
         kept = 0
@@ -1432,6 +1442,11 @@ def digest(count: int = 1) -> int:
         log.info("%s: %d stor%s kept of %d found", vid, kept,
                  "y" if kept == 1 else "ies", len(stories))
         stored += kept
+    log.info("digest: %d/%d videos completed, %d new stories",
+             len(rows) - len(failed), len(rows), stored)
+    if failed:
+        log.warning("digest incomplete: %d video(s) left for next run: %s",
+                    len(failed), ", ".join(failed))
     return stored
 
 
