@@ -3,37 +3,7 @@ name: publish
 # One run makes and publishes exactly one video. Nothing needs to survive
 # between runs except the state file, so out/ is thrown away with the runner.
 on:
-  schedule:
-    # Twice an hour from 10:07 to 02:37 MSK. Fixed slots plus a retry hour
-    # looked cheaper and were not: the gap check is exactly the spacing between
-    # two of the slots, so any drift - a late cron, a manual run, a retry firing
-    # instead of its primary - pushed the next slot under the threshold and lost
-    # it whole. Asking often costs nothing on a public repo and lets the gap
-    # expire whenever it likes; the schedule is decided by youtube.py --due, not
-    # by the shape of this list.
-    #
-    # Not on the hour, and not thirteen times: GitHub queues scheduled runs on
-    # a best-effort basis and silently drops them under load, and :00 is the
-    # single most contended minute there is. Measured on this repo - 5 of 13
-    # firings on 2026-08-01, 1 of 3 by noon on 08-02, every one of them 24 to
-    # 56 minutes late. Off-peak minutes and two ticks an hour buy 34 attempts
-    # for the same nothing, which is what makes a dropped slot survivable.
-    #
-    # The tail runs to 02:37 MSK rather than stopping at midnight so a day that
-    # started late still has somewhere to put its last upload; 23:37 UTC is the
-    # last slot that still lands before the midnight-UTC quota reset. Still not
-    # around the clock: the allowance resets at midnight UTC, 03:00 MSK, and a 24-hour
-    # grid would spend the day's quota on uploads nobody is awake for.
-    #
-    # This grid is the fallback, not the primary trigger. An external pinger
-    # POSTs to the workflow_dispatch API on the same minutes, and a dispatch
-    # does not go through the queue that drops these crons - measured again
-    # 2026-08-02, three slots in a row silently missing. Both firing in the
-    # same minute costs nothing: the gate below refuses in seconds, and the
-    # concurrency group keeps the two off seen.db. The cron stays because the
-    # pinger's token is a fine-grained PAT, those cap at a year, and an expired
-    # one fails by doing nothing at all.
-    - cron: "7,37 7-23 * * *"
+  # The external scheduler starts regular runs through workflow_dispatch.
   workflow_dispatch:
     inputs:
       dry_run:
@@ -224,7 +194,7 @@ jobs:
       REDDITAPIS_KEY: ${{ secrets.REDDITAPIS_KEY }}
       TTS_BACKEND: fish
       SUBTITLE_FONT: Arial Black
-      # Deliberately below the code default of 5. With the grid this is the only
+      # Deliberately below the code default of 5. With external dispatches this is the only
       # thing setting the spacing between uploads, so it is a real knob - and at
       # five hours three uploads span ten of the twelve hours the window has,
       # which means the first one has to land before noon or the third has
@@ -293,8 +263,8 @@ jobs:
           python review.py --check
 
       # Deliberately ahead of ffmpeg, the caches and the dependency install.
-      # Most hourly runs are refused, and a refused run has to cost seconds -
-      # otherwise thirteen runs a day each pay for an apt-get first and find
+      # Most regular runs are refused, and a refused run has to cost seconds -
+      # otherwise empty runs each pay for an apt-get first and find
       # out afterwards that they had nothing to do. Only python-dotenv is
       # needed here: youtube.py --due reads seen.db and the env, nothing else.
       # Two allowances, one run. YouTube is the slow one - 2-3 a day, five hours
@@ -306,8 +276,8 @@ jobs:
         id: gate
         run: |
           pip install -q python-dotenv
-          # force is a manual override only - the cron event leaves the input
-          # empty, so a scheduled run can never take this branch by accident.
+          # force is a manual override only - the external scheduler leaves the
+          # input empty, so a regular run cannot take this branch by accident.
           if [ "${{ inputs.force }}" = "true" ]; then
             echo "::warning::forced - allowance and gap check bypassed"
             yt=true; tt=true
@@ -752,7 +722,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           # The input is for asking by hand at a threshold the repo variable is
           # not set to - "nothing has arrived for an hour and a half, what does
-          # TikTok say". Empty on every scheduled run, so it falls straight
+          # TikTok say". Empty on every regular run, so it falls straight
           # through to the standing value.
           STALE: ${{ inputs.stale_hours || vars.TIKTOK_STALE_HOURS || '6' }}
         run: |
