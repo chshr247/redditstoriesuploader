@@ -2,7 +2,7 @@ name: TikTok milestones
 
 on:
   schedule:
-    - cron: "17 7 * * *"
+    - cron: "30 9 * * *"
   workflow_dispatch:
 
 permissions:
@@ -19,13 +19,12 @@ jobs:
     strategy:
       max-parallel: 1
       matrix:
-        channel: ${{ fromJSON(vars.CHANNELS || '["ru"]') }}
+        channel: ["ru"]
     env:
       OUTPUT_LANG: ${{ matrix.channel }}
       TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
       TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
       TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
-      TIKTOK_REFRESH_TOKEN_EN: ${{ secrets.TIKTOK_REFRESH_TOKEN_EN }}
       # Keep today's young videos eligible even if the first run is delayed.
       TIKTOK_MILESTONES_SINCE: "2026-09-27T18:32:46+00:00"
       GH_TOKEN: ${{ github.token }}
