@@ -360,63 +360,6 @@ out. If the video contains no complete story at all, answer exactly: []
 """ % (_SUBS_BLOCK, PART_MAX // 60, MIN_SEC)
 
 
-PICK_SYSTEM = """\
-You are given the titles of videos from a channel that reads stories aloud,
-one per line as "N. title".
-
-Answer with the numbers of the videos that are COMPLETE STORIES told start to
-finish - the kind where a narrator reads out a post somebody wrote about
-something that happened to them. One story or several, either is fine.
-
-A video where several DIFFERENT people each tell what happened to them counts
-as complete stories and stays, however the title is phrased. That is most of
-what this channel publishes: a question in the title with real accounts under
-it ("What got your most unhinged coworker fired?", "Ex-employees spill their
-industry's secrets") is a video full of stories, and each of those answers is
-a story somebody lived.
-
-Leave out everything else:
-
-  * lists of one-line replies - opinions, preferences, jokes, ratings, where
-    an answer is a sentence and nobody is recounting anything
-  * mysteries, history, facts, true crime, quizzes, news, reactions,
-    explainers - anything whose subject is a topic rather than a person
-  * anything told about the world rather than by the people it happened to
-
-The test is whether somebody's own account is being read out. A title that
-says who did what and how it turned out stays. A title that asks a question
-stays when the answers to it are accounts ("what got your coworker fired")
-and goes when they are opinions ("what is cool at 18 and cringe at 30"). A
-question can also be the first line of one person's own story ("You want me
-online at all hours? No problem, but I am a programmer"), and that one stays.
-
-The channel's own labelling says nothing either way. A rubric in brackets, a
-series name, a "#15" on the end - that is how the channel files its videos,
-not what is in them. Judge the rest of the title and ignore the label.
-
-WHEN YOU ARE NOT SURE, KEEP IT. The two mistakes do not cost the same. A video
-kept wrongly costs one reading of one video, and the story it turns out not to
-have is caught further down the line anyway. A video dropped wrongly is a story
-that nobody will ever see, that nothing downstream can recover, and that no
-one will know was lost. Leave out what is plainly not a reading, and keep
-everything else.
-
-Answer with JSON only, and answer for the videos you are LEAVING OUT - the
-ones you keep need no line. Each one is an object naming it twice, by number
-and by its own first words:
-
-  [{"n": 4, "t": "Топ 10 фактов о"},
-   {"n": 11, "t": "Which Historical Mystery Was"}]
-
-  n - the number on the line.
-  t - the first three or four words of that same line, copied exactly. They
-      are what identifies the video: numbers are easy to lose count of down a
-      long list, and a verdict landing on the wrong line throws away somebody
-      else's story.
-
-An empty list is a valid answer - it means every video here is a reading.
-"""
-
 # The one rule from the writing prompt's SKIP list that a harvested story is
 # still judged against, and the reason it has to be judged here at all:
 # park_heard() never calls a model, so a story that arrives with its own
@@ -562,7 +505,6 @@ PROOF_MAX_REJECT = 0.2
 # One call reads this many titles. A channel's whole harvest fits in two or
 # three of them - the titles are one line each, so this is thousands of tokens
 # where the transcript split is tens of thousands.
-PICK_BATCH = int(os.getenv("UPVOTE_PICK_BATCH", 60))
 
 
 def _db():
@@ -570,9 +512,7 @@ def _db():
     # What the channel has published, as metadata only. `done` is set once the
     # video has been transcribed, so --digest can be run repeatedly and picks
     # up where it stopped instead of paying for the same audio twice.
-    # `keep` is the title filter's verdict: 1 a reading, 0 something else,
-    # NULL not judged yet. NULL is treated as 1 downstream - a judgement that
-    # never happened must not empty the queue.
+    # `keep` is retained for older state snapshots; titles no longer gate digest.
     # `prio` is yt_story's, one step earlier: a video somebody wants read
     # NEXT, ahead of whatever has more views, and digest() hands it down to
     # every story it finds inside so the front of the queue is asked for
@@ -643,9 +583,7 @@ _JS = ["--js-runtimes", "node"] if shutil.which("node") else []
 # wants, and both of these channels upload English translations alongside their
 # own - so an anonymous listing came back "What Simple Job Would Humble Most
 # People In One Shift?" for a video whose narrator says every word of it in
-# Russian. That is what judge() then read: a machine translation of a title
-# whose own wording is most of what the verdict rests on, with the channel's
-# rubric ("Боюсь спросить #21") translated out of it. OUTPUT_LANG is the
+# Russian. Keep the original titles in the catalogue. OUTPUT_LANG is the
 # language this channel publishes in and _channels() has already dropped every
 # handle that records in another, so it is also the language these titles were
 # written in.
@@ -718,106 +656,18 @@ def harvest(limit: int = 100) -> int:
                 db.execute("UPDATE yt SET views=? WHERE id=?",
                            (e.get("view_count") or 0, e["id"]))
             log.info("%s: %d videos listed", handle, len(entries))
-    # Judged here and not at the digest: the point of the filter is to spend
-    # nothing on a video that was never a reading, and by the digest the
-    # download has already happened.
+    # Restore videos rejected by the old title filter.
     judge()
     return added
 
 
-def _parse_pick(raw: str, titles: list[str]) -> tuple:
-    """Model answer -> the video numbers to LEAVE OUT, plus what is wrong.
-
-    Every verdict has to name its video in words as well as in numbers, and
-    the words are what counts. The model judges titles well and loses count
-    badly: the same three titles it got right in a batch of three came back
-    with the good story dropped inside a batch of sixty (2026-09-06). A
-    verdict whose words match no title is discarded rather than applied to
-    whatever line its number points at - discarding it keeps the video, which
-    is the safe way to be wrong here.
-    """
-    m = re.search(r"\[.*\]", raw, re.S)
-    if not m:
-        return set(), ["answer is not a JSON list"]
-    try:
-        items = json.loads(m.group(0))
-    except json.JSONDecodeError as e:
-        return set(), [f"JSON will not parse: {e}"]
-    if not isinstance(items, list):
-        return set(), ["answer is not a JSON list"]
-
-    heads = [[_plain(w) for w in t.split() if _plain(w)] for t in titles]
-    drop, faults = set(), []
-    for x in items:
-        if not isinstance(x, dict):
-            faults.append(f"{x!r} is not an object with n and t")
-            continue
-        want = [_plain(w) for w in str(x.get("t") or "").split() if _plain(w)]
-        if not want:
-            faults.append(f"video {x.get('n')} was named by number only")
-            continue
-        hit = [i for i, h in enumerate(heads) if h[:len(want)] == want]
-        if len(hit) == 1:
-            drop.add(hit[0])
-        else:
-            faults.append(
-                f"{' '.join(want)!r} matches "
-                f"{'no title' if not hit else f'{len(hit)} titles'} in the list")
-    return drop, faults
-
-
-def _pick(titles: list[str]) -> set:
-    """One model call: which of these titles are NOT readings, by index."""
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY is empty - fill in .env")
-    from openai import OpenAI
-    client = OpenAI(api_key=OPENAI_API_KEY, base_url=LLM_BASE_URL or None)
-    return script._ask(
-        client, PICK_SYSTEM,
-        "\n".join(f"{i}. {t}" for i, t in enumerate(titles)),
-        lambda raw: _parse_pick(raw, titles),
-        keep="Keep the verdicts you already had right.",
-        temperature=0)
-
-
 def judge() -> tuple:
-    """Mark which un-judged videos are readings. (kept, dropped).
-
-    Runs at the HARVEST, where a verdict costs a line of text rather than a
-    video. Both of these channels mix formats - a round-up of one-line answers
-    reads like a story channel's video and is not one - and until this existed
-    the only thing that noticed was the sub filter, which sits at the far end
-    of a download, a transcription and a split. One of those cost 24 minutes
-    of audio and three model calls to find out the video was about the Dyatlov
-    Pass (gQvJPc7eFgY, 2026-09-06).
-
-    A batch that cannot be judged is LEFT un-judged rather than dropped: NULL
-    reads as "worth digesting" downstream, so a model that is unreachable
-    slows nothing down and loses nothing.
-    """
-    kept = dropped = 0
+    """Release old title verdicts. Kept for existing --judge callers."""
     with _db() as db:
-        rows = db.execute("SELECT id, title FROM yt WHERE keep IS NULL "
-                          "ORDER BY views DESC").fetchall()
-    if not rows:
-        return 0, 0
-    for i in range(0, len(rows), PICK_BATCH):
-        chunk = rows[i:i + PICK_BATCH]
-        try:
-            out = _pick([t for _, t in chunk])
-        except Exception:
-            log.exception("could not judge %d titles - leaving them unjudged",
-                          len(chunk))
-            continue
-        with _db() as db:
-            db.executemany("UPDATE yt SET keep=? WHERE id=?",
-                           [(0 if k in out else 1, vid)
-                            for k, (vid, _) in enumerate(chunk)])
-        for k in sorted(out):
-            log.info("not a reading: %s", chunk[k][1][:70])
-        kept, dropped = kept + len(chunk) - len(out), dropped + len(out)
-    log.info("titles judged: %d readings, %d something else", kept, dropped)
-    return kept, dropped
+        restored = db.execute("UPDATE yt SET keep=1 WHERE keep IS NULL OR keep=0").rowcount
+    log.info("title filter disabled: %d videos released", restored)
+    return restored, 0
+
 
 
 # Where a source recording waits between the machine that CAN download it and
@@ -1333,7 +1183,7 @@ def digest(count: int = 1) -> int:
     with _db() as db:
         rows = db.execute(
             "SELECT id, chan, title, views, prio FROM yt WHERE done=0 "
-            "AND COALESCE(keep, 1)=1 ORDER BY prio DESC, views DESC LIMIT ?",
+            "ORDER BY prio DESC, views DESC LIMIT ?",
             (count,)).fetchall()
     if not rows:
         log.info("nothing left to digest - run --harvest")
@@ -1909,12 +1759,9 @@ def show() -> None:
     with _db() as db:
         vids, done = db.execute(
             "SELECT COUNT(*), COALESCE(SUM(done),0) FROM yt").fetchone()
-        skip, unjudged = db.execute(
-            "SELECT SUM(keep=0), SUM(keep IS NULL) FROM yt").fetchone()
         left, used = db.execute(
             "SELECT COUNT(*), COALESCE(SUM(used),0) FROM yt_story").fetchone()
-        print(f"videos: {vids} listed, {done} read, {skip or 0} not readings"
-              + (f", {unjudged} unjudged" if unjudged else ""))
+        print(f"videos: {vids} listed, {done} read, {vids - done} waiting")
         print(f"stories: {left} found, {used} used, {left - used} waiting")
         for r in db.execute(
                 "SELECT title, sub, views, ROUND(end-start) FROM yt_story "
@@ -2204,7 +2051,7 @@ if __name__ == "__main__":
     ap.add_argument("--digest", nargs="?", type=int, const=1, default=None,
                     help="transcribe N videos and split them into stories")
     ap.add_argument("--judge", action="store_true",
-                    help="judge the titles harvested but not yet judged")
+                    help="release videos rejected by the old title filter")
     ap.add_argument("--reproof", nargs="?", type=int, const=1, default=None,
                     metavar="N",
                     help="go back over N already-banked stories and put back "
@@ -2272,25 +2119,6 @@ if __name__ == "__main__":
             globals()["STORY_MAX"] = _real_max
         assert _parse_split("[]", segs) == ([], [])
         assert _parse_split("not json at all", segs)[1], "garbage must fault"
-
-        # The title filter names what it drops in words, and the words are
-        # what is believed: a number that has drifted down a long list would
-        # otherwise throw away a story nobody knows was there.
-        _titles = ["Какой секрет разрушит вашу жизнь?",
-                   "Училка-тиран терроризировала школу (Ядерная месть)",
-                   "What Simple Job Would Humble Most People?"]
-        assert _parse_pick('[{"n":0,"t":"Какой секрет разрушит"}]',
-                           _titles) == ({0}, [])
-        assert _parse_pick("[]", _titles) == (set(), [])
-        # the number is wrong and the words are right - the words win
-        assert _parse_pick('[{"n":2,"t":"Какой секрет"}]',
-                           _titles)[0] == {0}
-        # words that match nothing drop nothing, and say so
-        out, f = _parse_pick('[{"n":1,"t":"это другое видео"}]', _titles)
-        assert out == set() and f, (out, f)
-        out, f = _parse_pick('[{"n":1}]', _titles)
-        assert out == set() and any("by number only" in x for x in f), f
-        assert _parse_pick("nothing here", _titles)[1], "garbage must fault"
 
         # ids survive the round trip, which is what mark_used depends on
         assert re.fullmatch(r"yt_(.+)_(\d+)", "yt_dQw4w9WgXcQ_3").group(2) == "3"
@@ -2791,7 +2619,7 @@ if __name__ == "__main__":
         print(f"{reproof(a.reproof)} stories corrected")
     elif a.judge:
         kept, dropped = judge()
-        print(f"{kept} readings, {dropped} something else")
+        print(f"{kept} videos released; title filter disabled")
     elif a.push_state:
         sys.exit(0 if push_state() else 1)
     elif a.show:

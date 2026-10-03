@@ -49,3 +49,5 @@ tau/
 # The knowledge graph the graphify skill builds from this tree. Derived, large,
 # and rebuilt on demand - nothing reads it that cannot make it again.
 graphify-out/
+# Separate private desktop application; never publish through this origin.
+storydesk/

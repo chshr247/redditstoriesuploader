@@ -61,6 +61,24 @@ class DownloadTest(unittest.TestCase):
                     self.assertEqual(dict(db.execute("SELECT id,done FROM yt")),
                                      {"download-failed": 0, "split-failed": 0, "completed": 1})
 
+    def test_title_verdicts_do_not_exclude_videos(self):
+        with patch.object(upvote, "DB_PATH", ":memory:"):
+            with closing(upvote._db()) as connection, patch.object(upvote, "_db", return_value=connection):
+                with connection as db:
+                    db.executemany("INSERT INTO yt(id,chan,title,views,keep) VALUES (?,?,?,?,?)",
+                                   [("rejected", "channel", "industry secrets", 3, 0),
+                                    ("unjudged", "channel", "clients", 2, None),
+                                    ("accepted", "channel", "story", 1, 1)])
+                with patch.object(upvote, "_audio", return_value=Path("audio")) as audio, \
+                        patch.object(upvote, "_transcribe", return_value=[{"text": "story"}]), \
+                        patch.object(upvote, "_split", return_value=[]):
+                    self.assertEqual(upvote.digest(3), 0)
+                self.assertEqual([c.args[0] for c in audio.call_args_list],
+                                 ["rejected", "unjudged", "accepted"])
+                self.assertEqual(upvote.judge(), (2, 0))
+                self.assertEqual(upvote.judge(), (0, 0))
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM yt WHERE keep=1").fetchone()[0], 3)
+
 
 if __name__ == "__main__":
     unittest.main()
